@@ -1,10 +1,18 @@
-use crate::{input, terminal, tui};
+use crate::{input, session::Session, terminal, tui};
+use std::os::fd::RawFd;
 use terminal::{Line, TermEmulator, TermEmulatorState};
 use tui::{AppController, Component, KeyboardEvent, Transition};
 
 pub struct Pane {
     input_component: input::Input,
     term_emulator: terminal::TermEmulator,
+    /// Currently running session (if any)
+    session: Option<Session>,
+    /// Terminal dimensions for spawning processes
+    cols: u16,
+    rows: u16,
+    /// Number of lines already shown from the current session
+    shown_line_count: usize,
 }
 
 impl Pane {
@@ -12,7 +20,89 @@ impl Pane {
         Self {
             input_component: input::Input::new(" $".to_string(), "Type a command...".to_string()),
             term_emulator: TermEmulator::new(),
+            session: None,
+            cols: 80,
+            rows: 24,
+            shown_line_count: 0,
         }
+    }
+
+    /// Poll for output from running session and update state if needed.
+    /// Returns Some(new_state) if there's new output, None otherwise.
+    pub fn poll_session(&mut self, state: &PaneState) -> Option<PaneState> {
+        if let Some(ref mut session) = self.session {
+            match session.poll() {
+                Ok(had_output) => {
+                    let still_running = session.is_running();
+
+                    // Get lines from the emulator
+                    let session_lines = session.get_lines();
+
+                    // Filter to non-empty lines
+                    let non_empty_lines: Vec<_> = session_lines
+                        .into_iter()
+                        .filter(|line| {
+                            if let Line::Text(ref text) = line {
+                                !text.is_empty()
+                            } else {
+                                true
+                            }
+                        })
+                        .collect();
+
+                    // Check if we have new lines to show
+                    let new_line_count = non_empty_lines.len();
+
+                    if new_line_count > self.shown_line_count || !still_running {
+                        let mut new_term_state = state.term_state.clone();
+
+                        // Append only the new lines
+                        for line in non_empty_lines.into_iter().skip(self.shown_line_count) {
+                            new_term_state.lines.push(line);
+                        }
+
+                        self.shown_line_count = new_line_count;
+
+                        // If process exited, clean up
+                        if !still_running {
+                            self.session = None;
+                            self.shown_line_count = 0;
+                        }
+
+                        return Some(PaneState {
+                            input_state: state.input_state.clone(),
+                            term_state: new_term_state,
+                        });
+                    }
+
+                    // No new lines, but check if process exited
+                    if !still_running {
+                        self.session = None;
+                        self.shown_line_count = 0;
+                    }
+
+                    None
+                }
+                Err(_) => {
+                    // Error reading, clean up session
+                    self.session = None;
+                    self.shown_line_count = 0;
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get the raw file descriptor of the running session for polling
+    pub fn session_fd(&self) -> Option<RawFd> {
+        self.session.as_ref().map(|s| s.raw_fd())
+    }
+
+    /// Check if there's a running session
+    pub fn has_session(&self) -> bool {
+        self.session.is_some()
     }
 }
 
@@ -64,11 +154,26 @@ impl tui::AppController<PaneState> for Pane {
                 Transition::Terminate(_) => Transition::Terminate(state.clone()),
                 Transition::Nothing => Transition::Nothing,
                 Transition::Finished(_) => {
-                    // TODO: Execute the command...
+                    let command = state.input_state.value.clone();
                     let mut new_term_state = state.term_state.clone();
-                    new_term_state
-                        .lines
-                        .push(Line::Command(state.input_state.value.clone()));
+                    new_term_state.lines.push(Line::Command(command.clone()));
+
+                    // Skip empty commands
+                    if !command.trim().is_empty() {
+                        // Spawn the command in a PTY session
+                        match Session::spawn(&command, self.cols, self.rows) {
+                            Ok(session) => {
+                                self.session = Some(session);
+                                self.shown_line_count = 0;
+                            }
+                            Err(e) => {
+                                // Show error in terminal
+                                new_term_state
+                                    .lines
+                                    .push(Line::Text(format!("Error: {}", e)));
+                            }
+                        }
+                    }
 
                     let new_input_state = input::InputState::new();
                     Transition::Updated(PaneState {

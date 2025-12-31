@@ -1,5 +1,5 @@
 //! Terminal emulator module
-//! 
+//!
 //! This module provides a virtual terminal that can parse ANSI escape sequences
 //! and maintain a grid of cells representing the terminal display.
 
@@ -67,7 +67,7 @@ mod tests {
     fn test_simple_text() {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"Hello, World!");
-        
+
         let line = emu.grid.get_line_text(0);
         assert!(line.starts_with("Hello, World!"));
     }
@@ -76,7 +76,7 @@ mod tests {
     fn test_newline() {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"Line1\nLine2");
-        
+
         assert!(emu.grid.get_line_text(0).starts_with("Line1"));
         assert!(emu.grid.get_line_text(1).starts_with("Line2"));
     }
@@ -86,7 +86,7 @@ mod tests {
         let mut emu = TerminalEmulator::new(80, 24);
         // Write "Hello", move back 3 columns, overwrite with "XXX"
         emu.process(b"Hello\x1b[3DX");
-        
+
         let line = emu.grid.get_line_text(0);
         assert!(line.starts_with("HeXlo"), "Got: {}", line);
     }
@@ -95,7 +95,7 @@ mod tests {
     fn test_clear_line() {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"Hello World\x1b[5D\x1b[K");
-        
+
         let line = emu.grid.get_line_text(0);
         assert!(line.starts_with("Hello "), "Got: '{}'", line);
         assert!(!line.contains("World"));
@@ -105,10 +105,10 @@ mod tests {
     fn test_color() {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"\x1b[31mRed\x1b[0m");
-        
+
         let cell = emu.grid.get_cell(0, 0);
         assert_eq!(cell.attrs.fg_color, Some(Color::Red));
-        
+
         // After reset, color should be None
         let cell_after = emu.grid.get_cell(3, 0);
         assert_eq!(cell_after.attrs.fg_color, None);
@@ -118,7 +118,7 @@ mod tests {
     fn test_bold() {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"\x1b[1mBold\x1b[0m Normal");
-        
+
         assert!(emu.grid.get_cell(0, 0).attrs.bold);
         assert!(!emu.grid.get_cell(5, 0).attrs.bold);
     }

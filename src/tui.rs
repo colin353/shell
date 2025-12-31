@@ -101,6 +101,10 @@ impl Terminal {
         *self.focus.lock().unwrap() = None;
     }
 
+    pub fn get_focus(&self) -> Option<(usize, usize)> {
+        *self.focus.lock().unwrap()
+    }
+
     pub fn disable_echo(&mut self) {
         Rc::get_mut(&mut self.stdout)
             .unwrap()
@@ -691,6 +695,14 @@ impl KeyboardEventStream {
     }
 }
 
+impl KeyboardEventStream {
+    /// Try to get the next event without blocking.
+    /// Returns None if no event is available.
+    pub fn try_next(&mut self, timeout: std::time::Duration) -> Option<KeyboardEvent> {
+        KeyboardEvent::try_from_stream(&mut self.rx, timeout)
+    }
+}
+
 impl Iterator for KeyboardEventStream {
     type Item = KeyboardEvent;
     fn next(&mut self) -> Option<Self::Item> {
@@ -699,6 +711,75 @@ impl Iterator for KeyboardEventStream {
 }
 
 impl KeyboardEvent {
+    fn try_from_stream(
+        stream: &mut std::sync::mpsc::Receiver<RawEvent>,
+        timeout: std::time::Duration,
+    ) -> Option<Self> {
+        let ch: char = match stream.recv_timeout(timeout) {
+            Ok(RawEvent::Byte(b)) => b.into(),
+            Ok(RawEvent::TerminalResizeEvent) => return Some(KeyboardEvent::TerminalResizeEvent),
+            Ok(RawEvent::Terminate) => return None,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+        };
+
+        // For escape sequences, we need to check for more bytes quickly
+        Some(Self::parse_char(ch, stream))
+    }
+
+    fn parse_char(ch: char, stream: &mut std::sync::mpsc::Receiver<RawEvent>) -> Self {
+        match ch {
+            '\n' | '\x0d' => Self::Enter,
+            '\x03' => Self::CtrlC,
+            '\x04' => Self::CtrlD,
+            '\x7f' => Self::Backspace,
+            '\x01' => Self::CtrlA,
+            '\x05' => Self::CtrlE,
+            '\x06' => Self::CtrlF,
+            '\x10' => Self::CtrlP,
+            '\x14' => Self::CtrlT,
+            '\x17' => Self::CtrlW,
+            '\x18' => Self::CtrlX,
+            '\x1a' => Self::CtrlZ,
+            '\x1b' => {
+                // Control sequence - wait briefly for next byte
+                let ch: char = match stream.recv_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(RawEvent::Byte(b)) => b.into(),
+                    Ok(RawEvent::TerminalResizeEvent) => return KeyboardEvent::TerminalResizeEvent,
+                    Ok(RawEvent::Terminate) => return Self::Escape,
+                    Err(_) => return Self::Escape,
+                };
+
+                match ch {
+                    'f' => Self::AltF,
+                    'b' => Self::AltB,
+                    '[' => {
+                        let ch: char =
+                            match stream.recv_timeout(std::time::Duration::from_millis(50)) {
+                                Ok(RawEvent::Byte(b)) => b.into(),
+                                Ok(RawEvent::TerminalResizeEvent) => {
+                                    return KeyboardEvent::TerminalResizeEvent
+                                }
+                                Ok(RawEvent::Terminate) => return Self::UnknownControl('['),
+                                Err(_) => return Self::UnknownControl('['),
+                            };
+
+                        match ch {
+                            'C' => Self::RightArrow,
+                            'D' => Self::LeftArrow,
+                            'A' => Self::UpArrow,
+                            'B' => Self::DownArrow,
+                            _ => Self::UnknownControl('['),
+                        }
+                    }
+                    _ => Self::Escape,
+                }
+            }
+            x if x.is_ascii_control() => Self::UnknownControl(x),
+            x => Self::Character(x),
+        }
+    }
+
     fn from_stream(stream: &mut std::sync::mpsc::Receiver<RawEvent>) -> Option<Self> {
         let ch: char = match stream.recv().unwrap() {
             RawEvent::Byte(b) => b.into(),

@@ -30,11 +30,20 @@ impl tui::Component<TermEmulatorState> for TermEmulator {
         &mut self,
         t: &mut tui::Terminal,
         state: &TermEmulatorState,
-        _prev_state: Option<&TermEmulatorState>,
+        prev_state: Option<&TermEmulatorState>,
     ) -> usize {
+        if prev_state.is_none() {
+            for y in 0..t.height {
+                t.move_cursor_to(0, y);
+                t.clear_line();
+            }
+        }
+
         let start_line = t.height.saturating_sub(state.lines.len());
+        let mut idx = state.lines.len().saturating_sub(t.height);
         for y in start_line..t.height {
-            let line = state.lines.get(y - start_line).unwrap();
+            let line = state.lines.get(idx).unwrap();
+            idx += 1;
 
             t.move_cursor_to(0, y);
             t.clear_line();

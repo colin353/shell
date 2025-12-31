@@ -40,7 +40,7 @@ impl std::error::Error for PtyError {}
 
 impl PtyProcess {
     /// Spawn a new process with the given command in a PTY
-    /// 
+    ///
     /// # Arguments
     /// * `command` - The command to execute (e.g., "ls -la" or "/bin/bash")
     /// * `cols` - Terminal width in columns
@@ -63,7 +63,8 @@ impl PtyProcess {
                 drop(slave);
 
                 // Set master to non-blocking mode
-                let flags = fcntl(master.as_raw_fd(), FcntlArg::F_GETFL).map_err(PtyError::Fcntl)?;
+                let flags =
+                    fcntl(master.as_raw_fd(), FcntlArg::F_GETFL).map_err(PtyError::Fcntl)?;
                 let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
                 fcntl(master.as_raw_fd(), FcntlArg::F_SETFL(new_flags)).map_err(PtyError::Fcntl)?;
 
@@ -97,6 +98,11 @@ impl PtyProcess {
 
     /// Execute the command in the child process (never returns on success)
     fn exec_command(command: &str) -> ! {
+        // Set TERM so programs know they can use colors and escape sequences
+        std::env::set_var("TERM", "xterm-256color");
+        // Some programs also check COLORTERM
+        std::env::set_var("COLORTERM", "truecolor");
+
         // Use shell to parse the command
         let shell = CString::new("/bin/sh").unwrap();
         let arg0 = CString::new("sh").unwrap();
@@ -140,7 +146,7 @@ impl PtyProcess {
         use nix::sys::wait::{waitpid, WaitPidFlag};
         match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
             Ok(nix::sys::wait::WaitStatus::StillAlive) => true,
-            Ok(_) => false, // Process has exited
+            Ok(_) => false,  // Process has exited
             Err(_) => false, // Error checking, assume dead
         }
     }
@@ -166,8 +172,7 @@ impl PtyProcess {
 
     /// Send a signal to the child process
     pub fn signal(&self, signal: nix::sys::signal::Signal) -> Result<(), PtyError> {
-        nix::sys::signal::kill(self.child_pid, signal)
-            .map_err(|e| PtyError::Fcntl(e))
+        nix::sys::signal::kill(self.child_pid, signal).map_err(|e| PtyError::Fcntl(e))
     }
 }
 
@@ -194,13 +199,13 @@ mod tests {
     #[test]
     fn test_spawn_and_read() {
         let pty = PtyProcess::spawn("echo hello", 80, 24).unwrap();
-        
+
         // Give the process time to run
         thread::sleep(Duration::from_millis(100));
-        
+
         let mut buf = [0u8; 1024];
         let mut output = Vec::new();
-        
+
         // Read until we get something or timeout
         for _ in 0..10 {
             if let Ok(Some(n)) = pty.read(&mut buf) {
@@ -209,9 +214,13 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        
+
         let output_str = String::from_utf8_lossy(&output);
-        assert!(output_str.contains("hello"), "Expected 'hello' in output: {}", output_str);
+        assert!(
+            output_str.contains("hello"),
+            "Expected 'hello' in output: {}",
+            output_str
+        );
     }
 
     #[test]

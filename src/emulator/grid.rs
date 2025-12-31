@@ -91,7 +91,8 @@ impl TerminalGrid {
                     self.scrollback.remove(0);
                 }
                 self.scrollback.push(line);
-                self.cells.push((0..self.cols).map(|_| Cell::empty()).collect());
+                self.cells
+                    .push((0..self.cols).map(|_| Cell::empty()).collect());
             }
         }
     }
@@ -101,7 +102,8 @@ impl TerminalGrid {
         for _ in 0..n {
             if !self.cells.is_empty() {
                 self.cells.pop();
-                self.cells.insert(0, (0..self.cols).map(|_| Cell::empty()).collect());
+                self.cells
+                    .insert(0, (0..self.cols).map(|_| Cell::empty()).collect());
             }
         }
     }
@@ -232,7 +234,10 @@ impl TerminalGrid {
         for _ in 0..n {
             if self.cursor_y < self.rows {
                 self.cells.remove(self.rows - 1);
-                self.cells.insert(self.cursor_y, (0..self.cols).map(|_| Cell::empty()).collect());
+                self.cells.insert(
+                    self.cursor_y,
+                    (0..self.cols).map(|_| Cell::empty()).collect(),
+                );
             }
         }
     }
@@ -242,7 +247,8 @@ impl TerminalGrid {
         for _ in 0..n {
             if self.cursor_y < self.rows {
                 self.cells.remove(self.cursor_y);
-                self.cells.push((0..self.cols).map(|_| Cell::empty()).collect());
+                self.cells
+                    .push((0..self.cols).map(|_| Cell::empty()).collect());
             }
         }
     }
@@ -257,7 +263,7 @@ mod tests {
         let mut grid = TerminalGrid::new(80, 24);
         grid.put_char('H');
         grid.put_char('i');
-        
+
         assert_eq!(grid.get_cell(0, 0).character, 'H');
         assert_eq!(grid.get_cell(1, 0).character, 'i');
         assert_eq!(grid.cursor_x, 2);
@@ -270,7 +276,7 @@ mod tests {
         grid.carriage_return();
         grid.newline();
         grid.put_char('B');
-        
+
         assert_eq!(grid.get_cell(0, 0).character, 'A');
         assert_eq!(grid.get_cell(0, 1).character, 'B');
     }
@@ -288,7 +294,7 @@ mod tests {
         grid.carriage_return();
         grid.newline();
         grid.put_char('4');
-        
+
         // Line '1' should have scrolled off
         assert_eq!(grid.scrollback.len(), 1);
         assert_eq!(grid.get_cell(0, 0).character, '2');
@@ -304,7 +310,7 @@ mod tests {
         }
         grid.cursor_x = 2;
         grid.clear_to_end_of_line();
-        
+
         assert_eq!(grid.get_cell(0, 0).character, 'H');
         assert_eq!(grid.get_cell(1, 0).character, 'e');
         assert_eq!(grid.get_cell(2, 0).character, ' ');
