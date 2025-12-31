@@ -1,8 +1,10 @@
 use std::io::{self, Write};
 use std::process::Command;
 
+mod emulator;
 mod input;
 mod pane;
+mod pty;
 mod terminal;
 mod tui;
 
