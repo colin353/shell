@@ -41,12 +41,10 @@ impl Pane {
                     // Filter to non-empty lines
                     let non_empty_lines: Vec<_> = session_lines
                         .into_iter()
-                        .filter(|line| {
-                            if let Line::Text(ref text) = line {
-                                !text.is_empty()
-                            } else {
-                                true
-                            }
+                        .filter(|line| match line {
+                            Line::Text(ref text) => !text.is_empty(),
+                            Line::Cells(ref cells) => !cells.is_empty(),
+                            Line::Command(_) => true,
                         })
                         .collect();
 

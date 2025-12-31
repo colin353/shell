@@ -207,14 +207,17 @@ impl TerminalGrid {
         self.cells[y].iter().map(|c| c.character).collect()
     }
 
-    /// Convert to Line enum for rendering
+    /// Convert to Line enum for rendering, preserving cell attributes
     pub fn to_lines(&self) -> Vec<Line> {
         self.cells
             .iter()
             .map(|row| {
-                let text: String = row.iter().map(|c| c.character).collect();
-                // Trim trailing spaces for cleaner output
-                Line::Text(text.trim_end().to_string())
+                // Find last non-space character to trim trailing spaces
+                let last_non_space = row.iter().rposition(|c| c.character != ' ');
+                match last_non_space {
+                    Some(idx) => Line::Cells(row[..=idx].to_vec()),
+                    None => Line::Cells(Vec::new()),
+                }
             })
             .collect()
     }

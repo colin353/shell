@@ -257,6 +257,107 @@ impl Terminal {
             has_printed = true;
         }
     }
+
+    /// Print cells with their attributes (colors, bold, etc.)
+    pub fn print_cells(&mut self, cells: &[crate::emulator::Cell]) {
+        use crate::emulator::Color as EmulatorColor;
+
+        for cell in cells {
+            // Apply attributes
+            let attrs = &cell.attrs;
+
+            // Build SGR sequence
+            let mut sgr_parts: Vec<String> = Vec::new();
+
+            if attrs.bold {
+                sgr_parts.push("1".to_string());
+            }
+            if attrs.dim {
+                sgr_parts.push("2".to_string());
+            }
+            if attrs.italic {
+                sgr_parts.push("3".to_string());
+            }
+            if attrs.underline {
+                sgr_parts.push("4".to_string());
+            }
+            if attrs.inverse {
+                sgr_parts.push("7".to_string());
+            }
+            if attrs.hidden {
+                sgr_parts.push("8".to_string());
+            }
+            if attrs.strikethrough {
+                sgr_parts.push("9".to_string());
+            }
+
+            // Foreground color
+            if let Some(ref fg) = attrs.fg_color {
+                match fg {
+                    EmulatorColor::Black => sgr_parts.push("30".to_string()),
+                    EmulatorColor::Red => sgr_parts.push("31".to_string()),
+                    EmulatorColor::Green => sgr_parts.push("32".to_string()),
+                    EmulatorColor::Yellow => sgr_parts.push("33".to_string()),
+                    EmulatorColor::Blue => sgr_parts.push("34".to_string()),
+                    EmulatorColor::Magenta => sgr_parts.push("35".to_string()),
+                    EmulatorColor::Cyan => sgr_parts.push("36".to_string()),
+                    EmulatorColor::White => sgr_parts.push("37".to_string()),
+                    EmulatorColor::BrightBlack => sgr_parts.push("90".to_string()),
+                    EmulatorColor::BrightRed => sgr_parts.push("91".to_string()),
+                    EmulatorColor::BrightGreen => sgr_parts.push("92".to_string()),
+                    EmulatorColor::BrightYellow => sgr_parts.push("93".to_string()),
+                    EmulatorColor::BrightBlue => sgr_parts.push("94".to_string()),
+                    EmulatorColor::BrightMagenta => sgr_parts.push("95".to_string()),
+                    EmulatorColor::BrightCyan => sgr_parts.push("96".to_string()),
+                    EmulatorColor::BrightWhite => sgr_parts.push("97".to_string()),
+                    EmulatorColor::Indexed(idx) => sgr_parts.push(format!("38;5;{}", idx)),
+                    EmulatorColor::Rgb(r, g, b) => {
+                        sgr_parts.push(format!("38;2;{};{};{}", r, g, b))
+                    }
+                }
+            }
+
+            // Background color
+            if let Some(ref bg) = attrs.bg_color {
+                match bg {
+                    EmulatorColor::Black => sgr_parts.push("40".to_string()),
+                    EmulatorColor::Red => sgr_parts.push("41".to_string()),
+                    EmulatorColor::Green => sgr_parts.push("42".to_string()),
+                    EmulatorColor::Yellow => sgr_parts.push("43".to_string()),
+                    EmulatorColor::Blue => sgr_parts.push("44".to_string()),
+                    EmulatorColor::Magenta => sgr_parts.push("45".to_string()),
+                    EmulatorColor::Cyan => sgr_parts.push("46".to_string()),
+                    EmulatorColor::White => sgr_parts.push("47".to_string()),
+                    EmulatorColor::BrightBlack => sgr_parts.push("100".to_string()),
+                    EmulatorColor::BrightRed => sgr_parts.push("101".to_string()),
+                    EmulatorColor::BrightGreen => sgr_parts.push("102".to_string()),
+                    EmulatorColor::BrightYellow => sgr_parts.push("103".to_string()),
+                    EmulatorColor::BrightBlue => sgr_parts.push("104".to_string()),
+                    EmulatorColor::BrightMagenta => sgr_parts.push("105".to_string()),
+                    EmulatorColor::BrightCyan => sgr_parts.push("106".to_string()),
+                    EmulatorColor::BrightWhite => sgr_parts.push("107".to_string()),
+                    EmulatorColor::Indexed(idx) => sgr_parts.push(format!("48;5;{}", idx)),
+                    EmulatorColor::Rgb(r, g, b) => {
+                        sgr_parts.push(format!("48;2;{};{};{}", r, g, b))
+                    }
+                }
+            }
+
+            // Emit SGR sequence if we have any attributes
+            if !sgr_parts.is_empty() {
+                eprint!("\x1b[{}m", sgr_parts.join(";"));
+            }
+
+            // Print the character
+            eprint!("{}", cell.character);
+
+            // Reset after each character (simpler but slightly less efficient)
+            if !sgr_parts.is_empty() {
+                eprint!("\x1b[0m");
+            }
+        }
+        self.pos_x += cells.len();
+    }
 }
 
 pub trait Component<T> {

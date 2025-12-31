@@ -1,3 +1,4 @@
+use crate::emulator::Cell;
 use crate::tui;
 
 pub struct TermEmulator {}
@@ -17,6 +18,8 @@ pub struct TermEmulatorState {
 pub enum Line {
     Command(String),
     Text(String),
+    /// A line with per-cell attributes (colors, bold, etc.)
+    Cells(Vec<Cell>),
 }
 
 impl TermEmulator {
@@ -57,6 +60,10 @@ impl tui::Component<TermEmulatorState> for TermEmulator {
                 }
                 Line::Text(text) => {
                     t.print(text);
+                }
+                Line::Cells(cells) => {
+                    t.print_cells(cells);
+                    t.set_normal();
                 }
             }
         }

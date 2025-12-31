@@ -1,6 +1,6 @@
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::pty::{openpty, OpenptyResult, Winsize};
-use nix::unistd::{dup2, execvp, fork, read, setsid, write, ForkResult, Pid};
+use nix::unistd::{execvp, fork, read, write, ForkResult, Pid};
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
@@ -77,17 +77,19 @@ impl PtyProcess {
                 // Child process - set up the slave as stdin/stdout/stderr
                 drop(master);
 
-                // Create a new session and set the controlling terminal
-                setsid().expect("setsid failed");
+                // Use login_tty which properly:
+                // 1. Creates a new session (setsid)
+                // 2. Sets the controlling terminal (TIOCSCTTY)
+                // 3. Dups the slave to stdin/stdout/stderr
+                // 4. Closes the original slave fd
+                // This is the standard way terminal emulators set up PTYs
+                let slave_fd = slave.as_raw_fd();
+                std::mem::forget(slave); // Don't let OwnedFd close it, login_tty will handle it
 
-                // Set slave as stdin, stdout, stderr
-                dup2(slave.as_raw_fd(), 0).expect("dup2 stdin failed");
-                dup2(slave.as_raw_fd(), 1).expect("dup2 stdout failed");
-                dup2(slave.as_raw_fd(), 2).expect("dup2 stderr failed");
-
-                // Close the original slave fd if it's not stdin/stdout/stderr
-                if slave.as_raw_fd() > 2 {
-                    drop(slave);
+                unsafe {
+                    if libc::login_tty(slave_fd) < 0 {
+                        panic!("login_tty failed: {}", std::io::Error::last_os_error());
+                    }
                 }
 
                 // Parse command and execute
@@ -100,20 +102,75 @@ impl PtyProcess {
     fn exec_command(command: &str) -> ! {
         // Set TERM so programs know they can use colors and escape sequences
         std::env::set_var("TERM", "xterm-256color");
-        // Some programs also check COLORTERM
+        // Some programs also check COLORTERM for true color support detection
         std::env::set_var("COLORTERM", "truecolor");
 
-        // Use shell to parse the command
-        let shell = CString::new("/bin/sh").unwrap();
-        let arg0 = CString::new("sh").unwrap();
-        let arg1 = CString::new("-c").unwrap();
-        let arg2 = CString::new(command).unwrap();
+        // Parse the command into program and arguments
+        // This is a simple parser that handles:
+        // - Whitespace-separated arguments
+        // - Single and double quoted strings
+        let parts = Self::parse_command(command);
 
-        let args = [arg0.as_c_str(), arg1.as_c_str(), arg2.as_c_str()];
+        if parts.is_empty() {
+            eprintln!("Empty command");
+            std::process::exit(1);
+        }
 
-        // This never returns on success
-        execvp(&shell, &args).expect("execvp failed");
+        let program = CString::new(parts[0].as_str()).unwrap();
+        let c_args: Vec<CString> = parts
+            .iter()
+            .map(|s| CString::new(s.as_str()).unwrap())
+            .collect();
+        let c_arg_refs: Vec<&std::ffi::CStr> = c_args.iter().map(|s| s.as_c_str()).collect();
+
+        // Execute the program directly - this makes the program the direct child
+        // of the PTY, so isatty() will work correctly
+        execvp(&program, &c_arg_refs).expect("execvp failed");
         unreachable!()
+    }
+
+    /// Parse a command string into arguments, handling quotes
+    fn parse_command(command: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut current = String::new();
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut escape_next = false;
+
+        for c in command.chars() {
+            if escape_next {
+                current.push(c);
+                escape_next = false;
+                continue;
+            }
+
+            match c {
+                '\\' if !in_single_quote => {
+                    escape_next = true;
+                }
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                }
+                ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                    if !current.is_empty() {
+                        args.push(current.clone());
+                        current.clear();
+                    }
+                }
+                _ => {
+                    current.push(c);
+                }
+            }
+        }
+
+        if !current.is_empty() {
+            args.push(current);
+        }
+
+        args
     }
 
     /// Read available output from the PTY (non-blocking)
