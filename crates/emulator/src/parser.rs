@@ -1,7 +1,7 @@
 //! ANSI escape sequence parser using the vte crate
 
 use super::cell::Color;
-use super::grid::TerminalGrid;
+use super::grid::{CharSet, TerminalGrid};
 use vte::{Params, Parser, Perform};
 
 /// Parser for ANSI escape sequences
@@ -32,12 +32,20 @@ struct GridPerformer<'a> {
 
 impl<'a> Perform for GridPerformer<'a> {
     fn print(&mut self, c: char) {
-        // Translate character if DEC Special Graphics charset is active
-        let c = if self.grid.charset_g0 {
-            translate_dec_special_graphics(c)
+        // Ignore DEL character (0x7F)
+        if c == '\x7f' {
+            return;
+        }
+
+        // Get the active charset (G0 or G1 depending on GL state)
+        let charset = if self.grid.gl_is_g1 {
+            self.grid.charset_g1
         } else {
-            c
+            self.grid.charset_g0
         };
+
+        // Translate character based on active charset
+        let c = translate_charset(c, charset);
         self.grid.put_char(c);
     }
 
@@ -58,6 +66,10 @@ impl<'a> Perform for GridPerformer<'a> {
             }
             // Carriage return
             0x0D => self.grid.carriage_return(),
+            // SO (Shift Out) - Switch to G1 character set
+            0x0E => self.grid.gl_is_g1 = true,
+            // SI (Shift In) - Switch to G0 character set
+            0x0F => self.grid.gl_is_g1 = false,
             _ => {}
         }
     }
@@ -284,20 +296,20 @@ impl<'a> Perform for GridPerformer<'a> {
             return;
         }
 
-        // Handle ESC ( 0 (Switch G0 to DEC Special Graphics)
-        // Handle ESC ( B (Switch G0 to ASCII)
+        // Handle ESC ( X (Designate G0 character set)
         if intermediates == [b'('] {
-            match byte {
-                b'0' => {
-                    self.grid.charset_g0 = true;
-                    return;
-                }
-                b'B' => {
-                    self.grid.charset_g0 = false;
-                    return;
-                }
-                _ => {}
+            if let Some(charset) = byte_to_charset(byte) {
+                self.grid.charset_g0 = charset;
             }
+            return;
+        }
+
+        // Handle ESC ) X (Designate G1 character set)
+        if intermediates == [b')'] {
+            if let Some(charset) = byte_to_charset(byte) {
+                self.grid.charset_g1 = charset;
+            }
+            return;
         }
 
         match byte {
@@ -334,6 +346,37 @@ impl<'a> Perform for GridPerformer<'a> {
             }
             _ => {}
         }
+    }
+}
+
+/// Convert escape sequence byte to CharSet
+fn byte_to_charset(byte: u8) -> Option<CharSet> {
+    match byte {
+        b'B' => Some(CharSet::Ascii),
+        b'A' => Some(CharSet::Uk),
+        b'0' => Some(CharSet::DecSpecialGraphics),
+        b'1' => Some(CharSet::DecAltRomStandard),
+        b'2' => Some(CharSet::DecAltRomSpecial),
+        _ => None,
+    }
+}
+
+/// Translate character based on active charset
+fn translate_charset(c: char, charset: CharSet) -> char {
+    match charset {
+        CharSet::Ascii => c,
+        CharSet::Uk => translate_uk_charset(c),
+        CharSet::DecSpecialGraphics => translate_dec_special_graphics(c),
+        CharSet::DecAltRomStandard => c, // Same as ASCII for printable chars
+        CharSet::DecAltRomSpecial => translate_dec_special_graphics(c),
+    }
+}
+
+/// Translate character for UK charset (# becomes £)
+fn translate_uk_charset(c: char) -> char {
+    match c {
+        '#' => '£',
+        _ => c,
     }
 }
 

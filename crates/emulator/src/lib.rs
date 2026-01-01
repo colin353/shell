@@ -8,7 +8,7 @@ mod grid;
 mod parser;
 
 pub use cell::{Cell, CellAttributes, Color, Line};
-pub use grid::TerminalGrid;
+pub use grid::{CharSet, TerminalGrid};
 pub use parser::AnsiParser;
 
 /// A complete terminal emulator combining parser and grid

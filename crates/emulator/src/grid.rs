@@ -2,6 +2,27 @@
 
 use super::cell::{Cell, CellAttributes, Line};
 
+/// Character set designations
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharSet {
+    /// US ASCII (B)
+    Ascii,
+    /// UK/British (A) - # becomes £
+    Uk,
+    /// DEC Special Graphics and line drawing (0)
+    DecSpecialGraphics,
+    /// DEC Alternate character ROM standard (1)
+    DecAltRomStandard,
+    /// DEC Alternate character ROM special graphics (2)
+    DecAltRomSpecial,
+}
+
+impl Default for CharSet {
+    fn default() -> Self {
+        CharSet::Ascii
+    }
+}
+
 /// The terminal display grid
 pub struct TerminalGrid {
     cells: Vec<Vec<Cell>>,
@@ -36,8 +57,13 @@ pub struct TerminalGrid {
     last_char: Option<char>,
     /// Saved cursor state for DECSC/DECRC
     saved_cursor: Option<SavedCursor>,
-    /// Current character set (false = ASCII/B, true = DEC Special Graphics/0)
-    pub charset_g0: bool,
+    /// Character set designated to G0
+    pub charset_g0: CharSet,
+    /// Character set designated to G1
+    pub charset_g1: CharSet,
+    /// Whether G1 is active (true) or G0 is active (false)
+    /// Controlled by SO (0x0E) and SI (0x0F)
+    pub gl_is_g1: bool,
 }
 
 /// Saved cursor state for DECSC/DECRC
@@ -46,7 +72,9 @@ struct SavedCursor {
     x: usize,
     y: usize,
     attrs: CellAttributes,
-    charset_g0: bool,
+    charset_g0: CharSet,
+    charset_g1: CharSet,
+    gl_is_g1: bool,
 }
 
 /// Saved screen state for alternate screen buffer
@@ -86,7 +114,9 @@ impl TerminalGrid {
             tab_stops,
             last_char: None,
             saved_cursor: None,
-            charset_g0: false,
+            charset_g0: CharSet::Ascii,
+            charset_g1: CharSet::Ascii,
+            gl_is_g1: false,
         }
     }
 
@@ -211,6 +241,8 @@ impl TerminalGrid {
             y: self.cursor_y,
             attrs: self.current_attrs.clone(),
             charset_g0: self.charset_g0,
+            charset_g1: self.charset_g1,
+            gl_is_g1: self.gl_is_g1,
         });
     }
 
@@ -221,6 +253,8 @@ impl TerminalGrid {
             self.cursor_y = saved.y.min(self.rows.saturating_sub(1));
             self.current_attrs = saved.attrs;
             self.charset_g0 = saved.charset_g0;
+            self.charset_g1 = saved.charset_g1;
+            self.gl_is_g1 = saved.gl_is_g1;
             self.pending_wrap = false;
         }
     }

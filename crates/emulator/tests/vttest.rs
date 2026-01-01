@@ -391,3 +391,14 @@ fn test_vttest_character_sets() {
     let emulator = run_vttest_test(80, 33, &[b"3\n"]);
     assert_grid_matches_fixture(&emulator, "vttest.3.0.txt", 33);
 }
+
+#[test]
+fn test_vttest_terminal_reports() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(80, 33, &[b"6\n", b"3\n", b" ", b" ", b" "]);
+    assert_grid_matches_fixture(&emulator, "vttest.6.3.txt", 33);
+}
