@@ -380,3 +380,14 @@ fn test_vttest_screen_features_12() {
     );
     assert_grid_matches_fixture(&emulator, "vttest.2.11.txt", 33);
 }
+
+#[test]
+fn test_vttest_character_sets() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(80, 33, &[b"3\n"]);
+    assert_grid_matches_fixture(&emulator, "vttest.3.0.txt", 33);
+}

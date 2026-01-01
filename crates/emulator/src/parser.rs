@@ -32,6 +32,12 @@ struct GridPerformer<'a> {
 
 impl<'a> Perform for GridPerformer<'a> {
     fn print(&mut self, c: char) {
+        // Translate character if DEC Special Graphics charset is active
+        let c = if self.grid.charset_g0 {
+            translate_dec_special_graphics(c)
+        } else {
+            c
+        };
         self.grid.put_char(c);
     }
 
@@ -258,6 +264,11 @@ impl<'a> Perform for GridPerformer<'a> {
                     _ => {}
                 }
             }
+            // REP - Repeat the preceding graphic character Ps times
+            'b' => {
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.grid.repeat_char(n);
+            }
             _ => {
                 // Unknown CSI sequence
             }
@@ -273,7 +284,31 @@ impl<'a> Perform for GridPerformer<'a> {
             return;
         }
 
+        // Handle ESC ( 0 (Switch G0 to DEC Special Graphics)
+        // Handle ESC ( B (Switch G0 to ASCII)
+        if intermediates == [b'('] {
+            match byte {
+                b'0' => {
+                    self.grid.charset_g0 = true;
+                    return;
+                }
+                b'B' => {
+                    self.grid.charset_g0 = false;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match byte {
+            // DECSC (Save Cursor)
+            b'7' => {
+                self.grid.save_cursor();
+            }
+            // DECRC (Restore Cursor)
+            b'8' => {
+                self.grid.restore_cursor();
+            }
             // RIS (Reset to Initial State)
             b'c' => {
                 self.grid.clear_screen();
@@ -299,6 +334,44 @@ impl<'a> Perform for GridPerformer<'a> {
             }
             _ => {}
         }
+    }
+}
+
+/// Translate ASCII character to DEC Special Graphics character
+fn translate_dec_special_graphics(c: char) -> char {
+    match c {
+        '`' => '◆', // Diamond
+        'a' => '▒', // Checkerboard
+        'b' => '␉', // HT
+        'c' => '␌', // FF
+        'd' => '␍', // CR
+        'e' => '␊', // LF
+        'f' => '°', // Degree
+        'g' => '±', // Plus/Minus
+        'h' => '␤', // NL
+        'i' => '␋', // VT
+        'j' => '┘', // Lower right corner
+        'k' => '┐', // Upper right corner
+        'l' => '┌', // Upper left corner
+        'm' => '└', // Lower left corner
+        'n' => '┼', // Crossing lines
+        'o' => '⎺', // Horizontal line - scan 1
+        'p' => '⎻', // Horizontal line - scan 3
+        'q' => '─', // Horizontal line - scan 5
+        'r' => '⎼', // Horizontal line - scan 7
+        's' => '⎽', // Horizontal line - scan 9
+        't' => '├', // Left T
+        'u' => '┤', // Right T
+        'v' => '┴', // Bottom T
+        'w' => '┬', // Top T
+        'x' => '│', // Vertical bar
+        'y' => '≤', // Less than or equal
+        'z' => '≥', // Greater than or equal
+        '{' => 'π', // Pi
+        '|' => '≠', // Not equal
+        '}' => '£', // UK pound
+        '~' => '·', // Centered dot
+        _ => c,     // Pass through unchanged
     }
 }
 
@@ -466,5 +539,16 @@ mod tests {
 
         // Screen should be cleared
         assert_eq!(grid.get_line_text(0).trim(), "");
+    }
+
+    #[test]
+    fn test_parse_rep_sequence() {
+        let mut parser = AnsiParser::new();
+        let mut grid = TerminalGrid::new(80, 24);
+
+        // Print 'a' then REP 5 times (should give 6 a's total)
+        parser.process(b"a\x1b[5b", &mut grid);
+
+        assert_eq!(grid.get_line_text(0).trim(), "aaaaaa");
     }
 }

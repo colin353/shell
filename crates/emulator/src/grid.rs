@@ -32,6 +32,21 @@ pub struct TerminalGrid {
     pub autowrap: bool,
     /// Tab stops - sorted list of column positions where tabs stop
     tab_stops: Vec<usize>,
+    /// Last printed character for REP sequence
+    last_char: Option<char>,
+    /// Saved cursor state for DECSC/DECRC
+    saved_cursor: Option<SavedCursor>,
+    /// Current character set (false = ASCII/B, true = DEC Special Graphics/0)
+    pub charset_g0: bool,
+}
+
+/// Saved cursor state for DECSC/DECRC
+#[derive(Clone)]
+struct SavedCursor {
+    x: usize,
+    y: usize,
+    attrs: CellAttributes,
+    charset_g0: bool,
 }
 
 /// Saved screen state for alternate screen buffer
@@ -69,6 +84,9 @@ impl TerminalGrid {
             pending_wrap: false,
             autowrap: true,
             tab_stops,
+            last_char: None,
+            saved_cursor: None,
+            charset_g0: false,
         }
     }
 
@@ -93,12 +111,22 @@ impl TerminalGrid {
 
         if self.cursor_y < self.rows && self.cursor_x < self.cols {
             self.cells[self.cursor_y][self.cursor_x] = Cell::new(c, self.current_attrs.clone());
+            self.last_char = Some(c);
             self.cursor_x += 1;
 
             // If cursor is now past the last column, set pending wrap instead of wrapping immediately
             if self.cursor_x >= self.cols {
                 self.cursor_x = self.cols - 1; // Keep cursor at last column
                 self.pending_wrap = true;
+            }
+        }
+    }
+
+    /// Repeat the last printed character n times (REP sequence)
+    pub fn repeat_char(&mut self, n: usize) {
+        if let Some(c) = self.last_char {
+            for _ in 0..n {
+                self.put_char(c);
             }
         }
     }
@@ -174,6 +202,27 @@ impl TerminalGrid {
     /// Clear all tab stops (TBC mode 3)
     pub fn clear_all_tab_stops(&mut self) {
         self.tab_stops.clear();
+    }
+
+    /// Save cursor state (DECSC - ESC 7)
+    pub fn save_cursor(&mut self) {
+        self.saved_cursor = Some(SavedCursor {
+            x: self.cursor_x,
+            y: self.cursor_y,
+            attrs: self.current_attrs.clone(),
+            charset_g0: self.charset_g0,
+        });
+    }
+
+    /// Restore cursor state (DECRC - ESC 8)
+    pub fn restore_cursor(&mut self) {
+        if let Some(saved) = self.saved_cursor.clone() {
+            self.cursor_x = saved.x.min(self.cols.saturating_sub(1));
+            self.cursor_y = saved.y.min(self.rows.saturating_sub(1));
+            self.current_attrs = saved.attrs;
+            self.charset_g0 = saved.charset_g0;
+            self.pending_wrap = false;
+        }
     }
 
     /// Scroll the display up by n lines (full screen)
