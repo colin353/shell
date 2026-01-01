@@ -249,6 +249,15 @@ impl<'a> Perform for GridPerformer<'a> {
                 let bottom = params.get(1).copied().unwrap_or(0) as usize;
                 self.grid.set_scroll_region(top, bottom);
             }
+            // TBC - Tab Clear
+            'g' => {
+                let mode = params.first().copied().unwrap_or(0);
+                match mode {
+                    0 => self.grid.clear_tab_stop(),      // Clear tab stop at current column
+                    3 => self.grid.clear_all_tab_stops(), // Clear all tab stops
+                    _ => {}
+                }
+            }
             _ => {
                 // Unknown CSI sequence
             }
@@ -270,6 +279,10 @@ impl<'a> Perform for GridPerformer<'a> {
                 self.grid.clear_screen();
                 self.grid.move_cursor_to(0, 0);
                 self.grid.current_attrs.reset();
+            }
+            // HTS (Horizontal Tab Set) - set tab stop at current column
+            b'H' => {
+                self.grid.set_tab_stop();
             }
             // IND (Index - move down, scroll if at bottom)
             b'D' => {

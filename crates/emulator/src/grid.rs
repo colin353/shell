@@ -30,6 +30,8 @@ pub struct TerminalGrid {
     pending_wrap: bool,
     /// Auto-wrap mode (DECAWM) - when true, cursor wraps at end of line
     pub autowrap: bool,
+    /// Tab stops - sorted list of column positions where tabs stop
+    tab_stops: Vec<usize>,
 }
 
 /// Saved screen state for alternate screen buffer
@@ -45,6 +47,9 @@ impl TerminalGrid {
         let cells = (0..rows)
             .map(|_| (0..cols).map(|_| Cell::empty()).collect())
             .collect();
+
+        // Initialize default tab stops at every 8 columns
+        let tab_stops: Vec<usize> = (0..cols).filter(|&c| c > 0 && c % 8 == 0).collect();
 
         Self {
             cells,
@@ -63,6 +68,7 @@ impl TerminalGrid {
             origin_mode: false,
             pending_wrap: false,
             autowrap: true,
+            tab_stops,
         }
     }
 
@@ -136,9 +142,34 @@ impl TerminalGrid {
     pub fn tab(&mut self) {
         // Tab clears pending wrap
         self.pending_wrap = false;
-        // Move to next tab stop (every 8 columns)
-        let next_tab = ((self.cursor_x / 8) + 1) * 8;
-        self.cursor_x = next_tab.min(self.cols - 1);
+        // Find the next tab stop after current cursor position
+        let next_tab = self.tab_stops.iter().find(|&&stop| stop > self.cursor_x).copied();
+        match next_tab {
+            Some(stop) => self.cursor_x = stop.min(self.cols - 1),
+            None => self.cursor_x = self.cols - 1, // No more tab stops, move to end
+        }
+    }
+
+    /// Set a tab stop at the current cursor column (HTS - Horizontal Tab Set)
+    pub fn set_tab_stop(&mut self) {
+        let col = self.cursor_x;
+        // Insert in sorted order if not already present
+        if let Err(pos) = self.tab_stops.binary_search(&col) {
+            self.tab_stops.insert(pos, col);
+        }
+    }
+
+    /// Clear the tab stop at the current cursor column (TBC mode 0)
+    pub fn clear_tab_stop(&mut self) {
+        let col = self.cursor_x;
+        if let Ok(pos) = self.tab_stops.binary_search(&col) {
+            self.tab_stops.remove(pos);
+        }
+    }
+
+    /// Clear all tab stops (TBC mode 3)
+    pub fn clear_all_tab_stops(&mut self) {
+        self.tab_stops.clear();
     }
 
     /// Scroll the display up by n lines (full screen)

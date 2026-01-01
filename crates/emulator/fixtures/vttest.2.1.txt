@@ -1,4 +1,4 @@
-	*	*	*	*	*	*	*	*	*	*	*	*	*
+      *     *     *     *     *     *     *     *     *     *     *     *     *
       *     *     *     *     *     *     *     *     *     *     *     *     *
 
 Test of TAB setting/resetting. These two lines
