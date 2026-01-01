@@ -74,10 +74,10 @@ impl<'a> Perform for GridPerformer<'a> {
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let params: Vec<u16> = params.iter().map(|p| p[0]).collect();
-        
+
         // Check for private mode sequences (CSI ? ... h/l)
         let is_private = intermediates.contains(&b'?');
-        
+
         if is_private {
             match action {
                 'h' => {
@@ -113,7 +113,7 @@ impl<'a> Perform for GridPerformer<'a> {
                 _ => return,
             }
         }
-        
+
         match action {
             // Cursor Up
             'A' => {
@@ -264,94 +264,94 @@ impl<'a> GridPerformer<'a> {
         }
 
         let mut iter = params.iter().peekable();
-        
+
         while let Some(&param) = iter.next() {
             match param {
                 // Reset
                 0 => self.grid.current_attrs.reset(),
-                
+
                 // Bold
                 1 => self.grid.current_attrs.bold = true,
-                
+
                 // Dim
                 2 => self.grid.current_attrs.dim = true,
-                
+
                 // Italic
                 3 => self.grid.current_attrs.italic = true,
-                
+
                 // Underline
                 4 => self.grid.current_attrs.underline = true,
-                
+
                 // Inverse
                 7 => self.grid.current_attrs.inverse = true,
-                
+
                 // Hidden
                 8 => self.grid.current_attrs.hidden = true,
-                
+
                 // Strikethrough
                 9 => self.grid.current_attrs.strikethrough = true,
-                
+
                 // Normal intensity
                 22 => {
                     self.grid.current_attrs.bold = false;
                     self.grid.current_attrs.dim = false;
                 }
-                
+
                 // Not italic
                 23 => self.grid.current_attrs.italic = false,
-                
+
                 // Not underlined
                 24 => self.grid.current_attrs.underline = false,
-                
+
                 // Not inverse
                 27 => self.grid.current_attrs.inverse = false,
-                
+
                 // Not hidden
                 28 => self.grid.current_attrs.hidden = false,
-                
+
                 // Not strikethrough
                 29 => self.grid.current_attrs.strikethrough = false,
-                
+
                 // Foreground colors (30-37)
                 30..=37 => {
                     self.grid.current_attrs.fg_color = Color::from_sgr_basic(param);
                 }
-                
+
                 // Extended foreground color
                 38 => {
                     if let Some(color) = self.parse_extended_color(&mut iter) {
                         self.grid.current_attrs.fg_color = Some(color);
                     }
                 }
-                
+
                 // Default foreground
                 39 => self.grid.current_attrs.fg_color = None,
-                
+
                 // Background colors (40-47)
                 40..=47 => {
                     self.grid.current_attrs.bg_color = Color::from_sgr_basic(param);
                 }
-                
+
                 // Extended background color
                 48 => {
                     if let Some(color) = self.parse_extended_color(&mut iter) {
                         self.grid.current_attrs.bg_color = Some(color);
                     }
                 }
-                
+
                 // Default background
                 49 => self.grid.current_attrs.bg_color = None,
-                
+
                 // Bright foreground colors (90-97)
                 90..=97 => {
                     self.grid.current_attrs.fg_color = Color::from_sgr_bright(param);
                 }
-                
+
                 // Bright background colors (100-107)
                 100..=107 => {
                     self.grid.current_attrs.bg_color = Color::from_sgr_bright(param);
                 }
-                
+
                 _ => {}
             }
         }
@@ -363,9 +363,7 @@ impl<'a> GridPerformer<'a> {
     {
         match iter.next() {
             // 256-color palette
-            Some(&5) => {
-                iter.next().map(|&idx| Color::Indexed(idx as u8))
-            }
+            Some(&5) => iter.next().map(|&idx| Color::Indexed(idx as u8)),
             // True color RGB
             Some(&2) => {
                 let r = iter.next().copied().unwrap_or(0) as u8;
@@ -386,9 +384,9 @@ mod tests {
     fn test_parse_simple_text() {
         let mut parser = AnsiParser::new();
         let mut grid = TerminalGrid::new(80, 24);
-        
+
         parser.process(b"Hello", &mut grid);
-        
+
         assert_eq!(grid.get_line_text(0).trim(), "Hello");
     }
 
@@ -396,9 +394,9 @@ mod tests {
     fn test_parse_cursor_movement() {
         let mut parser = AnsiParser::new();
         let mut grid = TerminalGrid::new(80, 24);
-        
+
         parser.process(b"\x1b[5;10H", &mut grid); // Move to row 5, col 10 (1-indexed)
-        
+
         assert_eq!(grid.cursor_y, 4); // 0-indexed
         assert_eq!(grid.cursor_x, 9);
     }
@@ -407,9 +405,9 @@ mod tests {
     fn test_parse_colors() {
         let mut parser = AnsiParser::new();
         let mut grid = TerminalGrid::new(80, 24);
-        
+
         parser.process(b"\x1b[31m", &mut grid); // Red foreground
-        
+
         assert_eq!(grid.current_attrs.fg_color, Some(Color::Red));
     }
 
@@ -417,9 +415,9 @@ mod tests {
     fn test_parse_clear_screen() {
         let mut parser = AnsiParser::new();
         let mut grid = TerminalGrid::new(80, 24);
-        
+
         parser.process(b"Hello\x1b[2J", &mut grid);
-        
+
         // Screen should be cleared
         assert_eq!(grid.get_line_text(0).trim(), "");
     }

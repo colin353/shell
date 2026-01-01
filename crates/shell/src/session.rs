@@ -2,8 +2,8 @@
 //!
 //! A session represents a running command with its terminal emulator state.
 
-use emulator::{Line, TerminalEmulator};
 use crate::pty::{PtyError, PtyProcess};
+use emulator::{Line, TerminalEmulator};
 
 /// A session combining a PTY process with a terminal emulator
 pub struct Session {
