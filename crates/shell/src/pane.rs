@@ -201,19 +201,21 @@ impl tui::AppController<PaneState> for Pane {
         let mut tt = t.derive("term_emulator".to_string());
         if has_session {
             tt.height = t.height;
-            
+
             // When session is active, render directly from session's grid
             if let Some(ref session_arc) = state.session {
                 let session = session_arc.lock().unwrap();
                 let session_lines = session.get_lines();
-                let live_term_state = TermEmulatorState { lines: session_lines };
-                
+                let live_term_state = TermEmulatorState {
+                    lines: session_lines,
+                };
+
                 // Force full redraw for live session content (no prev_state comparison)
                 self.term_emulator.render(&mut tt, &live_term_state, None);
             }
         } else {
             tt.height = t.height - 2;
-            
+
             // Force full redraw if we just transitioned from having a session
             // (need to clear the session output from the screen)
             let term_prev_state = if had_session {
@@ -221,12 +223,9 @@ impl tui::AppController<PaneState> for Pane {
             } else {
                 prev_state.map(|ps| &ps.term_state)
             };
-            
-            self.term_emulator.render(
-                &mut tt,
-                &state.term_state,
-                term_prev_state,
-            );
+
+            self.term_emulator
+                .render(&mut tt, &state.term_state, term_prev_state);
         }
 
         // Only show input when no session is running
