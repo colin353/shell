@@ -312,14 +312,21 @@ impl TerminalGrid {
         self.cursor_y = y.min(self.rows.saturating_sub(1));
     }
 
-    /// Move cursor relative (in absolute screen coordinates, not affected by origin mode)
+    /// Move cursor relative
+    /// When origin mode is enabled, cursor is constrained to scroll region
     pub fn move_cursor_relative(&mut self, dx: isize, dy: isize) {
         self.pending_wrap = false;
         let new_x = (self.cursor_x as isize + dx).max(0) as usize;
         let new_y = (self.cursor_y as isize + dy).max(0) as usize;
-        // Relative movements work in absolute coordinates
+
         self.cursor_x = new_x.min(self.cols.saturating_sub(1));
-        self.cursor_y = new_y.min(self.rows.saturating_sub(1));
+
+        if self.origin_mode {
+            // In origin mode, cursor is constrained to scroll region
+            self.cursor_y = new_y.max(self.scroll_top).min(self.scroll_bottom);
+        } else {
+            self.cursor_y = new_y.min(self.rows.saturating_sub(1));
+        }
     }
 
     /// Clear from cursor to end of line

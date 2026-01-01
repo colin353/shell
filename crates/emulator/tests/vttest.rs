@@ -261,3 +261,122 @@ fn test_vttest_screen_features_5() {
     let emulator = run_vttest_test(80, 33, &[b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n"]);
     assert_grid_matches_fixture(&emulator, "vttest.2.4.txt", 33);
 }
+
+#[test]
+fn test_vttest_screen_features_6() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n"],
+    );
+    assert_grid_matches_fixture(&emulator, "vttest.2.5.txt", 33);
+}
+
+#[test]
+fn test_vttest_screen_features_7() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[
+            b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n",
+        ],
+    );
+    assert_grid_matches_fixture(&emulator, "vttest.2.6.txt", 33);
+}
+
+#[test]
+fn test_vttest_screen_features_8() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[
+            b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n",
+        ],
+    );
+    assert_grid_matches_fixture(&emulator, "vttest.2.7.txt", 33);
+}
+
+#[test]
+fn test_vttest_screen_features_9() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[
+            b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n",
+        ],
+    );
+    assert_grid_matches_fixture(&emulator, "vttest.2.8.txt", 33);
+}
+
+#[test]
+fn test_vttest_screen_features_10() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[
+            b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n",
+        ],
+    );
+    assert_grid_matches_fixture(&emulator, "vttest.2.9.txt", 33);
+}
+
+#[test]
+fn test_vttest_screen_features_11() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[
+            b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n",
+            b"\n",
+        ],
+    );
+    assert_grid_matches_fixture(&emulator, "vttest.2.10.txt", 33);
+}
+
+#[test]
+fn test_vttest_screen_features_12() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[
+            b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n",
+            b"\n", b"\n", b"\n",
+        ],
+    );
+    assert_grid_matches_fixture(&emulator, "vttest.2.11.txt", 33);
+}
