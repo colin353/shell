@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 vte = "0.13"
+
+[dev-dependencies]
+pty = { path = "../pty" }

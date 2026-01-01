@@ -42,6 +42,7 @@ dependencies = [
 name = "emulator"
 version = "0.1.0"
 dependencies = [
+ "pty",
  "vte",
 ]
 
@@ -85,6 +86,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9695f8df41bb4f3d222c95a67532365f569318332d03d5f3f67f37b20e6ebdf0"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pty"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix",
 ]
 
 [[package]]
@@ -147,6 +156,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "nix",
+ "pty",
  "raw_tty",
  "tui",
 ]

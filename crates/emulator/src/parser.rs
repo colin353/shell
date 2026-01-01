@@ -43,9 +43,11 @@ impl<'a> Perform for GridPerformer<'a> {
             0x08 => self.grid.backspace(),
             // Tab
             0x09 => self.grid.tab(),
-            // Newline (LF) - in terminal emulators, LF typically implies CR as well
-            0x0A => {
-                self.grid.carriage_return();
+            // Line Feed (LF), Vertical Tab (VT), Form Feed (FF)
+            // Per VT100 spec: LF only moves cursor down (vertical movement only).
+            // The LNM (Line Feed/New Line Mode) controls whether LF also implies CR,
+            // but by default (LNM reset) it does not.
+            0x0A | 0x0B | 0x0C => {
                 self.grid.newline();
             }
             // Carriage return
@@ -84,6 +86,16 @@ impl<'a> Perform for GridPerformer<'a> {
                     // Set private mode
                     for &param in &params {
                         match param {
+                            // DECCOLM - 132 column mode
+                            // We don't actually resize, but clear the screen as a real terminal would
+                            3 => {
+                                self.grid.clear_screen();
+                                self.grid.move_cursor_to(0, 0);
+                            }
+                            // DECOM - Origin Mode
+                            6 => self.grid.set_origin_mode(true),
+                            // DECAWM - Auto-wrap Mode
+                            7 => self.grid.autowrap = true,
                             // Show cursor
                             25 => self.grid.cursor_visible = true,
                             // Alternate screen buffer (with save/restore)
@@ -102,6 +114,16 @@ impl<'a> Perform for GridPerformer<'a> {
                     // Reset private mode
                     for &param in &params {
                         match param {
+                            // DECCOLM - 80 column mode
+                            // We don't actually resize, but clear the screen as a real terminal would
+                            3 => {
+                                self.grid.clear_screen();
+                                self.grid.move_cursor_to(0, 0);
+                            }
+                            // DECOM - Origin Mode
+                            6 => self.grid.set_origin_mode(false),
+                            // DECAWM - Auto-wrap Mode
+                            7 => self.grid.autowrap = false,
                             // Hide cursor
                             25 => self.grid.cursor_visible = false,
                             1049 | 47 | 1047 => self.grid.leave_alternate_screen(),
@@ -150,7 +172,8 @@ impl<'a> Perform for GridPerformer<'a> {
             // Cursor Horizontal Absolute
             'G' => {
                 let col = params.first().copied().unwrap_or(1).max(1) as usize - 1;
-                self.grid.move_cursor_to(col, self.grid.cursor_y);
+                // Only change X position, Y stays absolute
+                self.grid.move_cursor_to_absolute(col, self.grid.cursor_y);
             }
             // Cursor Position (row;col) - 1-indexed
             'H' | 'f' => {
@@ -220,13 +243,27 @@ impl<'a> Perform for GridPerformer<'a> {
             'u' => {
                 // TODO: restore cursor state
             }
+            // DECSTBM - Set Scrolling Region (top;bottom)
+            'r' => {
+                let top = params.first().copied().unwrap_or(1) as usize;
+                let bottom = params.get(1).copied().unwrap_or(0) as usize;
+                self.grid.set_scroll_region(top, bottom);
+            }
             _ => {
                 // Unknown CSI sequence
             }
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // Handle ESC # 8 (DECALN - Screen Alignment Pattern)
+        if intermediates == [b'#'] && byte == b'8' {
+            // Fill screen with 'E' characters
+            self.grid.fill_screen_with('E');
+            self.grid.move_cursor_to(0, 0);
+            return;
+        }
+
         match byte {
             // RIS (Reset to Initial State)
             b'c' => {
@@ -243,13 +280,9 @@ impl<'a> Perform for GridPerformer<'a> {
                 self.grid.carriage_return();
                 self.grid.newline();
             }
-            // RI (Reverse Index - move up, scroll if at top)
+            // RI (Reverse Index - move up, scroll region down if at top of scroll region)
             b'M' => {
-                if self.grid.cursor_y == 0 {
-                    self.grid.scroll_down(1);
-                } else {
-                    self.grid.move_cursor_relative(0, -1);
-                }
+                self.grid.reverse_index();
             }
             _ => {}
         }

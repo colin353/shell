@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn test_newline() {
         let mut emu = TerminalEmulator::new(80, 24);
-        emu.process(b"Line1\nLine2");
+        emu.process(b"Line1\r\nLine2");
 
         assert!(emu.grid.get_line_text(0).starts_with("Line1"));
         assert!(emu.grid.get_line_text(1).starts_with("Line2"));

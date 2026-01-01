@@ -20,6 +20,16 @@ pub struct TerminalGrid {
     pub in_alternate_screen: bool,
     /// Whether the cursor is visible
     pub cursor_visible: bool,
+    /// Scroll region top margin (0-indexed, inclusive)
+    pub scroll_top: usize,
+    /// Scroll region bottom margin (0-indexed, inclusive)
+    pub scroll_bottom: usize,
+    /// Origin mode (DECOM) - when true, cursor positioning is relative to scroll region
+    pub origin_mode: bool,
+    /// Pending wrap state - when true, next printable character will trigger autowrap
+    pending_wrap: bool,
+    /// Auto-wrap mode (DECAWM) - when true, cursor wraps at end of line
+    pub autowrap: bool,
 }
 
 /// Saved screen state for alternate screen buffer
@@ -48,57 +58,90 @@ impl TerminalGrid {
             saved_screen: None,
             in_alternate_screen: false,
             cursor_visible: true,
+            scroll_top: 0,
+            scroll_bottom: rows - 1,
+            origin_mode: false,
+            pending_wrap: false,
+            autowrap: true,
         }
     }
 
     /// Put a character at the cursor position and advance cursor
     pub fn put_char(&mut self, c: char) {
-        if self.cursor_x >= self.cols {
+        // Handle pending wrap (delayed autowrap) - only if autowrap is enabled
+        if self.pending_wrap && self.autowrap {
             // Wrap to next line
             self.cursor_x = 0;
-            self.cursor_y += 1;
-        }
-
-        if self.cursor_y >= self.rows {
-            self.scroll_up(1);
-            self.cursor_y = self.rows - 1;
+            self.pending_wrap = false;
+            // When wrapping, check if we need to scroll within the scroll region
+            if self.cursor_y == self.scroll_bottom {
+                self.scroll_region_up(1);
+            } else if self.cursor_y < self.rows - 1 {
+                self.cursor_y += 1;
+            }
+        } else if self.pending_wrap && !self.autowrap {
+            // If autowrap is disabled, clear pending wrap and overwrite last char
+            self.pending_wrap = false;
+            // cursor_x is already at cols - 1, so we'll overwrite that position
         }
 
         if self.cursor_y < self.rows && self.cursor_x < self.cols {
             self.cells[self.cursor_y][self.cursor_x] = Cell::new(c, self.current_attrs.clone());
             self.cursor_x += 1;
+
+            // If cursor is now past the last column, set pending wrap instead of wrapping immediately
+            if self.cursor_x >= self.cols {
+                self.cursor_x = self.cols - 1; // Keep cursor at last column
+                self.pending_wrap = true;
+            }
         }
     }
 
     /// Handle newline (move to next line, possibly scroll)
     pub fn newline(&mut self) {
-        self.cursor_y += 1;
-        if self.cursor_y >= self.rows {
-            self.scroll_up(1);
-            self.cursor_y = self.rows - 1;
+        if self.cursor_y == self.scroll_bottom {
+            // At bottom of scroll region, scroll the region up
+            self.scroll_region_up(1);
+        } else if self.cursor_y < self.rows - 1 {
+            self.cursor_y += 1;
         }
     }
 
     /// Handle carriage return (move cursor to beginning of line)
     pub fn carriage_return(&mut self) {
+        self.pending_wrap = false;
         self.cursor_x = 0;
     }
 
     /// Handle backspace
     pub fn backspace(&mut self) {
-        if self.cursor_x > 0 {
+        // Backspace clears pending wrap
+        if self.pending_wrap {
+            self.pending_wrap = false;
+            // When in pending wrap state, the cursor is conceptually at index `cols`.
+            // Backspace should move it to `cols - 1`.
+            // However, our cursor_x is clamped to `cols - 1`.
+            // If we just clear pending_wrap, we are at `cols - 1`.
+            // But some tests (vttest) seem to expect backspace to move to `cols - 2`
+            // effectively unwrapping AND moving left.
+            if self.cursor_x > 0 {
+                self.cursor_x -= 1;
+            }
+        } else if self.cursor_x > 0 {
             self.cursor_x -= 1;
         }
     }
 
     /// Handle tab
     pub fn tab(&mut self) {
+        // Tab clears pending wrap
+        self.pending_wrap = false;
         // Move to next tab stop (every 8 columns)
         let next_tab = ((self.cursor_x / 8) + 1) * 8;
         self.cursor_x = next_tab.min(self.cols - 1);
     }
 
-    /// Scroll the display up by n lines
+    /// Scroll the display up by n lines (full screen)
     pub fn scroll_up(&mut self, n: usize) {
         for _ in 0..n {
             if !self.cells.is_empty() {
@@ -113,7 +156,7 @@ impl TerminalGrid {
         }
     }
 
-    /// Scroll the display down by n lines
+    /// Scroll the display down by n lines (full screen)
     pub fn scroll_down(&mut self, n: usize) {
         for _ in 0..n {
             if !self.cells.is_empty() {
@@ -124,17 +167,124 @@ impl TerminalGrid {
         }
     }
 
+    /// Scroll the scroll region up by n lines
+    pub fn scroll_region_up(&mut self, n: usize) {
+        for _ in 0..n {
+            if self.scroll_top < self.scroll_bottom {
+                // Remove the top line of the scroll region
+                let line = self.cells.remove(self.scroll_top);
+                // Only add to scrollback if scroll region is the full screen
+                if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 {
+                    if self.scrollback.len() >= self.max_scrollback {
+                        self.scrollback.remove(0);
+                    }
+                    self.scrollback.push(line);
+                }
+                // Insert a new empty line at the bottom of the scroll region
+                self.cells.insert(
+                    self.scroll_bottom,
+                    (0..self.cols).map(|_| Cell::empty()).collect(),
+                );
+            }
+        }
+    }
+
+    /// Scroll the scroll region down by n lines
+    pub fn scroll_region_down(&mut self, n: usize) {
+        for _ in 0..n {
+            if self.scroll_top < self.scroll_bottom {
+                // Remove the bottom line of the scroll region
+                self.cells.remove(self.scroll_bottom);
+                // Insert a new empty line at the top of the scroll region
+                self.cells.insert(
+                    self.scroll_top,
+                    (0..self.cols).map(|_| Cell::empty()).collect(),
+                );
+            }
+        }
+    }
+
+    /// Reverse index - move cursor up, scroll region down if at top of scroll region
+    pub fn reverse_index(&mut self) {
+        if self.cursor_y == self.scroll_top {
+            // At top of scroll region, scroll the region down
+            self.scroll_region_down(1);
+        } else if self.cursor_y > 0 {
+            self.cursor_y -= 1;
+        }
+    }
+
+    /// Set the scroll region (DECSTBM)
+    /// top and bottom are 1-indexed as per VT100 spec
+    pub fn set_scroll_region(&mut self, top: usize, bottom: usize) {
+        // Convert to 0-indexed
+        let top = top.saturating_sub(1);
+        let bottom = if bottom == 0 {
+            self.rows - 1
+        } else {
+            (bottom.saturating_sub(1)).min(self.rows - 1)
+        };
+
+        if top < bottom && bottom < self.rows {
+            self.scroll_top = top;
+            self.scroll_bottom = bottom;
+        }
+
+        // DECSTBM also moves cursor to home position
+        // In origin mode, home is top-left of scroll region; otherwise it's (0,0)
+        if self.origin_mode {
+            self.cursor_x = 0;
+            self.cursor_y = self.scroll_top;
+        } else {
+            self.cursor_x = 0;
+            self.cursor_y = 0;
+        }
+    }
+
+    /// Set origin mode (DECOM)
+    pub fn set_origin_mode(&mut self, enabled: bool) {
+        self.origin_mode = enabled;
+        // Setting origin mode moves cursor to home position
+        if enabled {
+            self.cursor_x = 0;
+            self.cursor_y = self.scroll_top;
+        } else {
+            self.cursor_x = 0;
+            self.cursor_y = 0;
+        }
+    }
+
     /// Move cursor to absolute position
+    /// When origin_mode is true, y is relative to the scroll region
     pub fn move_cursor_to(&mut self, x: usize, y: usize) {
+        self.pending_wrap = false;
+        self.cursor_x = x.min(self.cols.saturating_sub(1));
+        if self.origin_mode {
+            // In origin mode, y is relative to scroll region top
+            let absolute_y = self.scroll_top + y;
+            // Cursor is confined to scroll region
+            self.cursor_y = absolute_y.min(self.scroll_bottom);
+        } else {
+            self.cursor_y = y.min(self.rows.saturating_sub(1));
+        }
+    }
+
+    /// Move cursor to absolute position without origin mode translation
+    /// Used for commands that work in absolute screen coordinates
+    pub fn move_cursor_to_absolute(&mut self, x: usize, y: usize) {
+        self.pending_wrap = false;
         self.cursor_x = x.min(self.cols.saturating_sub(1));
         self.cursor_y = y.min(self.rows.saturating_sub(1));
     }
 
-    /// Move cursor relative
+    /// Move cursor relative (in absolute screen coordinates, not affected by origin mode)
     pub fn move_cursor_relative(&mut self, dx: isize, dy: isize) {
+        self.pending_wrap = false;
         let new_x = (self.cursor_x as isize + dx).max(0) as usize;
         let new_y = (self.cursor_y as isize + dy).max(0) as usize;
-        self.move_cursor_to(new_x, new_y);
+        // Relative movements work in absolute coordinates
+        self.cursor_x = new_x.min(self.cols.saturating_sub(1));
+        self.cursor_y = new_y.min(self.rows.saturating_sub(1));
     }
 
     /// Clear from cursor to end of line
@@ -187,6 +337,15 @@ impl TerminalGrid {
         }
     }
 
+    /// Fill entire screen with a character (used by DECALN)
+    pub fn fill_screen_with(&mut self, c: char) {
+        for y in 0..self.rows {
+            for x in 0..self.cols {
+                self.cells[y][x] = Cell::new(c, CellAttributes::default());
+            }
+        }
+    }
+
     /// Resize the grid
     pub fn resize(&mut self, cols: usize, rows: usize) {
         // Adjust rows
@@ -211,6 +370,9 @@ impl TerminalGrid {
         self.rows = rows;
         self.cursor_x = self.cursor_x.min(cols.saturating_sub(1));
         self.cursor_y = self.cursor_y.min(rows.saturating_sub(1));
+        // Reset scroll region to full screen on resize
+        self.scroll_top = 0;
+        self.scroll_bottom = rows - 1;
     }
 
     /// Get a cell at position
@@ -372,5 +534,119 @@ mod tests {
         assert_eq!(grid.get_cell(1, 0).character, 'e');
         assert_eq!(grid.get_cell(2, 0).character, ' ');
         assert_eq!(grid.get_cell(3, 0).character, ' ');
+    }
+
+    #[test]
+    fn test_scroll_region() {
+        let mut grid = TerminalGrid::new(80, 10);
+
+        // Write content on each row
+        for i in 0..10 {
+            grid.move_cursor_to_absolute(0, i);
+            grid.put_char(('0' as u8 + i as u8) as char);
+        }
+
+        // Set scroll region to rows 3-7 (1-indexed) = rows 2-6 (0-indexed)
+        grid.set_scroll_region(3, 7);
+        assert_eq!(grid.scroll_top, 2);
+        assert_eq!(grid.scroll_bottom, 6);
+
+        // Cursor should be at home
+        assert_eq!(grid.cursor_x, 0);
+        assert_eq!(grid.cursor_y, 0);
+
+        // Move cursor to bottom of scroll region
+        grid.move_cursor_to_absolute(0, 6);
+        assert_eq!(grid.cursor_y, 6);
+
+        // Trigger scroll by newline
+        grid.newline();
+
+        // Cursor should still be at row 6 (scroll_bottom)
+        assert_eq!(grid.cursor_y, 6);
+
+        // Row 2 content ('2') should have scrolled out
+        // Row 3 ('3') should now be at row 2
+        assert_eq!(grid.get_cell(0, 2).character, '3');
+        assert_eq!(grid.get_cell(0, 3).character, '4');
+        assert_eq!(grid.get_cell(0, 4).character, '5');
+        assert_eq!(grid.get_cell(0, 5).character, '6');
+        assert_eq!(grid.get_cell(0, 6).character, ' '); // New blank line
+
+        // Content outside scroll region should be unchanged
+        assert_eq!(grid.get_cell(0, 0).character, '0');
+        assert_eq!(grid.get_cell(0, 1).character, '1');
+        assert_eq!(grid.get_cell(0, 7).character, '7');
+        assert_eq!(grid.get_cell(0, 8).character, '8');
+        assert_eq!(grid.get_cell(0, 9).character, '9');
+    }
+
+    #[test]
+    fn test_origin_mode() {
+        let mut grid = TerminalGrid::new(80, 10);
+
+        // Set scroll region to rows 3-7 (1-indexed) = rows 2-6 (0-indexed)
+        grid.set_scroll_region(3, 7);
+
+        // Enable origin mode
+        grid.set_origin_mode(true);
+
+        // Cursor should be at scroll_top
+        assert_eq!(grid.cursor_y, 2);
+
+        // Move to row 1 (origin-relative) should put cursor at scroll_top
+        grid.move_cursor_to(0, 0);
+        assert_eq!(grid.cursor_y, 2);
+
+        // Move to row 5 (origin-relative) should put cursor at scroll_top + 4 = 6
+        grid.move_cursor_to(0, 4);
+        assert_eq!(grid.cursor_y, 6);
+
+        // Move beyond scroll region should clamp to scroll_bottom
+        grid.move_cursor_to(0, 10);
+        assert_eq!(grid.cursor_y, 6);
+    }
+
+    #[test]
+    fn test_autowrap_at_scroll_bottom() {
+        let mut grid = TerminalGrid::new(10, 5);
+
+        // Set scroll region to rows 2-4 (1-indexed) = rows 1-3 (0-indexed)
+        grid.set_scroll_region(2, 4);
+
+        // Write content on each row
+        for i in 0..5 {
+            grid.move_cursor_to_absolute(0, i);
+            grid.put_char(('0' as u8 + i as u8) as char);
+        }
+
+        // Move to bottom of scroll region, last column
+        grid.move_cursor_to_absolute(9, 3);
+
+        // Write char at last column - cursor stays at last column, pending wrap set
+        grid.put_char('A');
+        assert_eq!(grid.cursor_x, 9);
+        assert!(grid.pending_wrap);
+        assert_eq!(grid.cursor_y, 3);
+
+        // Write another char - triggers autowrap + scroll
+        grid.put_char('B');
+
+        // Cursor should be at column 1 (after 'B'), row 3 (scroll_bottom)
+        assert_eq!(grid.cursor_x, 1);
+        assert_eq!(grid.cursor_y, 3);
+
+        // 'B' should be at column 0, row 3
+        assert_eq!(grid.get_cell(0, 3).character, 'B');
+
+        // Content should have scrolled within the region
+        // Row 1 (was '1') should now be '2'
+        assert_eq!(grid.get_cell(0, 1).character, '2');
+        // Row 2 (was '2') should now be '3'
+        assert_eq!(grid.get_cell(0, 2).character, '3');
+
+        // Content outside scroll region should be unchanged
+        assert_eq!(grid.get_cell(0, 0).character, '0');
+        assert_eq!(grid.get_cell(0, 4).character, '4');
     }
 }
