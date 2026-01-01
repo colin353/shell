@@ -253,7 +253,7 @@ impl<'a> Perform for GridPerformer<'a> {
             'g' => {
                 let mode = params.first().copied().unwrap_or(0);
                 match mode {
-                    0 => self.grid.clear_tab_stop(),      // Clear tab stop at current column
+                    0 => self.grid.clear_tab_stop(), // Clear tab stop at current column
                     3 => self.grid.clear_all_tab_stops(), // Clear all tab stops
                     _ => {}
                 }

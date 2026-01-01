@@ -143,7 +143,11 @@ impl TerminalGrid {
         // Tab clears pending wrap
         self.pending_wrap = false;
         // Find the next tab stop after current cursor position
-        let next_tab = self.tab_stops.iter().find(|&&stop| stop > self.cursor_x).copied();
+        let next_tab = self
+            .tab_stops
+            .iter()
+            .find(|&&stop| stop > self.cursor_x)
+            .copied();
         match next_tab {
             Some(stop) => self.cursor_x = stop.min(self.cols - 1),
             None => self.cursor_x = self.cols - 1, // No more tab stops, move to end
