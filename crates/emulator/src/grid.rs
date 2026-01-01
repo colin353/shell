@@ -1,7 +1,6 @@
 //! Terminal grid - the 2D character buffer
 
-use super::cell::{Cell, CellAttributes};
-use crate::terminal::Line;
+use super::cell::{Cell, CellAttributes, Line};
 
 /// The terminal display grid
 pub struct TerminalGrid {

@@ -1,12 +1,10 @@
 use std::time::Duration;
 
-mod emulator;
 mod input;
 mod pane;
 mod pty;
 mod session;
 mod terminal;
-mod tui;
 
 use raw_tty::GuardMode;
 use tui::{AppController, KeyboardEvent, Transition};

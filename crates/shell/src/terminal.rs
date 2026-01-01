@@ -1,5 +1,6 @@
-use crate::emulator::Cell;
-use crate::tui;
+use emulator::Cell;
+
+pub use emulator::Line;
 
 pub struct TermEmulator {}
 
@@ -12,14 +13,6 @@ impl TermEmulatorState {
 #[derive(Clone, PartialEq)]
 pub struct TermEmulatorState {
     pub lines: Vec<Line>,
-}
-
-#[derive(Clone, PartialEq)]
-pub enum Line {
-    Command(String),
-    Text(String),
-    /// A line with per-cell attributes (colors, bold, etc.)
-    Cells(Vec<Cell>),
 }
 
 impl TermEmulator {

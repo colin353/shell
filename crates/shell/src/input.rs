@@ -1,5 +1,4 @@
-use crate::tui;
-use crate::tui::{KeyboardEvent, Transition};
+use tui::{KeyboardEvent, Transition};
 
 pub struct Input {
     prompt: String,

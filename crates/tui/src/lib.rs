@@ -259,8 +259,8 @@ impl Terminal {
     }
 
     /// Print cells with their attributes (colors, bold, etc.)
-    pub fn print_cells(&mut self, cells: &[crate::emulator::Cell]) {
-        use crate::emulator::Color as EmulatorColor;
+    pub fn print_cells(&mut self, cells: &[emulator::Cell]) {
+        use emulator::Color as EmulatorColor;
 
         for cell in cells {
             // Apply attributes

@@ -7,11 +7,9 @@ mod cell;
 mod grid;
 mod parser;
 
-pub use cell::{Cell, CellAttributes, Color};
+pub use cell::{Cell, CellAttributes, Color, Line};
 pub use grid::TerminalGrid;
 pub use parser::AnsiParser;
-
-use crate::terminal::Line;
 
 /// A complete terminal emulator combining parser and grid
 pub struct TerminalEmulator {

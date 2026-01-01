@@ -113,3 +113,12 @@ impl Default for Cell {
         Self::empty()
     }
 }
+
+/// A line in the terminal display
+#[derive(Clone, PartialEq)]
+pub enum Line {
+    Command(String),
+    Text(String),
+    /// A line with per-cell attributes (colors, bold, etc.)
+    Cells(Vec<Cell>),
+}

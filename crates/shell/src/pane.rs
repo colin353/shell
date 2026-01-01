@@ -1,4 +1,4 @@
-use crate::{input, session::Session, terminal, tui};
+use crate::{input, session::Session, terminal};
 use std::sync::{Arc, Mutex};
 use terminal::{Line, TermEmulator, TermEmulatorState};
 use tui::{AppController, Component, KeyboardEvent, Transition};
