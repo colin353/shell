@@ -30,7 +30,7 @@ fn run_vttest_test_debug(cols: u16, rows: u16, inputs: &[&[u8]], debug: bool) ->
     let mut emulator = TerminalEmulator::new(cols as usize, rows as usize);
     let mut buf = [0u8; 8192];
 
-    // Helper to drain all available PTY output
+    // Helper to drain all available PTY output and send responses back
     let drain_pty =
         |pty: &PtyProcess, emulator: &mut TerminalEmulator, buf: &mut [u8], debug: bool| loop {
             match pty.read(buf) {
@@ -50,6 +50,14 @@ fn run_vttest_test_debug(cols: u16, rows: u16, inputs: &[&[u8]], debug: bool) ->
                         eprintln!();
                     }
                     emulator.process(&buf[..n]);
+
+                    // Send any responses back to the PTY (e.g., DSR responses)
+                    for response in emulator.drain_responses() {
+                        if debug {
+                            eprintln!("=== Sending response: {:?} ===", response);
+                        }
+                        let _ = pty.write(&response);
+                    }
                 }
                 _ => break,
             }
@@ -399,6 +407,9 @@ fn test_vttest_terminal_reports() {
         return;
     }
 
-    let emulator = run_vttest_test(80, 33, &[b"6\n", b"3\n", b" ", b" ", b" "]);
+    // DSR tests need more time because they involve multiple query/response exchanges
+    // Empty slices add extra wait time without sending characters that could
+    // interfere with vttest reading the DSR responses
+    let emulator = run_vttest_test(80, 33, &[b"6\n", b"3\n", b"", b"", b""]);
     assert_grid_matches_fixture(&emulator, "vttest.6.3.txt", 33);
 }

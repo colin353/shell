@@ -64,6 +64,8 @@ pub struct TerminalGrid {
     /// Whether G1 is active (true) or G0 is active (false)
     /// Controlled by SO (0x0E) and SI (0x0F)
     pub gl_is_g1: bool,
+    /// Queued responses to be sent back to the PTY (e.g., for DSR queries)
+    responses: Vec<Vec<u8>>,
 }
 
 /// Saved cursor state for DECSC/DECRC
@@ -117,6 +119,7 @@ impl TerminalGrid {
             charset_g0: CharSet::Ascii,
             charset_g1: CharSet::Ascii,
             gl_is_g1: false,
+            responses: Vec::new(),
         }
     }
 
@@ -469,6 +472,16 @@ impl TerminalGrid {
                 self.cells[y][x] = Cell::new(c, CellAttributes::default());
             }
         }
+    }
+
+    /// Queue a response to be sent back to the PTY
+    pub fn queue_response(&mut self, response: Vec<u8>) {
+        self.responses.push(response);
+    }
+
+    /// Drain all queued responses
+    pub fn drain_responses(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.responses)
     }
 
     /// Resize the grid

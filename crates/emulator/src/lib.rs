@@ -55,6 +55,11 @@ impl TerminalEmulator {
     pub fn cursor_position(&self) -> (usize, usize) {
         (self.grid.cursor_x, self.grid.cursor_y)
     }
+
+    /// Drain queued responses (for DSR and other terminal queries)
+    pub fn drain_responses(&mut self) -> Vec<Vec<u8>> {
+        self.grid.drain_responses()
+    }
 }
 
 #[cfg(test)]

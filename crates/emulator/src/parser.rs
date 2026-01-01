@@ -281,6 +281,31 @@ impl<'a> Perform for GridPerformer<'a> {
                 let n = params.first().copied().unwrap_or(1).max(1) as usize;
                 self.grid.repeat_char(n);
             }
+            // DSR - Device Status Report
+            'n' => {
+                let mode = params.first().copied().unwrap_or(0);
+                match mode {
+                    // DSR 5: Status report - respond with "terminal OK"
+                    5 => {
+                        // Response: CSI 0 n (means "Terminal OK")
+                        self.grid.queue_response(b"\x1b[0n".to_vec());
+                    }
+                    // DSR 6: Cursor position report - respond with cursor position
+                    6 => {
+                        // Response: CSI row ; col R (1-indexed)
+                        // When origin mode is active, report position relative to scroll region
+                        let row = if self.grid.origin_mode {
+                            self.grid.cursor_y - self.grid.scroll_top + 1
+                        } else {
+                            self.grid.cursor_y + 1
+                        };
+                        let col = self.grid.cursor_x + 1;
+                        let response = format!("\x1b[{};{}R", row, col);
+                        self.grid.queue_response(response.into_bytes());
+                    }
+                    _ => {}
+                }
+            }
             _ => {
                 // Unknown CSI sequence
             }
