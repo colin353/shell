@@ -740,6 +740,42 @@ pub enum KeyboardEvent {
     TerminalResizeEvent,
 }
 
+impl KeyboardEvent {
+    /// Convert the keyboard event back to raw bytes for forwarding to a PTY
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            KeyboardEvent::Character(c) => {
+                let mut buf = [0u8; 4];
+                c.encode_utf8(&mut buf).as_bytes().to_vec()
+            }
+            KeyboardEvent::Enter => vec![b'\r'],
+            KeyboardEvent::CtrlC => vec![0x03],
+            KeyboardEvent::CtrlD => vec![0x04],
+            KeyboardEvent::Backspace => vec![0x7f],
+            KeyboardEvent::CtrlA => vec![0x01],
+            KeyboardEvent::CtrlE => vec![0x05],
+            KeyboardEvent::CtrlF => vec![0x06],
+            KeyboardEvent::CtrlP => vec![0x10],
+            KeyboardEvent::CtrlT => vec![0x14],
+            KeyboardEvent::CtrlW => vec![0x17],
+            KeyboardEvent::CtrlX => vec![0x18],
+            KeyboardEvent::CtrlZ => vec![0x1a],
+            KeyboardEvent::Escape => vec![0x1b],
+            KeyboardEvent::AltF => vec![0x1b, b'f'],
+            KeyboardEvent::AltB => vec![0x1b, b'b'],
+            KeyboardEvent::UpArrow => vec![0x1b, b'[', b'A'],
+            KeyboardEvent::DownArrow => vec![0x1b, b'[', b'B'],
+            KeyboardEvent::RightArrow => vec![0x1b, b'[', b'C'],
+            KeyboardEvent::LeftArrow => vec![0x1b, b'[', b'D'],
+            KeyboardEvent::UnknownControl(c) => {
+                let mut buf = [0u8; 4];
+                c.encode_utf8(&mut buf).as_bytes().to_vec()
+            }
+            KeyboardEvent::TerminalResizeEvent => vec![], // No bytes for this
+        }
+    }
+}
+
 enum RawEvent {
     Byte(u8),
     TerminalResizeEvent,

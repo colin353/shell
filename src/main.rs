@@ -9,11 +9,11 @@ mod terminal;
 mod tui;
 
 use raw_tty::GuardMode;
-use tui::{AppController, Transition};
+use tui::{AppController, KeyboardEvent, Transition};
 
 fn main() {
     let mut pane = pane::Pane::new();
-    let term = tui::Terminal::new();
+    let mut terminal = tui::Terminal::new();
 
     // We need to handle events differently now - we'll poll both keyboard and PTY
     let tty = std::fs::OpenOptions::new()
@@ -24,9 +24,8 @@ fn main() {
     let mut tty_input = tty.try_clone().unwrap().guard_mode().unwrap();
     tty_input.set_raw_mode().unwrap();
 
-    // Create the app with initial state
-    let mut state = pane.initial_state();
-    let mut terminal = term;
+    // Create the app with initial state using actual terminal dimensions
+    let mut state = pane.initial_state_with_size(terminal.width as u16, terminal.height as u16);
 
     // Initial render
     tui::AppController::render(&mut pane, &mut terminal, &state, None);
@@ -37,7 +36,7 @@ fn main() {
 
     loop {
         // Determine timeout based on whether we have a running session
-        let timeout = if pane.has_session() {
+        let timeout = if pane.has_session(&state) {
             Duration::from_millis(10)
         } else {
             Duration::from_millis(100)
@@ -45,6 +44,21 @@ fn main() {
 
         // Check for keyboard input with timeout
         if let Some(event) = keyboard_stream.try_next(timeout) {
+            // Handle resize events specially
+            if event == KeyboardEvent::TerminalResizeEvent {
+                // Update terminal dimensions
+                terminal.determine_terminal_size();
+
+                // Resize the pane and propagate to any running session
+                state = pane.resize(&state, terminal.width as u16, terminal.height as u16);
+
+                // Force full redraw by passing None as previous state
+                terminal.clear_screen();
+                tui::AppController::render(&mut pane, &mut terminal, &state, None);
+                update_cursor(&mut terminal);
+                continue;
+            }
+
             let transition = tui::AppController::transition(&mut pane, &state, event);
             match handle_transition(&mut pane, &mut terminal, &mut state, transition) {
                 Some(true) => return, // Terminate
@@ -53,7 +67,7 @@ fn main() {
         }
 
         // Poll session for output
-        if pane.has_session() {
+        if pane.has_session(&state) {
             if let Some(new_state) = pane.poll_session(&state) {
                 let prev_state = state.clone();
                 state = new_state;

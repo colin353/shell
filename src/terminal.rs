@@ -42,11 +42,23 @@ impl tui::Component<TermEmulatorState> for TermEmulator {
             }
         }
 
-        let start_line = t.height.saturating_sub(state.lines.len());
-        let mut idx = state.lines.len().saturating_sub(t.height);
-        for y in start_line..t.height {
-            let line = state.lines.get(idx).unwrap();
-            idx += 1;
+        // If we have exactly the terminal height lines, render from the top
+        // (this is the case for live session grids that fill the screen)
+        // If we have fewer lines, bottom-align them (for command history)
+        // If we have more lines, show the last `t.height` lines
+        let (start_y, start_idx) = if state.lines.len() == t.height {
+            // Full grid - render from top (live session)
+            (0, 0)
+        } else if state.lines.len() < t.height {
+            // Fewer lines than height - bottom-align (history view)
+            (t.height - state.lines.len(), 0)
+        } else {
+            // More lines than height - show last t.height lines
+            (0, state.lines.len() - t.height)
+        };
+
+        for (y, idx) in (start_y..t.height).zip(start_idx..state.lines.len()) {
+            let line = &state.lines[idx];
 
             t.move_cursor_to(0, y);
             t.clear_line();

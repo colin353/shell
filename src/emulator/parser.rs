@@ -72,8 +72,47 @@ impl<'a> Perform for GridPerformer<'a> {
         // For now, we'll ignore these
     }
 
-    fn csi_dispatch(&mut self, params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let params: Vec<u16> = params.iter().map(|p| p[0]).collect();
+        
+        // Check for private mode sequences (CSI ? ... h/l)
+        let is_private = intermediates.contains(&b'?');
+        
+        if is_private {
+            match action {
+                'h' => {
+                    // Set private mode
+                    for &param in &params {
+                        match param {
+                            // Show cursor
+                            25 => self.grid.cursor_visible = true,
+                            // Alternate screen buffer (with save/restore)
+                            1049 => self.grid.enter_alternate_screen(),
+                            // Other private modes we might want to handle:
+                            // 1 - Application cursor keys
+                            // 47 - Alternate screen buffer (without save/restore)
+                            // 1047 - Alternate screen buffer
+                            47 | 1047 => self.grid.enter_alternate_screen(),
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+                'l' => {
+                    // Reset private mode
+                    for &param in &params {
+                        match param {
+                            // Hide cursor
+                            25 => self.grid.cursor_visible = false,
+                            1049 | 47 | 1047 => self.grid.leave_alternate_screen(),
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
         
         match action {
             // Cursor Up

@@ -15,6 +15,20 @@ pub struct TerminalGrid {
     pub scrollback: Vec<Vec<Cell>>,
     /// Maximum scrollback lines to keep
     pub max_scrollback: usize,
+    /// Saved main screen buffer (for alternate screen support)
+    saved_screen: Option<SavedScreen>,
+    /// Whether we're currently in alternate screen mode
+    pub in_alternate_screen: bool,
+    /// Whether the cursor is visible
+    pub cursor_visible: bool,
+}
+
+/// Saved screen state for alternate screen buffer
+struct SavedScreen {
+    cells: Vec<Vec<Cell>>,
+    cursor_x: usize,
+    cursor_y: usize,
+    scrollback: Vec<Vec<Cell>>,
 }
 
 impl TerminalGrid {
@@ -32,6 +46,9 @@ impl TerminalGrid {
             current_attrs: CellAttributes::default(),
             scrollback: Vec::new(),
             max_scrollback: 1000,
+            saved_screen: None,
+            in_alternate_screen: false,
+            cursor_visible: true,
         }
     }
 
@@ -254,6 +271,44 @@ impl TerminalGrid {
                     .push((0..self.cols).map(|_| Cell::empty()).collect());
             }
         }
+    }
+
+    /// Enter alternate screen buffer (used by vim, less, etc.)
+    pub fn enter_alternate_screen(&mut self) {
+        if self.in_alternate_screen {
+            return; // Already in alternate screen
+        }
+
+        // Save current screen state
+        self.saved_screen = Some(SavedScreen {
+            cells: self.cells.clone(),
+            cursor_x: self.cursor_x,
+            cursor_y: self.cursor_y,
+            scrollback: self.scrollback.clone(),
+        });
+
+        // Clear screen for alternate buffer
+        self.clear_screen();
+        self.move_cursor_to(0, 0);
+        self.scrollback.clear();
+        self.in_alternate_screen = true;
+    }
+
+    /// Leave alternate screen buffer and restore main screen
+    pub fn leave_alternate_screen(&mut self) {
+        if !self.in_alternate_screen {
+            return; // Not in alternate screen
+        }
+
+        // Restore saved screen state
+        if let Some(saved) = self.saved_screen.take() {
+            self.cells = saved.cells;
+            self.cursor_x = saved.cursor_x;
+            self.cursor_y = saved.cursor_y;
+            self.scrollback = saved.scrollback;
+        }
+
+        self.in_alternate_screen = false;
     }
 }
 
