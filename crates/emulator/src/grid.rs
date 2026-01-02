@@ -24,6 +24,7 @@ impl Default for CharSet {
 }
 
 /// The terminal display grid
+#[derive(Clone, PartialEq)]
 pub struct TerminalGrid {
     cells: Vec<Vec<Cell>>,
     pub cols: usize,
@@ -69,7 +70,7 @@ pub struct TerminalGrid {
 }
 
 /// Saved cursor state for DECSC/DECRC
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct SavedCursor {
     x: usize,
     y: usize,
@@ -80,6 +81,7 @@ struct SavedCursor {
 }
 
 /// Saved screen state for alternate screen buffer
+#[derive(Clone, PartialEq)]
 struct SavedScreen {
     cells: Vec<Vec<Cell>>,
     cursor_x: usize,
@@ -516,6 +518,13 @@ impl TerminalGrid {
     /// Get a cell at position
     pub fn get_cell(&self, x: usize, y: usize) -> &Cell {
         &self.cells[y][x]
+    }
+
+    /// Set a cell at position
+    pub fn set_cell(&mut self, x: usize, y: usize, cell: Cell) {
+        if y < self.rows && x < self.cols {
+            self.cells[y][x] = cell;
+        }
     }
 
     /// Get text content of a line (trimmed)

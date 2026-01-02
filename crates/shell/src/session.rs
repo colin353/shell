@@ -3,7 +3,7 @@
 //! A session represents a running command with its terminal emulator state.
 
 use crate::pty::{PtyError, PtyProcess};
-use emulator::{Line, TerminalEmulator};
+use emulator::{Line, TerminalEmulator, TerminalGrid};
 
 /// A session combining a PTY process with a terminal emulator
 pub struct Session {
@@ -64,6 +64,11 @@ impl Session {
     /// Get the cursor position (x, y)
     pub fn cursor_position(&self) -> (usize, usize) {
         self.emulator.cursor_position()
+    }
+
+    /// Get access to the terminal grid for delta rendering
+    pub fn grid(&self) -> &TerminalGrid {
+        self.emulator.grid()
     }
 
     /// Write input to the process

@@ -4,10 +4,12 @@
 //! and maintain a grid of cells representing the terminal display.
 
 mod cell;
+pub mod delta;
 mod grid;
 mod parser;
 
 pub use cell::{Cell, CellAttributes, Color, Line};
+pub use delta::compute_delta;
 pub use grid::{CharSet, TerminalGrid};
 pub use parser::AnsiParser;
 

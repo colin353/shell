@@ -1,4 +1,5 @@
 use crate::{input, session::Session, terminal};
+use emulator::TerminalGrid;
 use terminal::{Line, TermEmulator, TermEmulatorState};
 use tui::{AppController, Component, KeyboardEvent, Transition};
 
@@ -66,6 +67,7 @@ impl Pane {
                         return Some(PaneState {
                             input_state: state.input_state.clone(),
                             term_state: new_term_state,
+                            session_grid: None,
                             has_session: false,
                             cols: state.cols,
                             rows: state.rows,
@@ -73,20 +75,12 @@ impl Pane {
                         });
                     }
 
-                    // Session still running - sync term_state from session if there was output
+                    // Session still running - update session_grid if there was output
                     if had_output {
-                        let session_lines = session.get_lines();
-                        let cursor_visible = session.is_cursor_visible();
-                        let cursor_pos = session.cursor_position();
-
                         return Some(PaneState {
                             input_state: state.input_state.clone(),
-                            term_state: TermEmulatorState {
-                                lines: session_lines,
-                                cursor_visible,
-                                cursor_x: cursor_pos.0,
-                                cursor_y: cursor_pos.1,
-                            },
+                            term_state: state.term_state.clone(),
+                            session_grid: Some(session.grid().clone()),
                             has_session: true,
                             cols: state.cols,
                             rows: state.rows,
@@ -102,6 +96,7 @@ impl Pane {
                     Some(PaneState {
                         input_state: state.input_state.clone(),
                         term_state: state.term_state.clone(),
+                        session_grid: None,
                         has_session: false,
                         cols: state.cols,
                         rows: state.rows,
@@ -136,6 +131,7 @@ impl Pane {
         PaneState {
             input_state: state.input_state.clone(),
             term_state: state.term_state.clone(),
+            session_grid: state.session_grid.clone(),
             has_session: state.has_session,
             cols,
             rows,
@@ -148,6 +144,7 @@ impl Pane {
         PaneState {
             input_state: input::InputState::new(),
             term_state: TermEmulatorState::new(),
+            session_grid: None,
             has_session: false,
             cols,
             rows,
@@ -159,7 +156,10 @@ impl Pane {
 #[derive(Clone, PartialEq)]
 pub struct PaneState {
     input_state: input::InputState,
+    /// Terminal state for history view (when no session is active)
     term_state: TermEmulatorState,
+    /// Terminal grid for active session (used for delta rendering)
+    session_grid: Option<TerminalGrid>,
     /// Whether a session is currently running (the session itself is owned by Pane)
     has_session: bool,
     /// Terminal dimensions for spawning processes
@@ -174,6 +174,7 @@ impl tui::AppController<PaneState> for Pane {
         PaneState {
             input_state: input::InputState::new(),
             term_state: TermEmulatorState::new(),
+            session_grid: None,
             has_session: false,
             cols: 80,
             rows: 24,
@@ -193,15 +194,33 @@ impl tui::AppController<PaneState> for Pane {
         if has_session {
             tt.height = t.height;
 
-            // When session is active, render from term_state (synced in poll_session)
-            // Force full redraw for live session content (no prev_state comparison)
-            self.term_emulator.render(&mut tt, &state.term_state, None);
+            // Use delta rendering with session_grid from state
+            if let Some(ref current_grid) = state.session_grid {
+                // Get previous grid from prev_state if available
+                let prev_grid = prev_state.and_then(|ps| ps.session_grid.as_ref());
 
-            // Set focus based on cursor visibility and position from term_state
-            if state.term_state.cursor_visible {
-                t.set_focus(state.term_state.cursor_x, state.term_state.cursor_y);
-            } else {
-                t.unset_focus();
+                if let Some(prev_grid) = prev_grid {
+                    // Compute and apply delta
+                    let delta = emulator::compute_delta(prev_grid, current_grid);
+                    t.write_raw(&delta);
+                } else {
+                    // First render - do a full clear and render
+                    for y in 0..t.height {
+                        t.move_cursor_to(0, y);
+                        t.clear_line();
+                    }
+                    // Use an empty grid as the previous state to generate full output
+                    let empty_grid = TerminalGrid::new(current_grid.cols, current_grid.rows);
+                    let delta = emulator::compute_delta(&empty_grid, current_grid);
+                    t.write_raw(&delta);
+                }
+
+                // Set focus based on cursor visibility and position
+                if current_grid.cursor_visible {
+                    t.set_focus(current_grid.cursor_x, current_grid.cursor_y);
+                } else {
+                    t.unset_focus();
+                }
             }
         } else {
             tt.height = t.height - 2;
@@ -252,6 +271,7 @@ impl tui::AppController<PaneState> for Pane {
                 Transition::Updated(new_input_state) => Transition::Updated(PaneState {
                     input_state: new_input_state,
                     term_state: state.term_state.clone(),
+                    session_grid: state.session_grid.clone(),
                     has_session: state.has_session,
                     cols: state.cols,
                     rows: state.rows,
@@ -265,6 +285,7 @@ impl tui::AppController<PaneState> for Pane {
                     new_term_state.lines.push(Line::Command(command.clone()));
 
                     let mut has_session = false;
+                    let mut session_grid = None;
 
                     // Skip empty commands
                     if !command.trim().is_empty() {
@@ -272,6 +293,8 @@ impl tui::AppController<PaneState> for Pane {
                         // Session gets full terminal height since input is hidden during session
                         match Session::spawn(&command, state.cols, state.rows) {
                             Ok(session) => {
+                                // Capture initial grid state
+                                session_grid = Some(session.grid().clone());
                                 self.session = Some(session);
                                 has_session = true;
                             }
@@ -288,6 +311,7 @@ impl tui::AppController<PaneState> for Pane {
                     Transition::Updated(PaneState {
                         input_state: new_input_state,
                         term_state: new_term_state,
+                        session_grid,
                         has_session,
                         cols: state.cols,
                         rows: state.rows,
@@ -304,6 +328,7 @@ impl tui::AppController<PaneState> for Pane {
                 Transition::Updated(PaneState {
                     input_state: new_input_state,
                     term_state: state.term_state.clone(),
+                    session_grid: state.session_grid.clone(),
                     has_session: state.has_session,
                     cols: state.cols,
                     rows: state.rows,
@@ -321,6 +346,7 @@ impl tui::AppController<PaneState> for Pane {
                 Transition::Updated(PaneState {
                     input_state: state.input_state.clone(),
                     term_state: state.term_state.clone(),
+                    session_grid: state.session_grid.clone(),
                     has_session: state.has_session,
                     cols: state.cols,
                     rows: state.rows,

@@ -209,6 +209,12 @@ impl Terminal {
         std::io::stdout().flush().unwrap()
     }
 
+    /// Write raw bytes directly to the terminal (for pre-computed escape sequences)
+    pub fn write_raw(&mut self, bytes: &[u8]) {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(bytes);
+    }
+
     pub fn clean_up(&mut self) {
         self.set_normal();
         self.show_cursor();
