@@ -505,8 +505,10 @@ impl Compositor {
             grid.cursor_visible = cursor_visible;
         }
 
-        // Compute the delta between the previous frame and current frame
-        let delta = emulator::compute_delta(&self.prev_frame, self.global_emulator.grid());
+        // Compute the delta from a blank grid to get the full render output.
+        // This allows the output to be replayed on a fresh emulator.
+        let blank_grid = emulator::TerminalGrid::new(cols, rows);
+        let delta = emulator::compute_delta(&blank_grid, self.global_emulator.grid());
 
         // Save the current frame as the previous frame for next render
         self.prev_frame = self.global_emulator.grid().clone();
