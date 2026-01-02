@@ -9,23 +9,35 @@ use serde::Deserialize;
 use std::thread;
 use std::time::Duration;
 
-/// Check if vttest is available on the system
-fn vttest_available() -> bool {
+/// Check if a command is available on the system
+fn command_available(command: &str) -> bool {
     std::process::Command::new("which")
-        .arg("vttest")
+        .arg(command)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-/// Run vttest with given input sequences and return the emulator state.
-/// Each input in the slice is sent separately with a wait period in between.
-fn run_vttest_test(cols: u16, rows: u16, inputs: &[&[u8]]) -> TerminalEmulator {
-    run_vttest_test_debug(cols, rows, inputs, false)
+/// Check if vttest is available on the system
+fn vttest_available() -> bool {
+    command_available("vttest")
 }
 
-fn run_vttest_test_debug(cols: u16, rows: u16, inputs: &[&[u8]], debug: bool) -> TerminalEmulator {
-    let pty = PtyProcess::spawn("vttest", cols, rows).expect("Failed to spawn vttest");
+/// Run an arbitrary command with given input sequences and return the emulator state.
+/// Each input in the slice is sent separately with a wait period in between.
+fn run_pty_test(command: &str, cols: u16, rows: u16, inputs: &[&[u8]]) -> TerminalEmulator {
+    run_pty_test_debug(command, cols, rows, inputs, false)
+}
+
+fn run_pty_test_debug(
+    command: &str,
+    cols: u16,
+    rows: u16,
+    inputs: &[&[u8]],
+    debug: bool,
+) -> TerminalEmulator {
+    let pty = PtyProcess::spawn(command, cols, rows)
+        .unwrap_or_else(|e| panic!("Failed to spawn {}: {}", command, e));
 
     // Create emulator
     let mut emulator = TerminalEmulator::new(cols as usize, rows as usize);
@@ -76,16 +88,27 @@ fn run_vttest_test_debug(cols: u16, rows: u16, inputs: &[&[u8]], debug: bool) ->
         }
     };
 
-    // Wait for vttest to start and show the main menu
+    // Wait for program to start
     wait_and_drain(&pty, &mut emulator, &mut buf, 30, debug);
 
     // Send each input sequence with a wait period between
     for input in inputs {
-        pty.write(input).expect("Failed to write to vttest");
+        pty.write(input).expect("Failed to write to pty");
         wait_and_drain(&pty, &mut emulator, &mut buf, 20, debug);
     }
 
     emulator
+}
+
+/// Run vttest with given input sequences and return the emulator state.
+/// Each input in the slice is sent separately with a wait period in between.
+fn run_vttest_test(cols: u16, rows: u16, inputs: &[&[u8]]) -> TerminalEmulator {
+    run_pty_test("vttest", cols, rows, inputs)
+}
+
+#[allow(dead_code)]
+fn run_vttest_test_debug(cols: u16, rows: u16, inputs: &[&[u8]], debug: bool) -> TerminalEmulator {
+    run_pty_test_debug("vttest", cols, rows, inputs, debug)
 }
 
 /// Extract text content from emulator grid as a vector of lines
@@ -679,4 +702,31 @@ fn test_vttest_attributes_2() {
 
     let emulator = run_vttest_test(80, 33, &[b""]);
     assert_grid_matches_attributes_fixture(&emulator, "vttest-attributes-2.json", 33);
+}
+
+#[test]
+fn test_vim_startup() {
+    if !command_available("vim") {
+        eprintln!("Skipping test: vim not available");
+        return;
+    }
+
+    // Start vim with no file, just the startup screen
+    // Using 84 columns and 31 lines to match the fixture
+    let emulator = run_pty_test("vim", 84, 31, &[b""]);
+    assert_grid_matches_attributes_fixture(&emulator, "vim-test-0.json", 31);
+}
+
+#[test]
+fn test_vim_2() {
+    if !command_available("vim") {
+        eprintln!("Skipping test: vim not available");
+        return;
+    }
+
+    // Start vim with no file, just the startup screen
+    // Using 84 columns and 31 lines to match the fixture
+    // Send escape as separate input to give vim time to process it before :q
+    let emulator = run_pty_test("vim", 84, 31, &[b"ihello to the world", b"\x1b", b":q\n"]);
+    assert_grid_matches_attributes_fixture(&emulator, "vim-test-1.json", 31);
 }
