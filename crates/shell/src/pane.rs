@@ -206,12 +206,22 @@ impl tui::AppController<PaneState> for Pane {
             if let Some(ref session_arc) = state.session {
                 let session = session_arc.lock().unwrap();
                 let session_lines = session.get_lines();
+                let cursor_visible = session.is_cursor_visible();
+                let cursor_pos = session.cursor_position();
                 let live_term_state = TermEmulatorState {
                     lines: session_lines,
+                    cursor_visible,
                 };
 
                 // Force full redraw for live session content (no prev_state comparison)
                 self.term_emulator.render(&mut tt, &live_term_state, None);
+
+                // Set focus based on session's cursor visibility and position
+                if cursor_visible {
+                    t.set_focus(cursor_pos.0, cursor_pos.1);
+                } else {
+                    t.unset_focus();
+                }
             }
         } else {
             tt.height = t.height - 2;
@@ -246,10 +256,8 @@ impl tui::AppController<PaneState> for Pane {
                 &state.input_state,
                 prev_input_state,
             );
-        } else {
-            // Session is running - just unset focus (no input shown)
-            t.unset_focus();
         }
+        // Note: When session is running, focus is set in the session rendering block above
     }
 
     fn transition(&mut self, state: &PaneState, event: KeyboardEvent) -> Transition<PaneState> {

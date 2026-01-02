@@ -56,6 +56,16 @@ impl Session {
         self.emulator.to_lines()
     }
 
+    /// Check if the cursor should be visible
+    pub fn is_cursor_visible(&self) -> bool {
+        self.emulator.grid().cursor_visible
+    }
+
+    /// Get the cursor position (x, y)
+    pub fn cursor_position(&self) -> (usize, usize) {
+        self.emulator.cursor_position()
+    }
+
     /// Write input to the process
     pub fn write(&self, data: &[u8]) -> Result<usize, PtyError> {
         self.pty.write(data)

@@ -5,6 +5,7 @@
 
 use emulator::TerminalEmulator;
 use pty::PtyProcess;
+use serde::Deserialize;
 use std::thread;
 use std::time::Duration;
 
@@ -101,6 +102,225 @@ fn load_fixture(name: &str) -> Vec<String> {
         .unwrap_or_else(|e| panic!("Failed to load fixture {}: {}", fixture_path, e));
 
     content.lines().map(|s| s.to_string()).collect()
+}
+
+// Structs for deserializing the JSON attributes fixture
+#[derive(Debug, Deserialize)]
+struct AttributesFixture {
+    columns: usize,
+    lines: usize,
+    cells: Vec<Vec<FixtureCell>>,
+    #[serde(default)]
+    cursor: Option<FixtureCursor>,
+    #[serde(default)]
+    modes: Option<FixtureModes>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FixtureCursor {
+    line: usize,
+    column: usize,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FixtureModes {
+    #[serde(default)]
+    show_cursor: bool,
+    #[serde(default)]
+    line_wrap: bool,
+    #[serde(default)]
+    origin: bool,
+    #[serde(default)]
+    alt_screen: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct FixtureCell {
+    character: String,
+    flags: FixtureFlags,
+}
+
+#[derive(Debug, Deserialize)]
+struct FixtureFlags {
+    inverse: bool,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    dim: bool,
+    hidden: bool,
+    strikeout: bool,
+}
+
+/// Load a JSON attributes fixture file
+fn load_attributes_fixture(name: &str) -> AttributesFixture {
+    let fixture_path = format!("{}/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
+    let content = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("Failed to load fixture {}: {}", fixture_path, e));
+
+    serde_json::from_str(&content)
+        .unwrap_or_else(|e| panic!("Failed to parse JSON fixture {}: {}", fixture_path, e))
+}
+
+/// Compare grid cell attributes with JSON fixture, providing detailed diff on failure
+fn assert_grid_matches_attributes_fixture(
+    emulator: &TerminalEmulator,
+    fixture_name: &str,
+    rows: usize,
+) {
+    let fixture = load_attributes_fixture(fixture_name);
+    let grid = emulator.grid();
+
+    let cols = grid.cols.min(fixture.columns);
+    let rows = rows.min(fixture.lines);
+
+    let mut mismatches = Vec::new();
+
+    for y in 0..rows {
+        for x in 0..cols {
+            let actual = grid.get_cell(x, y);
+            let expected = &fixture.cells[y][x];
+
+            // Compare character
+            let expected_char = expected.character.chars().next().unwrap_or(' ');
+            let char_matches = actual.character == expected_char;
+
+            // Compare flags
+            let flags_match = actual.attrs.bold == expected.flags.bold
+                && actual.attrs.italic == expected.flags.italic
+                && actual.attrs.underline == expected.flags.underline
+                && actual.attrs.inverse == expected.flags.inverse
+                && actual.attrs.dim == expected.flags.dim
+                && actual.attrs.hidden == expected.flags.hidden
+                && actual.attrs.strikethrough == expected.flags.strikeout;
+
+            if !char_matches || !flags_match {
+                let mut diffs = Vec::new();
+
+                if !char_matches {
+                    diffs.push(format!(
+                        "char: expected {:?}, got {:?}",
+                        expected_char, actual.character
+                    ));
+                }
+                if actual.attrs.bold != expected.flags.bold {
+                    diffs.push(format!(
+                        "bold: expected {}, got {}",
+                        expected.flags.bold, actual.attrs.bold
+                    ));
+                }
+                if actual.attrs.italic != expected.flags.italic {
+                    diffs.push(format!(
+                        "italic: expected {}, got {}",
+                        expected.flags.italic, actual.attrs.italic
+                    ));
+                }
+                if actual.attrs.underline != expected.flags.underline {
+                    diffs.push(format!(
+                        "underline: expected {}, got {}",
+                        expected.flags.underline, actual.attrs.underline
+                    ));
+                }
+                if actual.attrs.inverse != expected.flags.inverse {
+                    diffs.push(format!(
+                        "inverse: expected {}, got {}",
+                        expected.flags.inverse, actual.attrs.inverse
+                    ));
+                }
+                if actual.attrs.dim != expected.flags.dim {
+                    diffs.push(format!(
+                        "dim: expected {}, got {}",
+                        expected.flags.dim, actual.attrs.dim
+                    ));
+                }
+                if actual.attrs.hidden != expected.flags.hidden {
+                    diffs.push(format!(
+                        "hidden: expected {}, got {}",
+                        expected.flags.hidden, actual.attrs.hidden
+                    ));
+                }
+                if actual.attrs.strikethrough != expected.flags.strikeout {
+                    diffs.push(format!(
+                        "strikethrough: expected {}, got {}",
+                        expected.flags.strikeout, actual.attrs.strikethrough
+                    ));
+                }
+
+                mismatches.push((y, x, diffs));
+            }
+        }
+    }
+
+    if !mismatches.is_empty() {
+        let mut msg = format!(
+            "Grid attributes do not match fixture '{}'. {} mismatched cells:\n\n",
+            fixture_name,
+            mismatches.len()
+        );
+
+        // Limit output to first 50 mismatches to avoid huge error messages
+        for (y, x, diffs) in mismatches.iter().take(50) {
+            msg.push_str(&format!("Cell ({}, {}): {}\n", x, y, diffs.join(", ")));
+        }
+
+        if mismatches.len() > 50 {
+            msg.push_str(&format!(
+                "\n... and {} more mismatches\n",
+                mismatches.len() - 50
+            ));
+        }
+
+        panic!("{}", msg);
+    }
+
+    // Check cursor position if specified in fixture
+    if let Some(ref cursor) = fixture.cursor {
+        let actual_x = grid.cursor_x;
+        let actual_y = grid.cursor_y;
+        if actual_x != cursor.column || actual_y != cursor.line {
+            panic!(
+                "Cursor position mismatch in '{}': expected ({}, {}), got ({}, {})",
+                fixture_name, cursor.column, cursor.line, actual_x, actual_y
+            );
+        }
+    }
+
+    // Check terminal modes if specified in fixture
+    if let Some(ref modes) = fixture.modes {
+        let mut mode_mismatches = Vec::new();
+
+        if grid.cursor_visible != modes.show_cursor {
+            mode_mismatches.push(format!(
+                "show_cursor: expected {}, got {}",
+                modes.show_cursor, grid.cursor_visible
+            ));
+        }
+        if grid.autowrap != modes.line_wrap {
+            mode_mismatches.push(format!(
+                "line_wrap: expected {}, got {}",
+                modes.line_wrap, grid.autowrap
+            ));
+        }
+        if grid.origin_mode != modes.origin {
+            mode_mismatches.push(format!(
+                "origin: expected {}, got {}",
+                modes.origin, grid.origin_mode
+            ));
+        }
+        if grid.in_alternate_screen != modes.alt_screen {
+            mode_mismatches.push(format!(
+                "alt_screen: expected {}, got {}",
+                modes.alt_screen, grid.in_alternate_screen
+            ));
+        }
+
+        if !mode_mismatches.is_empty() {
+            panic!(
+                "Terminal modes do not match fixture '{}': {}",
+                fixture_name,
+                mode_mismatches.join(", ")
+            );
+        }
+    }
 }
 
 /// Compare grid lines with fixture, providing detailed diff on failure
@@ -412,4 +632,51 @@ fn test_vttest_terminal_reports() {
     // interfere with vttest reading the DSR responses
     let emulator = run_vttest_test(80, 33, &[b"6\n", b"3\n", b"", b"", b""]);
     assert_grid_matches_fixture(&emulator, "vttest.6.3.txt", 33);
+}
+
+#[test]
+fn test_vttest_attributes_0() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[
+            b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n",
+            b"\n",
+        ],
+    );
+    assert_grid_matches_attributes_fixture(&emulator, "vttest-attributes-0.json", 33);
+}
+
+#[test]
+fn test_vttest_attributes_1() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(
+        80,
+        33,
+        &[
+            b"2\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n", b"\n",
+            b"\n", b"\n", b"\n",
+        ],
+    );
+    assert_grid_matches_attributes_fixture(&emulator, "vttest-attributes-1.json", 33);
+}
+
+#[test]
+fn test_vttest_attributes_2() {
+    if !vttest_available() {
+        eprintln!("Skipping test: vttest not available");
+        return;
+    }
+
+    let emulator = run_vttest_test(80, 33, &[b""]);
+    assert_grid_matches_attributes_fixture(&emulator, "vttest-attributes-2.json", 33);
 }

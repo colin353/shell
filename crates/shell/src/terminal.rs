@@ -6,13 +6,17 @@ pub struct TermEmulator {}
 
 impl TermEmulatorState {
     pub fn new() -> Self {
-        Self { lines: Vec::new() }
+        Self {
+            lines: Vec::new(),
+            cursor_visible: true,
+        }
     }
 }
 
 #[derive(Clone, PartialEq)]
 pub struct TermEmulatorState {
     pub lines: Vec<Line>,
+    pub cursor_visible: bool,
 }
 
 impl TermEmulator {
@@ -70,6 +74,20 @@ impl tui::Component<TermEmulatorState> for TermEmulator {
                     t.print_cells(cells);
                     t.set_normal();
                 }
+            }
+        }
+
+        // Sync cursor visibility state
+        // When prev_state is None (full redraw), always emit the cursor visibility command
+        let should_update_cursor = match prev_state {
+            Some(ps) => ps.cursor_visible != state.cursor_visible,
+            None => true, // Full redraw - always sync cursor state
+        };
+        if should_update_cursor {
+            if state.cursor_visible {
+                t.show_cursor();
+            } else {
+                t.hide_cursor();
             }
         }
 
