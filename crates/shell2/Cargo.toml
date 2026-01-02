@@ -1,0 +1,10 @@
+[package]
+name = "shell2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raw_tty = "0.1.0"
+nix = { version = "0.29", features = ["term", "process", "signal", "fs"] }
+libc = "0.2"
+compositor = { path = "../compositor" }

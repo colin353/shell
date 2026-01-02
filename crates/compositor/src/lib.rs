@@ -396,6 +396,9 @@ impl Compositor {
         // Process queued keyboard input
         self.process_keyboard_queue();
 
+        // Render the compositor
+        self.render();
+
         Ok(had_events)
     }
 
