@@ -34,7 +34,7 @@ fn main() {
 
     loop {
         // Determine timeout based on whether we have a running session
-        let timeout = if pane.has_session(&state) {
+        let timeout = if pane.has_session() {
             Duration::from_millis(10)
         } else {
             Duration::from_millis(100)
@@ -65,7 +65,7 @@ fn main() {
         }
 
         // Poll session for output
-        if pane.has_session(&state) {
+        if pane.has_session() {
             if let Some(new_state) = pane.poll_session(&state) {
                 let prev_state = state.clone();
                 state = new_state;

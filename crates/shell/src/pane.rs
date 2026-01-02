@@ -1,11 +1,12 @@
 use crate::{input, session::Session, terminal};
-use std::sync::{Arc, Mutex};
 use terminal::{Line, TermEmulator, TermEmulatorState};
 use tui::{AppController, Component, KeyboardEvent, Transition};
 
 pub struct Pane {
     input_component: input::Input,
     term_emulator: terminal::TermEmulator,
+    /// Currently running session (if any) - owned by Pane, not PaneState
+    session: Option<Session>,
 }
 
 impl Pane {
@@ -13,24 +14,28 @@ impl Pane {
         Self {
             input_component: input::Input::new(" $".to_string(), "Type a command...".to_string()),
             term_emulator: TermEmulator::new(),
+            session: None,
         }
     }
 
     /// Forward a keyboard event to the running session.
     /// Returns true if the event was forwarded, false if no session is running.
-    fn forward_to_session(session: &Arc<Mutex<Session>>, event: &tui::KeyboardEvent) {
-        let bytes = event.to_bytes();
-        if !bytes.is_empty() {
-            let session = session.lock().unwrap();
-            let _ = session.write(&bytes);
+    fn forward_to_session(&self, event: &tui::KeyboardEvent) -> bool {
+        if let Some(ref session) = self.session {
+            let bytes = event.to_bytes();
+            if !bytes.is_empty() {
+                let _ = session.write(&bytes);
+            }
+            true
+        } else {
+            false
         }
     }
 
     /// Poll for output from running session and update state if needed.
     /// Returns Some(new_state) if there's new output, None otherwise.
     pub fn poll_session(&mut self, state: &PaneState) -> Option<PaneState> {
-        if let Some(ref session_arc) = state.session {
-            let mut session = session_arc.lock().unwrap();
+        if let Some(ref mut session) = self.session {
             match session.poll() {
                 Ok(had_output) => {
                     let still_running = session.is_running();
@@ -55,23 +60,34 @@ impl Pane {
                             new_term_state.lines.push(line);
                         }
 
+                        // Clear the session
+                        self.session = None;
+
                         return Some(PaneState {
                             input_state: state.input_state.clone(),
                             term_state: new_term_state,
-                            session: None,
+                            has_session: false,
                             cols: state.cols,
                             rows: state.rows,
                             shown_line_count: 0,
                         });
                     }
 
-                    // Session still running - signal update if there was output
-                    // (so the UI can re-render the live session view)
+                    // Session still running - sync term_state from session if there was output
                     if had_output {
+                        let session_lines = session.get_lines();
+                        let cursor_visible = session.is_cursor_visible();
+                        let cursor_pos = session.cursor_position();
+
                         return Some(PaneState {
                             input_state: state.input_state.clone(),
-                            term_state: state.term_state.clone(),
-                            session: Some(Arc::clone(session_arc)),
+                            term_state: TermEmulatorState {
+                                lines: session_lines,
+                                cursor_visible,
+                                cursor_x: cursor_pos.0,
+                                cursor_y: cursor_pos.1,
+                            },
+                            has_session: true,
                             cols: state.cols,
                             rows: state.rows,
                             shown_line_count: state.shown_line_count,
@@ -82,10 +98,11 @@ impl Pane {
                 }
                 Err(_) => {
                     // Error reading, clean up session
+                    self.session = None;
                     Some(PaneState {
                         input_state: state.input_state.clone(),
                         term_state: state.term_state.clone(),
-                        session: None,
+                        has_session: false,
                         cols: state.cols,
                         rows: state.rows,
                         shown_line_count: 0,
@@ -98,37 +115,28 @@ impl Pane {
     }
 
     /// Check if there's a running session
-    pub fn has_session(&self, state: &PaneState) -> bool {
-        state.session.is_some()
-    }
-
-    /// Get the current lines from the active session (for direct rendering)
-    pub fn get_session_lines(&self, state: &PaneState) -> Option<Vec<Line>> {
-        state.session.as_ref().map(|session_arc| {
-            let session = session_arc.lock().unwrap();
-            session.get_lines()
-        })
+    pub fn has_session(&self) -> bool {
+        self.session.is_some()
     }
 
     /// Handle terminal resize - updates dimensions and propagates to running session
     pub fn resize(&mut self, state: &PaneState, cols: u16, rows: u16) -> PaneState {
         // Calculate the available rows for the pane (subtract 2 for input area when no session)
-        let pane_rows = if state.session.is_some() {
+        let pane_rows = if self.session.is_some() {
             rows
         } else {
             rows.saturating_sub(2)
         };
 
         // If there's a running session, propagate the resize
-        if let Some(ref session_arc) = state.session {
-            let mut session = session_arc.lock().unwrap();
+        if let Some(ref mut session) = self.session {
             let _ = session.resize(cols, pane_rows);
         }
 
         PaneState {
             input_state: state.input_state.clone(),
             term_state: state.term_state.clone(),
-            session: state.session.clone(),
+            has_session: state.has_session,
             cols,
             rows,
             shown_line_count: state.shown_line_count,
@@ -140,7 +148,7 @@ impl Pane {
         PaneState {
             input_state: input::InputState::new(),
             term_state: TermEmulatorState::new(),
-            session: None,
+            has_session: false,
             cols,
             rows,
             shown_line_count: 0,
@@ -148,12 +156,12 @@ impl Pane {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct PaneState {
     input_state: input::InputState,
     term_state: TermEmulatorState,
-    /// Currently running session (if any)
-    session: Option<Arc<Mutex<Session>>>,
+    /// Whether a session is currently running (the session itself is owned by Pane)
+    has_session: bool,
     /// Terminal dimensions for spawning processes
     cols: u16,
     rows: u16,
@@ -161,28 +169,12 @@ pub struct PaneState {
     shown_line_count: usize,
 }
 
-impl PartialEq for PaneState {
-    fn eq(&self, other: &Self) -> bool {
-        self.input_state == other.input_state
-            && self.term_state == other.term_state
-            && self.cols == other.cols
-            && self.rows == other.rows
-            && self.shown_line_count == other.shown_line_count
-            // Compare session by pointer equality (both None, or both point to same Arc)
-            && match (&self.session, &other.session) {
-                (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                _ => false,
-            }
-    }
-}
-
 impl tui::AppController<PaneState> for Pane {
     fn initial_state(&self) -> PaneState {
         PaneState {
             input_state: input::InputState::new(),
             term_state: TermEmulatorState::new(),
-            session: None,
+            has_session: false,
             cols: 80,
             rows: 24,
             shown_line_count: 0,
@@ -194,34 +186,22 @@ impl tui::AppController<PaneState> for Pane {
     }
 
     fn render(&mut self, t: &mut tui::Terminal, state: &PaneState, prev_state: Option<&PaneState>) {
-        // Use state.session for rendering decisions
-        let has_session = state.session.is_some();
-        let had_session = prev_state.map(|ps| ps.session.is_some()).unwrap_or(false);
+        let has_session = state.has_session;
+        let had_session = prev_state.map(|ps| ps.has_session).unwrap_or(false);
 
         let mut tt = t.derive("term_emulator".to_string());
         if has_session {
             tt.height = t.height;
 
-            // When session is active, render directly from session's grid
-            if let Some(ref session_arc) = state.session {
-                let session = session_arc.lock().unwrap();
-                let session_lines = session.get_lines();
-                let cursor_visible = session.is_cursor_visible();
-                let cursor_pos = session.cursor_position();
-                let live_term_state = TermEmulatorState {
-                    lines: session_lines,
-                    cursor_visible,
-                };
+            // When session is active, render from term_state (synced in poll_session)
+            // Force full redraw for live session content (no prev_state comparison)
+            self.term_emulator.render(&mut tt, &state.term_state, None);
 
-                // Force full redraw for live session content (no prev_state comparison)
-                self.term_emulator.render(&mut tt, &live_term_state, None);
-
-                // Set focus based on session's cursor visibility and position
-                if cursor_visible {
-                    t.set_focus(cursor_pos.0, cursor_pos.1);
-                } else {
-                    t.unset_focus();
-                }
+            // Set focus based on cursor visibility and position from term_state
+            if state.term_state.cursor_visible {
+                t.set_focus(state.term_state.cursor_x, state.term_state.cursor_y);
+            } else {
+                t.unset_focus();
             }
         } else {
             tt.height = t.height - 2;
@@ -245,7 +225,7 @@ impl tui::AppController<PaneState> for Pane {
             it.offset_y = t.height - 2;
 
             let mut prev_input_state = prev_state.map(|ps| &ps.input_state);
-            if prev_state.map(|ps| ps.session.is_some()) != Some(false) {
+            if prev_state.map(|ps| ps.has_session) != Some(false) {
                 // We previously had a session, so the input needs to be redrawn.
                 prev_input_state = None;
             }
@@ -257,13 +237,12 @@ impl tui::AppController<PaneState> for Pane {
                 prev_input_state,
             );
         }
-        // Note: When session is running, focus is set in the session rendering block above
     }
 
     fn transition(&mut self, state: &PaneState, event: KeyboardEvent) -> Transition<PaneState> {
         // If a session is running, forward keyboard events to it
-        if let Some(ref session) = state.session {
-            Self::forward_to_session(session, &event);
+        if self.session.is_some() {
+            self.forward_to_session(&event);
             // Return Nothing - the main loop's poll_session will handle any resulting output
             return Transition::Nothing;
         }
@@ -273,7 +252,7 @@ impl tui::AppController<PaneState> for Pane {
                 Transition::Updated(new_input_state) => Transition::Updated(PaneState {
                     input_state: new_input_state,
                     term_state: state.term_state.clone(),
-                    session: state.session.clone(),
+                    has_session: state.has_session,
                     cols: state.cols,
                     rows: state.rows,
                     shown_line_count: state.shown_line_count,
@@ -285,7 +264,7 @@ impl tui::AppController<PaneState> for Pane {
                     let mut new_term_state = state.term_state.clone();
                     new_term_state.lines.push(Line::Command(command.clone()));
 
-                    let mut new_session = None;
+                    let mut has_session = false;
 
                     // Skip empty commands
                     if !command.trim().is_empty() {
@@ -293,7 +272,8 @@ impl tui::AppController<PaneState> for Pane {
                         // Session gets full terminal height since input is hidden during session
                         match Session::spawn(&command, state.cols, state.rows) {
                             Ok(session) => {
-                                new_session = Some(Arc::new(Mutex::new(session)));
+                                self.session = Some(session);
+                                has_session = true;
                             }
                             Err(e) => {
                                 // Show error in terminal
@@ -308,7 +288,7 @@ impl tui::AppController<PaneState> for Pane {
                     Transition::Updated(PaneState {
                         input_state: new_input_state,
                         term_state: new_term_state,
-                        session: new_session,
+                        has_session,
                         cols: state.cols,
                         rows: state.rows,
                         shown_line_count: 0,
@@ -324,7 +304,7 @@ impl tui::AppController<PaneState> for Pane {
                 Transition::Updated(PaneState {
                     input_state: new_input_state,
                     term_state: state.term_state.clone(),
-                    session: state.session.clone(),
+                    has_session: state.has_session,
                     cols: state.cols,
                     rows: state.rows,
                     shown_line_count: state.shown_line_count,
@@ -341,7 +321,7 @@ impl tui::AppController<PaneState> for Pane {
                 Transition::Updated(PaneState {
                     input_state: state.input_state.clone(),
                     term_state: state.term_state.clone(),
-                    session: state.session.clone(),
+                    has_session: state.has_session,
                     cols: state.cols,
                     rows: state.rows,
                     shown_line_count: state.shown_line_count,

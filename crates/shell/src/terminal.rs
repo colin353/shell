@@ -1,5 +1,3 @@
-use emulator::Cell;
-
 pub use emulator::Line;
 
 pub struct TermEmulator {}
@@ -9,6 +7,8 @@ impl TermEmulatorState {
         Self {
             lines: Vec::new(),
             cursor_visible: true,
+            cursor_x: 0,
+            cursor_y: 0,
         }
     }
 }
@@ -17,6 +17,8 @@ impl TermEmulatorState {
 pub struct TermEmulatorState {
     pub lines: Vec<Line>,
     pub cursor_visible: bool,
+    pub cursor_x: usize,
+    pub cursor_y: usize,
 }
 
 impl TermEmulator {
