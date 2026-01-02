@@ -384,14 +384,14 @@ fn command_available(command: &str) -> bool {
 /// Clone the state of a TerminalGrid into a new one
 fn clone_grid_state(source: &TerminalGrid) -> TerminalGrid {
     let mut dest = TerminalGrid::new(source.cols, source.rows);
-    
+
     for y in 0..source.rows {
         for x in 0..source.cols {
             let cell = source.get_cell(x, y).clone();
             dest.set_cell(x, y, cell);
         }
     }
-    
+
     dest.cursor_x = source.cursor_x;
     dest.cursor_y = source.cursor_y;
     dest.cursor_visible = source.cursor_visible;
@@ -403,7 +403,7 @@ fn clone_grid_state(source: &TerminalGrid) -> TerminalGrid {
     dest.charset_g0 = source.charset_g0;
     dest.charset_g1 = source.charset_g1;
     dest.gl_is_g1 = source.gl_is_g1;
-    
+
     dest
 }
 
@@ -420,7 +420,14 @@ fn test_pty_delta_transition(
     initial_inputs: &[&[u8]],
     additional_inputs: &[&[u8]],
 ) {
-    test_pty_delta_transition_debug(command, cols, rows, initial_inputs, additional_inputs, false)
+    test_pty_delta_transition_debug(
+        command,
+        cols,
+        rows,
+        initial_inputs,
+        additional_inputs,
+        false,
+    )
 }
 
 fn test_pty_delta_transition_debug(
@@ -581,8 +588,8 @@ fn test_delta_vim_ctrl_d() {
         &command,
         84,
         31,
-        &[],  // initial: just vim startup
-        &[b"\x04"],  // additional: Ctrl+D
+        &[],        // initial: just vim startup
+        &[b"\x04"], // additional: Ctrl+D
     );
 }
 
@@ -603,8 +610,8 @@ fn test_delta_vim_ctrl_d_multiple() {
         &command,
         84,
         31,
-        &[b"\x04"],  // initial: vim + one Ctrl+D
-        &[b"\x04"],  // additional: another Ctrl+D
+        &[b"\x04"], // initial: vim + one Ctrl+D
+        &[b"\x04"], // additional: another Ctrl+D
     );
 }
 
@@ -625,8 +632,8 @@ fn test_delta_vim_ctrl_u() {
         &command,
         84,
         31,
-        &[b"\x04"],  // initial: vim + Ctrl+D
-        &[b"\x15"],  // additional: Ctrl+U
+        &[b"\x04"], // initial: vim + Ctrl+D
+        &[b"\x15"], // additional: Ctrl+U
     );
 }
 
@@ -647,8 +654,8 @@ fn test_delta_vim_page_down() {
         &command,
         84,
         31,
-        &[],  // initial: just vim
-        &[b"\x06"],  // additional: Ctrl+F (page down)
+        &[],        // initial: just vim
+        &[b"\x06"], // additional: Ctrl+F (page down)
     );
 }
 
@@ -669,8 +676,8 @@ fn test_delta_vim_j_movement() {
         &command,
         84,
         31,
-        &[],  // initial: just vim
-        &[b"jjjjj"],  // additional: move down 5 lines
+        &[],         // initial: just vim
+        &[b"jjjjj"], // additional: move down 5 lines
     );
 }
 
@@ -691,8 +698,8 @@ fn test_delta_vim_search() {
         &command,
         84,
         31,
-        &[],  // initial: just vim
-        &[b"/pub\n"],  // additional: search for "pub"
+        &[],          // initial: just vim
+        &[b"/pub\n"], // additional: search for "pub"
     );
 }
 
@@ -713,8 +720,8 @@ fn test_delta_vim_insert_mode() {
         &command,
         84,
         31,
-        &[b"i"],  // initial: enter insert mode
-        &[b"\x1b"],  // additional: exit insert mode
+        &[b"i"],    // initial: enter insert mode
+        &[b"\x1b"], // additional: exit insert mode
     );
 }
 
@@ -729,8 +736,8 @@ fn test_delta_echo_simple() {
         "bash",
         80,
         24,
-        &[b"echo hello\n"],  // initial
-        &[b"echo world\n"],  // additional
+        &[b"echo hello\n"], // initial
+        &[b"echo world\n"], // additional
     );
 }
 
@@ -741,8 +748,8 @@ fn test_delta_clear_screen() {
         "bash",
         80,
         24,
-        &[b"echo line1\necho line2\n"],  // initial
-        &[b"clear\n"],  // additional: clear screen
+        &[b"echo line1\necho line2\n"], // initial
+        &[b"clear\n"],                  // additional: clear screen
     );
 }
 
@@ -752,7 +759,7 @@ fn test_delta_clear_screen() {
 // ============================================================================
 
 #[test]
-#[ignore]  // Run manually with --ignored flag for debugging
+#[ignore] // Run manually with --ignored flag for debugging
 fn test_delta_vim_ctrl_d_debug() {
     if !command_available("vim") {
         eprintln!("Skipping test: vim not available");
@@ -768,9 +775,9 @@ fn test_delta_vim_ctrl_d_debug() {
         &command,
         84,
         31,
-        &[],  // initial: just vim startup
-        &[b"\x04"],  // additional: Ctrl+D
-        true,  // enable debug output
+        &[],        // initial: just vim startup
+        &[b"\x04"], // additional: Ctrl+D
+        true,       // enable debug output
     );
 }
 
@@ -782,45 +789,43 @@ fn test_compositor_delta_flow_debug() {
         eprintln!("Skipping test: vim not available");
         return;
     }
-    
+
     let cols = 84;
     let rows = 31;
-    
+
     let command = format!(
         "bash -c \"cd {}/../.. && vim -n crates/emulator/fixtures/terminal.rs\"",
         env!("CARGO_MANIFEST_DIR")
     );
-    
-    let pty = PtyProcess::spawn(&command, cols as u16, rows as u16)
-        .expect("Failed to spawn vim");
-    
+
+    let pty = PtyProcess::spawn(&command, cols as u16, rows as u16).expect("Failed to spawn vim");
+
     let mut pane_emulator = TerminalEmulator::new(cols, rows);
     let mut real_terminal = TerminalEmulator::new(cols, rows);
     let mut prev_frame = TerminalGrid::new(cols, rows);
-    
+
     let mut buf = [0u8; 8192];
-    
-    let drain_and_process = |pty: &PtyProcess, pane_emu: &mut TerminalEmulator, buf: &mut [u8]| {
-        loop {
-            match pty.read(buf) {
-                Ok(Some(n)) if n > 0 => {
-                    pane_emu.process(&buf[..n]);
-                    for response in pane_emu.drain_responses() {
-                        let _ = pty.write(&response);
-                    }
+
+    let drain_and_process = |pty: &PtyProcess, pane_emu: &mut TerminalEmulator, buf: &mut [u8]| loop {
+        match pty.read(buf) {
+            Ok(Some(n)) if n > 0 => {
+                pane_emu.process(&buf[..n]);
+                for response in pane_emu.drain_responses() {
+                    let _ = pty.write(&response);
                 }
-                _ => break,
             }
+            _ => break,
         }
     };
-    
-    let render_and_apply = |pane_emu: &TerminalEmulator, 
-                            prev_frame: &mut TerminalGrid, 
+
+    let render_and_apply = |pane_emu: &TerminalEmulator,
+                            prev_frame: &mut TerminalGrid,
                             real_terminal: &mut TerminalEmulator,
-                            debug: bool| -> Vec<u8> {
+                            debug: bool|
+     -> Vec<u8> {
         let mut global_emulator = TerminalEmulator::new(cols, rows);
         global_emulator.blit_from(pane_emu, 0, 0, 0, 0, cols, rows);
-        
+
         {
             let (cx, cy) = pane_emu.cursor_position();
             let pane_grid = pane_emu.grid();
@@ -829,9 +834,9 @@ fn test_compositor_delta_flow_debug() {
             global_grid.cursor_y = cy;
             global_grid.cursor_visible = pane_grid.cursor_visible;
         }
-        
+
         let delta = compute_delta(prev_frame, global_emulator.grid());
-        
+
         if debug {
             eprintln!("\n=== Delta ({} bytes) ===", delta.len());
             // Print readable delta
@@ -846,57 +851,57 @@ fn test_compositor_delta_flow_debug() {
             }
             eprintln!();
         }
-        
+
         real_terminal.process(&delta);
         *prev_frame = global_emulator.grid().clone();
-        
+
         delta
     };
-    
+
     // Wait for vim to start
     for _ in 0..30 {
         thread::sleep(Duration::from_millis(20));
         drain_and_process(&pty, &mut pane_emulator, &mut buf);
     }
-    
+
     eprintln!("=== After vim startup ===");
     for y in 0..10 {
         eprintln!("  Line {}: {}", y, pane_emulator.grid().get_line_text(y));
     }
-    
+
     // Initial render
     let _ = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal, true);
-    
+
     // Send Ctrl+D
     eprintln!("\n=== Sending Ctrl+D ===");
     pty.write(b"\x04").expect("Failed to write Ctrl+D");
-    
+
     for _ in 0..20 {
         thread::sleep(Duration::from_millis(20));
         drain_and_process(&pty, &mut pane_emulator, &mut buf);
     }
-    
+
     eprintln!("\n=== After Ctrl+D ===");
     for y in 0..10 {
         eprintln!("  Line {}: {}", y, pane_emulator.grid().get_line_text(y));
     }
-    
+
     // Render after Ctrl+D
     let delta2 = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal, true);
-    
+
     // Check result
     if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
         eprintln!("\n=== MISMATCH DETECTED ===");
         eprintln!("{}", msg);
-        
+
         eprintln!("\n=== Real terminal lines ===");
         for y in 0..10 {
             eprintln!("  Line {}: {}", y, real_terminal.grid().get_line_text(y));
         }
-        
+
         panic!("Delta flow mismatch: {}", msg);
     }
-    
+
     eprintln!("\n=== Real terminal matches pane emulator ===");
 }
 
@@ -905,11 +910,20 @@ fn test_compositor_delta_flow_debug() {
 fn print_grid_diff(a: &TerminalGrid, b: &TerminalGrid, label_a: &str, label_b: &str) {
     eprintln!("\n=== Grid comparison: {} vs {} ===", label_a, label_b);
     eprintln!("Dimensions: {}x{} vs {}x{}", a.cols, a.rows, b.cols, b.rows);
-    eprintln!("Cursor: ({},{}) vs ({},{})", a.cursor_x, a.cursor_y, b.cursor_x, b.cursor_y);
-    eprintln!("Cursor visible: {} vs {}", a.cursor_visible, b.cursor_visible);
-    eprintln!("Scroll region: ({},{}) vs ({},{})", a.scroll_top, a.scroll_bottom, b.scroll_top, b.scroll_bottom);
+    eprintln!(
+        "Cursor: ({},{}) vs ({},{})",
+        a.cursor_x, a.cursor_y, b.cursor_x, b.cursor_y
+    );
+    eprintln!(
+        "Cursor visible: {} vs {}",
+        a.cursor_visible, b.cursor_visible
+    );
+    eprintln!(
+        "Scroll region: ({},{}) vs ({},{})",
+        a.scroll_top, a.scroll_bottom, b.scroll_top, b.scroll_bottom
+    );
     eprintln!();
-    
+
     let rows = a.rows.min(b.rows);
     for y in 0..rows {
         let line_a = a.get_line_text(y);
@@ -935,27 +949,38 @@ fn test_delta_with_scroll_region_mismatch() {
     let mut prev_grid = TerminalGrid::new(80, 24);
     for y in 0..24 {
         for x in 0..80 {
-            prev_grid.set_cell(x, y, Cell::new(((y % 26) as u8 + b'A') as char, CellAttributes::default()));
+            prev_grid.set_cell(
+                x,
+                y,
+                Cell::new(((y % 26) as u8 + b'A') as char, CellAttributes::default()),
+            );
         }
     }
-    
+
     // Create next state (what compositor wants terminal to look like)
     // Simulate vim scrolling: lines shift up
     let mut next_grid = TerminalGrid::new(80, 24);
     for y in 0..24 {
-        let shifted_y = (y + 12) % 24;  // Lines shifted
+        let shifted_y = (y + 12) % 24; // Lines shifted
         for x in 0..80 {
-            next_grid.set_cell(x, y, Cell::new(((shifted_y % 26) as u8 + b'A') as char, CellAttributes::default()));
+            next_grid.set_cell(
+                x,
+                y,
+                Cell::new(
+                    ((shifted_y % 26) as u8 + b'A') as char,
+                    CellAttributes::default(),
+                ),
+            );
         }
     }
-    
+
     // Compute delta (compositor assumes default scroll regions)
     let delta = compute_delta(&prev_grid, &next_grid);
-    
+
     // Now simulate what happens when delta is applied to a REAL terminal
     // that has a scroll region set (e.g., from vim)
     let mut real_terminal = TerminalEmulator::new(80, 24);
-    
+
     // Set up real terminal to match prev_grid
     for y in 0..24 {
         for x in 0..80 {
@@ -963,22 +988,26 @@ fn test_delta_with_scroll_region_mismatch() {
             real_terminal.grid_mut().set_cell(x, y, cell);
         }
     }
-    
+
     // CRITICAL: Set a scroll region on the real terminal (simulating vim's effect)
     // This is the state the real terminal has, but compositor doesn't know about
     real_terminal.grid_mut().scroll_top = 1;
     real_terminal.grid_mut().scroll_bottom = 22;
-    
+
     // Apply the delta
     real_terminal.process(&delta);
-    
+
     // Check if result matches expected
     if let Err(msg) = grids_match(real_terminal.grid(), &next_grid) {
         eprintln!("SCROLL REGION MISMATCH BUG REPRODUCED!");
         eprintln!("Delta applied to terminal with scroll region doesn't match expected.");
         eprintln!("{}", msg);
-        eprintln!("\nDelta ({} bytes): {:?}", delta.len(), String::from_utf8_lossy(&delta));
-        
+        eprintln!(
+            "\nDelta ({} bytes): {:?}",
+            delta.len(),
+            String::from_utf8_lossy(&delta)
+        );
+
         // This test documents the bug - when fixed, remove the expect below
         // For now, we expect this to fail if scroll regions affect the output
         panic!("Scroll region mismatch caused incorrect rendering: {}", msg);
@@ -990,13 +1019,13 @@ fn test_delta_with_scroll_region_mismatch() {
 fn test_delta_resets_scroll_region() {
     let prev_grid = TerminalGrid::new(80, 24);
     let next_grid = TerminalGrid::new(80, 24);
-    
+
     let delta = compute_delta(&prev_grid, &next_grid);
-    
+
     // The delta should probably reset scroll region to ensure known state
     // Check if it contains DECSTBM reset sequence \x1b[r or \x1b[1;24r
     let delta_str = String::from_utf8_lossy(&delta);
-    
+
     // This test documents expected behavior - update based on design decision
     eprintln!("Delta for identity: {:?}", delta_str);
 }
@@ -1006,7 +1035,7 @@ fn test_delta_resets_scroll_region() {
 /// 2. Cells are blitted to a fresh global_emulator
 /// 3. Delta is computed from prev_frame to global_emulator
 /// 4. Delta is applied to a "real terminal" emulator
-/// 
+///
 /// The key difference from other tests: we simulate what the compositor does
 /// where it creates a FRESH global_emulator each frame and only blits cells.
 #[test]
@@ -1015,55 +1044,52 @@ fn test_compositor_delta_flow() {
         eprintln!("Skipping test: vim not available");
         return;
     }
-    
+
     let cols = 84;
     let rows = 31;
-    
+
     // This simulates what the compositor does
     let command = format!(
         "bash -c \"cd {}/../.. && vim -n crates/emulator/fixtures/terminal.rs\"",
         env!("CARGO_MANIFEST_DIR")
     );
-    
-    let pty = PtyProcess::spawn(&command, cols as u16, rows as u16)
-        .expect("Failed to spawn vim");
-    
+
+    let pty = PtyProcess::spawn(&command, cols as u16, rows as u16).expect("Failed to spawn vim");
+
     // The pane's terminal emulator (like in compositor)
     let mut pane_emulator = TerminalEmulator::new(cols, rows);
-    
+
     // The "real terminal" - what actually displays on screen
     // This receives delta output
     let mut real_terminal = TerminalEmulator::new(cols, rows);
-    
+
     // Previous frame for delta computation
     let mut prev_frame = TerminalGrid::new(cols, rows);
-    
+
     let mut buf = [0u8; 8192];
-    
-    let drain_and_process = |pty: &PtyProcess, pane_emu: &mut TerminalEmulator, buf: &mut [u8]| {
-        loop {
-            match pty.read(buf) {
-                Ok(Some(n)) if n > 0 => {
-                    pane_emu.process(&buf[..n]);
-                    for response in pane_emu.drain_responses() {
-                        let _ = pty.write(&response);
-                    }
+
+    let drain_and_process = |pty: &PtyProcess, pane_emu: &mut TerminalEmulator, buf: &mut [u8]| loop {
+        match pty.read(buf) {
+            Ok(Some(n)) if n > 0 => {
+                pane_emu.process(&buf[..n]);
+                for response in pane_emu.drain_responses() {
+                    let _ = pty.write(&response);
                 }
-                _ => break,
             }
+            _ => break,
         }
     };
-    
+
     // Simulate compositor's render cycle
-    let render_and_apply = |pane_emu: &TerminalEmulator, 
-                            prev_frame: &mut TerminalGrid, 
+    let render_and_apply = |pane_emu: &TerminalEmulator,
+                            prev_frame: &mut TerminalGrid,
                             real_terminal: &mut TerminalEmulator| {
         // Create fresh global emulator (like compositor does)
         let mut global_emulator = TerminalEmulator::new(cols, rows);
-        
+
         // Blit pane cells into global emulator
         global_emulator.blit_from(pane_emu, 0, 0, 0, 0, cols, rows);
-        
+
         // Copy cursor info (like compositor does)
         {
             let (cx, cy) = pane_emu.cursor_position();
@@ -1073,57 +1099,67 @@ fn test_compositor_delta_flow() {
             global_grid.cursor_y = cy;
             global_grid.cursor_visible = pane_grid.cursor_visible;
         }
-        
+
         // Compute delta from prev_frame to global_emulator
         let delta = compute_delta(prev_frame, global_emulator.grid());
-        
+
         // Apply delta to real terminal
         real_terminal.process(&delta);
-        
+
         // Save current frame as prev_frame
         *prev_frame = global_emulator.grid().clone();
-        
+
         delta
     };
-    
+
     // Wait for vim to start
     for _ in 0..30 {
         thread::sleep(Duration::from_millis(20));
         drain_and_process(&pty, &mut pane_emulator, &mut buf);
     }
-    
+
     // Initial render
     let _delta1 = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
-    
+
     // Verify initial state matches
     if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
         panic!("Initial render mismatch: {}", msg);
     }
-    
+
     // Send Ctrl+D
     pty.write(b"\x04").expect("Failed to write Ctrl+D");
-    
+
     // Wait for vim to process
     for _ in 0..20 {
         thread::sleep(Duration::from_millis(20));
         drain_and_process(&pty, &mut pane_emulator, &mut buf);
     }
-    
+
     // Render after Ctrl+D
     let delta2 = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
-    
+
     // Verify real terminal matches pane emulator
     if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
         eprintln!("BUG REPRODUCED: After Ctrl+D, real terminal doesn't match pane emulator!");
         eprintln!("{}", msg);
-        eprintln!("\nDelta ({} bytes): {:?}", delta2.len(), String::from_utf8_lossy(&delta2));
-        
+        eprintln!(
+            "\nDelta ({} bytes): {:?}",
+            delta2.len(),
+            String::from_utf8_lossy(&delta2)
+        );
+
         // Print some diagnostic info
-        eprintln!("\nPane emulator scroll region: ({}, {})", 
-                  pane_emulator.grid().scroll_top, pane_emulator.grid().scroll_bottom);
-        eprintln!("Real terminal scroll region: ({}, {})",
-                  real_terminal.grid().scroll_top, real_terminal.grid().scroll_bottom);
-        
+        eprintln!(
+            "\nPane emulator scroll region: ({}, {})",
+            pane_emulator.grid().scroll_top,
+            pane_emulator.grid().scroll_bottom
+        );
+        eprintln!(
+            "Real terminal scroll region: ({}, {})",
+            real_terminal.grid().scroll_top,
+            real_terminal.grid().scroll_bottom
+        );
+
         panic!("Compositor delta flow failed after Ctrl+D: {}", msg);
     }
 }
