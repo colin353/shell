@@ -887,7 +887,7 @@ fn test_compositor_delta_flow_debug() {
     }
 
     // Render after Ctrl+D
-    let delta2 = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal, true);
+    let _delta2 = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal, true);
 
     // Check result
     if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {

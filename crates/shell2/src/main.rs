@@ -12,10 +12,25 @@ extern "C" fn handle_sigwinch(_: libc::c_int) {
     RESIZE_PENDING.store(true, Ordering::SeqCst);
 }
 
-fn main() {
-    // Get terminal size
-    let (width, height) = get_terminal_size();
+struct DebugWriter<W: Write> {
+    inner: W,
+    log_file: std::fs::File,
+}
 
+impl<W: Write> Write for DebugWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.log_file.write_all(&buf[..n])?;
+        self.log_file.flush()?;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn main() {
     // Set up raw mode TTY for input
     let tty = std::fs::OpenOptions::new()
         .read(true)
@@ -23,10 +38,20 @@ fn main() {
         .open("/dev/tty")
         .expect("Failed to open /dev/tty");
 
+    // Get terminal size
+    let (width, height) = get_terminal_size(tty.as_raw_fd());
+
+    // Create debug log file
+    let log_file = std::fs::File::create("shell2_debug.log").expect("Failed to create debug log");
+
     // Clone the TTY for output - the compositor will write to this
-    let tty_output: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(
-        tty.try_clone().expect("Failed to clone tty for output"),
-    ));
+    let tty_clone = tty.try_clone().expect("Failed to clone tty for output");
+    let debug_writer = DebugWriter {
+        inner: tty_clone,
+        log_file,
+    };
+
+    let tty_output: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(debug_writer));
 
     let mut tty_input = tty.try_clone().unwrap().guard_mode().unwrap();
     tty_input.set_raw_mode().expect("Failed to set raw mode");
@@ -60,7 +85,7 @@ fn main() {
     loop {
         // Check for resize events
         if RESIZE_PENDING.swap(false, Ordering::SeqCst) {
-            let (new_width, new_height) = get_terminal_size();
+            let (new_width, new_height) = get_terminal_size(tty.as_raw_fd());
             compositor.resize(new_width, new_height);
             // Clear screen and rerender after resize
             {
@@ -114,7 +139,7 @@ fn main() {
 }
 
 /// Get the terminal size using ioctl
-fn get_terminal_size() -> (usize, usize) {
+fn get_terminal_size(fd: std::os::fd::RawFd) -> (usize, usize) {
     let mut winsize = libc::winsize {
         ws_row: 0,
         ws_col: 0,
@@ -123,7 +148,7 @@ fn get_terminal_size() -> (usize, usize) {
     };
 
     unsafe {
-        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut winsize) == 0 {
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut winsize) == 0 {
             (winsize.ws_col as usize, winsize.ws_row as usize)
         } else {
             // Fallback to default size

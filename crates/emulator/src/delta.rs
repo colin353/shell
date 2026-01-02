@@ -49,6 +49,9 @@ pub fn compute_delta(prev: &TerminalGrid, next: &TerminalGrid) -> Vec<u8> {
                     line_start.unwrap(),
                     y,
                     &pending_cells,
+                    cols,
+                    rows,
+                    next.autowrap,
                 );
                 line_start = None;
                 pending_cells.clear();
@@ -65,6 +68,9 @@ pub fn compute_delta(prev: &TerminalGrid, next: &TerminalGrid) -> Vec<u8> {
                 line_start.unwrap(),
                 y,
                 &pending_cells,
+                cols,
+                rows,
+                next.autowrap,
             );
         }
     }
@@ -153,6 +159,9 @@ fn emit_cell_batch(
     start_x: usize,
     y: usize,
     cells: &[&Cell],
+    cols: usize,
+    rows: usize,
+    autowrap: bool,
 ) {
     if cells.is_empty() {
         return;
@@ -166,7 +175,16 @@ fn emit_cell_batch(
     }
 
     // Emit each cell
-    for cell in cells {
+    for (i, cell) in cells.iter().enumerate() {
+        let current_x = start_x + i;
+        let is_last_cell = current_x == cols - 1 && y == rows - 1;
+
+        // If we are writing to the last cell and autowrap is on, disable it temporarily
+        // to prevent scrolling
+        if is_last_cell && autowrap {
+            output.extend_from_slice(b"\x1b[?7l");
+        }
+
         // Update attributes if needed
         if cell.attrs != *current_attrs {
             emit_sgr_transition(output, current_attrs, &cell.attrs);
@@ -178,6 +196,11 @@ fn emit_cell_batch(
         let s = cell.character.encode_utf8(&mut buf);
         output.extend_from_slice(s.as_bytes());
         *cursor_x += 1;
+
+        // Re-enable autowrap if we disabled it
+        if is_last_cell && autowrap {
+            output.extend_from_slice(b"\x1b[?7h");
+        }
     }
 }
 
