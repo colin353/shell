@@ -119,7 +119,7 @@ fn test_hsplit_echo_command() -> Result<(), CompositorError> {
     // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
-    // Send "echo hello" to the focused (top) pane
+    // Send "echo hello" to the focused (bottom, newly created) pane
     compositor.handle_input(b"echo hello\n");
 
     // Wait for the command to execute and output to appear
@@ -128,16 +128,16 @@ fn test_hsplit_echo_command() -> Result<(), CompositorError> {
     // Render to update the global emulator
     compositor.render_to_vec();
 
-    // Get the text lines and verify "hello" appears in the top half
+    // Get the text lines and verify "hello" appears in the bottom half
     let lines = compositor.get_text_lines();
 
     // The top pane is rows 0-11, bottom is 12-23
-    let top_text: String = lines[..12].join("\n");
+    let bottom_text: String = lines[12..].join("\n");
 
     assert!(
-        top_text.contains("hello"),
-        "Expected 'hello' in top pane output. Got:\n{}",
-        top_text
+        bottom_text.contains("hello"),
+        "Expected 'hello' in bottom pane output. Got:\n{}",
+        bottom_text
     );
 
     Ok(())
@@ -159,7 +159,10 @@ fn test_hsplit_separate_panes() -> Result<(), CompositorError> {
     // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
-    // Send "echo TOP" to the top pane (initially focused)
+    // After split, focus is on bottom pane. Switch to top pane first.
+    compositor.handle_input(&[0x0b]); // Ctrl+k - move focus up
+
+    // Send "echo TOP" to the top pane
     compositor.handle_input(b"echo TOP\n");
     wait_for_output(&mut compositor, 300);
 
@@ -255,6 +258,9 @@ fn test_render_and_replay() -> Result<(), CompositorError> {
     // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
+    // After split, focus is on bottom pane. Switch to top pane first.
+    compositor.handle_input(&[0x0b]); // Ctrl+k - move focus up
+
     // Send commands to both panes to create a known state
     // Use printf with a known string to avoid bash prompt variability
     compositor.handle_input(b"printf 'TOP_PANE_MARKER\\n'\n");
@@ -316,6 +322,9 @@ fn test_vsplit_render_and_replay() -> Result<(), CompositorError> {
 
     // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
+
+    // After split, focus is on right pane. Switch to left pane first.
+    compositor.handle_input(&[0x08]); // Ctrl+h - move focus left
 
     // Send commands to both panes to create a known state
     // Use printf with a known string to avoid bash prompt variability

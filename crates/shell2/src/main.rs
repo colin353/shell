@@ -1,8 +1,16 @@
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use raw_tty::GuardMode;
+
+// Global flag to indicate a resize event occurred
+static RESIZE_PENDING: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigwinch(_: libc::c_int) {
+    RESIZE_PENDING.store(true, Ordering::SeqCst);
+}
 
 fn main() {
     // Get terminal size
@@ -34,6 +42,11 @@ fn main() {
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
 
+    // Set up SIGWINCH handler for terminal resize events
+    unsafe {
+        libc::signal(libc::SIGWINCH, handle_sigwinch as libc::sighandler_t);
+    }
+
     // Clear screen and move cursor to home position
     {
         let mut output = tty_output.lock().unwrap();
@@ -45,6 +58,18 @@ fn main() {
     let mut input_buf = [0u8; 1024];
 
     loop {
+        // Check for resize events
+        if RESIZE_PENDING.swap(false, Ordering::SeqCst) {
+            let (new_width, new_height) = get_terminal_size();
+            compositor.resize(new_width, new_height);
+            // Clear screen and rerender after resize
+            {
+                let mut output = tty_output.lock().unwrap();
+                let _ = output.write_all(b"\x1b[2J\x1b[H");
+                let _ = output.flush();
+            }
+        }
+
         // Check for keyboard input
         match tty_input.read(&mut input_buf) {
             Ok(0) => {

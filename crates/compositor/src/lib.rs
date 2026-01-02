@@ -211,21 +211,25 @@ impl Compositor {
                 0x08 => {
                     // Ctrl+h - move focus left
                     self.move_focus(Direction::Left);
+                    self.render();
                     return;
                 }
                 0x0a => {
                     // Ctrl+j - move focus down
                     self.move_focus(Direction::Down);
+                    self.render();
                     return;
                 }
                 0x0b => {
                     // Ctrl+k - move focus up
                     self.move_focus(Direction::Up);
+                    self.render();
                     return;
                 }
                 0x0c => {
                     // Ctrl+l - move focus right
                     self.move_focus(Direction::Right);
+                    self.render();
                     return;
                 }
                 _ => {}
@@ -288,7 +292,12 @@ impl Compositor {
                 unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as libc::nfds_t, -1) };
 
             if n < 0 {
-                return Err(CompositorError::Poll(std::io::Error::last_os_error()));
+                let err = std::io::Error::last_os_error();
+                // EINTR means we were interrupted by a signal - just continue
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(CompositorError::Poll(err));
             }
 
             if n == 0 {
@@ -358,7 +367,12 @@ impl Compositor {
         };
 
         if n < 0 {
-            return Err(CompositorError::Poll(std::io::Error::last_os_error()));
+            let err = std::io::Error::last_os_error();
+            // EINTR means we were interrupted by a signal - just return no events
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            return Err(CompositorError::Poll(err));
         }
 
         if n == 0 {
@@ -426,6 +440,14 @@ impl Compositor {
         // Composite all panes into the global emulator
         self.root.composite_into(&mut self.global_emulator);
 
+        // Set the cursor position and visibility from the focused pane
+        if let Some((cursor_x, cursor_y, cursor_visible)) = self.root.get_focused_cursor_info() {
+            let grid = self.global_emulator.grid_mut();
+            grid.cursor_x = cursor_x;
+            grid.cursor_y = cursor_y;
+            grid.cursor_visible = cursor_visible;
+        }
+
         // Compute the delta between the previous frame and current frame
         let delta = emulator::compute_delta(&self.prev_frame, self.global_emulator.grid());
 
@@ -475,6 +497,14 @@ impl Compositor {
         // Composite all panes into the global emulator
         self.root.composite_into(&mut self.global_emulator);
 
+        // Set the cursor position and visibility from the focused pane
+        if let Some((cursor_x, cursor_y, cursor_visible)) = self.root.get_focused_cursor_info() {
+            let grid = self.global_emulator.grid_mut();
+            grid.cursor_x = cursor_x;
+            grid.cursor_y = cursor_y;
+            grid.cursor_visible = cursor_visible;
+        }
+
         // Compute the delta between the previous frame and current frame
         let delta = emulator::compute_delta(&self.prev_frame, self.global_emulator.grid());
 
@@ -492,6 +522,19 @@ impl Compositor {
         (0..rows)
             .map(|y| self.global_emulator.grid().get_line_text(y))
             .collect()
+    }
+
+    /// Resize the compositor to new dimensions.
+    ///
+    /// This recalculates the size of all panes, distributing space evenly
+    /// within each split. All terminal emulators and PTYs are resized accordingly.
+    pub fn resize(&mut self, width: usize, height: usize) {
+        // Resize the global emulator and prev_frame
+        self.global_emulator = emulator::TerminalEmulator::new(width, height);
+        self.prev_frame = emulator::TerminalGrid::new(width, height);
+
+        // Recursively resize all panes starting from root
+        self.root.resize(0, 0, width, height);
     }
 }
 
@@ -748,7 +791,7 @@ impl PaneCell {
                     height: old_height,
                     pos_x: self.pos_x,
                     pos_y: self.pos_y,
-                    focus: true, // Keep focus on the original pane
+                    focus: false, // Original pane loses focus
                 };
 
                 let second_cell = PaneCell {
@@ -757,7 +800,7 @@ impl PaneCell {
                     height: new_height,
                     pos_x: new_pos_x,
                     pos_y: new_pos_y,
-                    focus: false,
+                    focus: true, // New pane gets focus
                 };
 
                 // Replace the inner content with a split
@@ -814,6 +857,94 @@ impl PaneCell {
                 // Recursively composite all child panes
                 for cell in cells {
                     cell.composite_into(dest);
+                }
+            }
+        }
+    }
+
+    /// Get the cursor info from the focused pane.
+    ///
+    /// Returns the cursor position in global coordinates (x, y) and visibility.
+    /// Returns None if no pane has focus.
+    fn get_focused_cursor_info(&self) -> Option<(usize, usize, bool)> {
+        if !self.focus {
+            return None;
+        }
+
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                let (cursor_x, cursor_y) = pane.terminal_emulator.cursor_position();
+                let cursor_visible = pane.terminal_emulator.grid().cursor_visible;
+                // Transform cursor position to global coordinates
+                let global_x = self.pos_x + cursor_x;
+                let global_y = self.pos_y + cursor_y;
+                Some((global_x, global_y, cursor_visible))
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                // Find the focused child and get its cursor info
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_focused_cursor_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Resize this pane cell to new dimensions and position.
+    ///
+    /// For splits, this distributes space evenly among children.
+    /// For leaf panes, this resizes the terminal emulator and PTY.
+    fn resize(&mut self, pos_x: usize, pos_y: usize, width: usize, height: usize) {
+        self.pos_x = pos_x;
+        self.pos_y = pos_y;
+        self.width = width;
+        self.height = height;
+
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                // Resize the terminal emulator
+                pane.terminal_emulator.resize(width, height);
+                // Resize the PTY if present
+                if let Some(ref pty) = pane.pty {
+                    let _ = pty.resize(width as u16, height as u16);
+                }
+            }
+            PaneCellInner::VSplit(cells) => {
+                // Distribute width evenly among children
+                let num_cells = cells.len();
+                if num_cells == 0 {
+                    return;
+                }
+
+                let base_width = width / num_cells;
+                let extra = width % num_cells;
+                let mut current_x = pos_x;
+
+                for (i, cell) in cells.iter_mut().enumerate() {
+                    // Give extra pixels to the first 'extra' cells
+                    let cell_width = base_width + if i < extra { 1 } else { 0 };
+                    cell.resize(current_x, pos_y, cell_width, height);
+                    current_x += cell_width;
+                }
+            }
+            PaneCellInner::HSplit(cells) => {
+                // Distribute height evenly among children
+                let num_cells = cells.len();
+                if num_cells == 0 {
+                    return;
+                }
+
+                let base_height = height / num_cells;
+                let extra = height % num_cells;
+                let mut current_y = pos_y;
+
+                for (i, cell) in cells.iter_mut().enumerate() {
+                    // Give extra pixels to the first 'extra' cells
+                    let cell_height = base_height + if i < extra { 1 } else { 0 };
+                    cell.resize(pos_x, current_y, width, cell_height);
+                    current_y += cell_height;
                 }
             }
         }
@@ -888,16 +1019,7 @@ mod tests {
         compositor.handle_input(&[0x02]); // Ctrl+b
         compositor.handle_input(&[b'"']); // "
 
-        // The top pane (index 0) should have focus
-        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
-            assert!(cells[0].has_focus());
-            assert!(!cells[1].has_focus());
-        }
-
-        // Move focus down (Ctrl+j = 0x0a)
-        compositor.handle_input(&[0x0a]);
-
-        // Now the bottom pane should have focus
+        // The bottom pane (index 1, newly created) should have focus
         if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
             assert!(!cells[0].has_focus());
             assert!(cells[1].has_focus());
@@ -906,10 +1028,19 @@ mod tests {
         // Move focus up (Ctrl+k = 0x0b)
         compositor.handle_input(&[0x0b]);
 
-        // Top pane should have focus again
+        // Now the top pane should have focus
         if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
             assert!(cells[0].has_focus());
             assert!(!cells[1].has_focus());
+        }
+
+        // Move focus down (Ctrl+j = 0x0a)
+        compositor.handle_input(&[0x0a]);
+
+        // Bottom pane should have focus again
+        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
+            assert!(!cells[0].has_focus());
+            assert!(cells[1].has_focus());
         }
     }
 
@@ -923,16 +1054,7 @@ mod tests {
         compositor.handle_input(&[0x02]); // Ctrl+b
         compositor.handle_input(&[b'%']); // %
 
-        // The left pane (index 0) should have focus
-        if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
-            assert!(cells[0].has_focus());
-            assert!(!cells[1].has_focus());
-        }
-
-        // Move focus right (Ctrl+l = 0x0c)
-        compositor.handle_input(&[0x0c]);
-
-        // Now the right pane should have focus
+        // The right pane (index 1, newly created) should have focus
         if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
             assert!(!cells[0].has_focus());
             assert!(cells[1].has_focus());
@@ -941,10 +1063,19 @@ mod tests {
         // Move focus left (Ctrl+h = 0x08)
         compositor.handle_input(&[0x08]);
 
-        // Left pane should have focus again
+        // Now the left pane should have focus
         if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
             assert!(cells[0].has_focus());
             assert!(!cells[1].has_focus());
+        }
+
+        // Move focus right (Ctrl+l = 0x0c)
+        compositor.handle_input(&[0x0c]);
+
+        // Right pane should have focus again
+        if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
+            assert!(!cells[0].has_focus());
+            assert!(cells[1].has_focus());
         }
     }
 
@@ -958,23 +1089,24 @@ mod tests {
         compositor.handle_input(&[0x02]); // Ctrl+b
         compositor.handle_input(&[b'"']); // "
 
-        // Try to move up when already at top - should stay at top
-        compositor.handle_input(&[0x0b]); // Ctrl+k
-
-        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
-            assert!(cells[0].has_focus());
-            assert!(!cells[1].has_focus());
-        }
-
-        // Move to bottom
-        compositor.handle_input(&[0x0a]); // Ctrl+j
-
+        // New pane (bottom, index 1) has focus after split
         // Try to move down when already at bottom - should stay at bottom
         compositor.handle_input(&[0x0a]); // Ctrl+j
 
         if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
             assert!(!cells[0].has_focus());
             assert!(cells[1].has_focus());
+        }
+
+        // Move to top
+        compositor.handle_input(&[0x0b]); // Ctrl+k
+
+        // Try to move up when already at top - should stay at top
+        compositor.handle_input(&[0x0b]); // Ctrl+k
+
+        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
+            assert!(cells[0].has_focus());
+            assert!(!cells[1].has_focus());
         }
     }
 
@@ -996,9 +1128,9 @@ mod tests {
         // Now should be an HSplit with two panes
         if let PaneCellInner::HSplit(cells) = compositor.root().inner() {
             assert_eq!(cells.len(), 2);
-            // First pane should have focus
-            assert!(cells[0].has_focus());
-            assert!(!cells[1].has_focus());
+            // Second pane (newly created) should have focus
+            assert!(!cells[0].has_focus());
+            assert!(cells[1].has_focus());
             // Check dimensions - should be split vertically
             assert_eq!(cells[0].dimensions(), (80, 12));
             assert_eq!(cells[1].dimensions(), (80, 12));
@@ -1025,9 +1157,9 @@ mod tests {
         // Now should be a VSplit with two panes
         if let PaneCellInner::VSplit(cells) = compositor.root().inner() {
             assert_eq!(cells.len(), 2);
-            // First pane should have focus
-            assert!(cells[0].has_focus());
-            assert!(!cells[1].has_focus());
+            // Second pane (newly created) should have focus
+            assert!(!cells[0].has_focus());
+            assert!(cells[1].has_focus());
             // Check dimensions - should be split horizontally
             assert_eq!(cells[0].dimensions(), (40, 24));
             assert_eq!(cells[1].dimensions(), (40, 24));

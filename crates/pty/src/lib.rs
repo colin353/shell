@@ -237,9 +237,49 @@ impl PtyProcess {
 
 impl Drop for PtyProcess {
     fn drop(&mut self) {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        use std::thread;
+        use std::time::Duration;
+
+        // First, check if the process has already exited
+        match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => {
+                // Process is still running, try graceful termination first
+                let _ = nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGTERM);
+
+                // Give it a short time to exit gracefully (up to 100ms)
+                for _ in 0..10 {
+                    thread::sleep(Duration::from_millis(10));
+                    match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
+                        Ok(WaitStatus::StillAlive) => continue,
+                        _ => return, // Process exited or error, we're done
+                    }
+                }
+
+                // Process didn't exit gracefully, force kill
+                let _ = nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGKILL);
+
+                // Reap the zombie with non-blocking wait (SIGKILL is delivered asynchronously)
+                // Try a few times to give the kernel time to deliver the signal
+                for _ in 0..5 {
+                    match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
+                        Ok(WaitStatus::StillAlive) => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        _ => return,
+                    }
+                }
+                // If still not reaped, give up - the process will be reaped eventually
+                // when the parent process exits or by init/systemd
+            }
+            Ok(_) => {
+                // Process already exited, zombie has been reaped
+            }
+            Err(_) => {
+                // Error checking process status (e.g., not our child), nothing to do
+            }
+        }
         // master_fd is closed automatically by OwnedFd
-        // Optionally kill the child process
-        let _ = nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGTERM);
     }
 }
 
