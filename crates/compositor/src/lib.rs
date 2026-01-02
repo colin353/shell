@@ -71,6 +71,15 @@ pub enum CompositorEvent {
     ProcessExited { pane_id: usize },
 }
 
+/// Direction for focus movement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 impl Compositor {
     /// Create a new compositor with the given dimensions.
     ///
@@ -142,8 +151,47 @@ impl Compositor {
     /// Handle input directly (for synchronous usage).
     ///
     /// This immediately sends the input to the focused pane's PTY.
+    /// Intercepts Ctrl+h/j/k/l to move focus between panes (vim-style navigation).
     pub fn handle_input(&mut self, input: &[u8]) {
+        // Check for focus movement shortcuts (Ctrl+h/j/k/l)
+        // Ctrl+h = 0x08, Ctrl+j = 0x0a, Ctrl+k = 0x0b, Ctrl+l = 0x0c
+        if input.len() == 1 {
+            match input[0] {
+                0x08 => {
+                    // Ctrl+h - move focus left
+                    self.move_focus(Direction::Left);
+                    return;
+                }
+                0x0a => {
+                    // Ctrl+j - move focus down
+                    self.move_focus(Direction::Down);
+                    return;
+                }
+                0x0b => {
+                    // Ctrl+k - move focus up
+                    self.move_focus(Direction::Up);
+                    return;
+                }
+                0x0c => {
+                    // Ctrl+l - move focus right
+                    self.move_focus(Direction::Right);
+                    return;
+                }
+                _ => {}
+            }
+        }
         self.root.handle_input(input);
+    }
+
+    /// Move focus in the specified direction.
+    ///
+    /// Uses vim-style navigation:
+    /// - Left (h): Move to the pane on the left
+    /// - Down (j): Move to the pane below
+    /// - Up (k): Move to the pane above
+    /// - Right (l): Move to the pane on the right
+    pub fn move_focus(&mut self, direction: Direction) {
+        self.root.move_focus(direction);
     }
 
     /// Run the event loop. This blocks and handles all events.
@@ -526,13 +574,6 @@ impl Compositor {
             .map(|y| self.global_emulator.grid().get_line_text(y))
             .collect()
     }
-
-    /// Set focus to a specific pane by index in split.
-    ///
-    /// For an HSplit, index 0 is the top pane, index 1 is the bottom pane.
-    pub fn set_focus(&mut self, index: usize) {
-        self.root.set_focus_by_index(index);
-    }
 }
 
 /// Errors that can occur in the compositor.
@@ -619,16 +660,89 @@ impl PaneCell {
         &self.inner
     }
 
-    /// Set focus to a child pane by index.
-    fn set_focus_by_index(&mut self, index: usize) {
+    /// Move focus in the specified direction.
+    ///
+    /// Returns true if focus was successfully moved, false otherwise.
+    pub fn move_focus(&mut self, direction: Direction) -> bool {
         match &mut self.inner {
             PaneCellInner::Pane(_) => {
-                // Single pane, just set focus on self
-                self.focus = true;
+                // Single pane, cannot move focus
+                false
             }
+            PaneCellInner::VSplit(cells) => {
+                // VSplit arranges panes horizontally (left to right)
+                // Left/Right moves between siblings, Up/Down goes into children
+                let focused_idx = cells.iter().position(|c| c.focus);
+
+                match (direction, focused_idx) {
+                    (Direction::Left, Some(idx)) if idx > 0 => {
+                        // Move focus to the left sibling
+                        cells[idx].clear_focus();
+                        cells[idx - 1].set_focus_first();
+                        true
+                    }
+                    (Direction::Right, Some(idx)) if idx < cells.len() - 1 => {
+                        // Move focus to the right sibling
+                        cells[idx].clear_focus();
+                        cells[idx + 1].set_focus_first();
+                        true
+                    }
+                    (_, Some(idx)) => {
+                        // Try to move focus within the focused child
+                        cells[idx].move_focus(direction)
+                    }
+                    _ => false,
+                }
+            }
+            PaneCellInner::HSplit(cells) => {
+                // HSplit arranges panes vertically (top to bottom)
+                // Up/Down moves between siblings, Left/Right goes into children
+                let focused_idx = cells.iter().position(|c| c.focus);
+
+                match (direction, focused_idx) {
+                    (Direction::Up, Some(idx)) if idx > 0 => {
+                        // Move focus to the upper sibling
+                        cells[idx].clear_focus();
+                        cells[idx - 1].set_focus_first();
+                        true
+                    }
+                    (Direction::Down, Some(idx)) if idx < cells.len() - 1 => {
+                        // Move focus to the lower sibling
+                        cells[idx].clear_focus();
+                        cells[idx + 1].set_focus_first();
+                        true
+                    }
+                    (_, Some(idx)) => {
+                        // Try to move focus within the focused child
+                        cells[idx].move_focus(direction)
+                    }
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    /// Clear focus on this cell and all children.
+    fn clear_focus(&mut self) {
+        self.focus = false;
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {}
             PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
-                for (i, cell) in cells.iter_mut().enumerate() {
-                    cell.focus = i == index;
+                for cell in cells {
+                    cell.clear_focus();
+                }
+            }
+        }
+    }
+
+    /// Set focus on the first (or leftmost/topmost) pane in this cell.
+    fn set_focus_first(&mut self) {
+        self.focus = true;
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {}
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                if let Some(first) = cells.first_mut() {
+                    first.set_focus_first();
                 }
             }
         }
@@ -726,5 +840,93 @@ mod tests {
         let queue = compositor.input_queue.lock().unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0], b"hello");
+    }
+
+    #[test]
+    fn test_hsplit_focus_movement() {
+        // Create an HSplit compositor (top/bottom panes)
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_hsplit_and_output(80, 24, output).unwrap();
+
+        // Initially, the top pane (index 0) should have focus
+        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
+            assert!(cells[0].has_focus());
+            assert!(!cells[1].has_focus());
+        }
+
+        // Move focus down (Ctrl+j = 0x0a)
+        compositor.handle_input(&[0x0a]);
+
+        // Now the bottom pane should have focus
+        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
+            assert!(!cells[0].has_focus());
+            assert!(cells[1].has_focus());
+        }
+
+        // Move focus up (Ctrl+k = 0x0b)
+        compositor.handle_input(&[0x0b]);
+
+        // Top pane should have focus again
+        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
+            assert!(cells[0].has_focus());
+            assert!(!cells[1].has_focus());
+        }
+    }
+
+    #[test]
+    fn test_vsplit_focus_movement() {
+        // Create a VSplit compositor (left/right panes)
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_vsplit_and_output(80, 24, output).unwrap();
+
+        // Initially, the left pane (index 0) should have focus
+        if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
+            assert!(cells[0].has_focus());
+            assert!(!cells[1].has_focus());
+        }
+
+        // Move focus right (Ctrl+l = 0x0c)
+        compositor.handle_input(&[0x0c]);
+
+        // Now the right pane should have focus
+        if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
+            assert!(!cells[0].has_focus());
+            assert!(cells[1].has_focus());
+        }
+
+        // Move focus left (Ctrl+h = 0x08)
+        compositor.handle_input(&[0x08]);
+
+        // Left pane should have focus again
+        if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
+            assert!(cells[0].has_focus());
+            assert!(!cells[1].has_focus());
+        }
+    }
+
+    #[test]
+    fn test_focus_movement_at_boundary() {
+        // Test that focus doesn't move past boundaries
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_hsplit_and_output(80, 24, output).unwrap();
+
+        // Try to move up when already at top - should stay at top
+        compositor.handle_input(&[0x0b]); // Ctrl+k
+
+        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
+            assert!(cells[0].has_focus());
+            assert!(!cells[1].has_focus());
+        }
+
+        // Move to bottom
+        compositor.handle_input(&[0x0a]); // Ctrl+j
+
+        // Try to move down when already at bottom - should stay at bottom
+        compositor.handle_input(&[0x0a]); // Ctrl+j
+
+        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
+            assert!(!cells[0].has_focus());
+            assert!(cells[1].has_focus());
+        }
     }
 }

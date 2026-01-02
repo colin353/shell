@@ -145,8 +145,8 @@ fn test_hsplit_separate_panes() -> Result<(), CompositorError> {
     compositor.handle_input(b"echo TOP\n");
     wait_for_output(&mut compositor, 300);
 
-    // Switch focus to bottom pane
-    compositor.set_focus(1);
+    // Switch focus to bottom pane using Ctrl+j (vim-style down)
+    compositor.handle_input(&[0x0a]);
 
     // Send "echo BOTTOM" to the bottom pane
     compositor.handle_input(b"echo BOTTOM\n");
@@ -230,7 +230,8 @@ fn test_render_and_replay() -> Result<(), CompositorError> {
     compositor.handle_input(b"printf 'TOP_PANE_MARKER\\n'\n");
     wait_for_output(&mut compositor, 300);
 
-    compositor.set_focus(1);
+    // Switch focus to bottom pane using Ctrl+j (vim-style down)
+    compositor.handle_input(&[0x0a]);
     compositor.handle_input(b"printf 'BOTTOM_PANE_MARKER\\n'\n");
     wait_for_output(&mut compositor, 300);
 
@@ -282,11 +283,12 @@ fn test_vsplit_render_and_replay() -> Result<(), CompositorError> {
 
     // Send commands to both panes to create a known state
     // Use printf with a known string to avoid bash prompt variability
-    compositor.handle_input(b"printf 'TOP_PANE_MARKER\\n'\n");
+    compositor.handle_input(b"printf 'LEFT_PANE_MARKER\\n'\n");
     wait_for_output(&mut compositor, 300);
 
-    compositor.set_focus(1);
-    compositor.handle_input(b"printf 'BOTTOM_PANE_MARKER\\n'\n");
+    // Switch focus to right pane using Ctrl+l (vim-style right)
+    compositor.handle_input(&[0x0c]);
+    compositor.handle_input(b"printf 'RIGHT_PANE_MARKER\\n'\n");
     wait_for_output(&mut compositor, 300);
 
     // Render to get the full output
@@ -309,15 +311,15 @@ fn test_vsplit_render_and_replay() -> Result<(), CompositorError> {
     let compositor_text: String = compositor_lines.join("\n");
 
     assert!(
-        replay_text.contains("TOP_PANE_MARKER"),
-        "Replay should contain TOP_PANE_MARKER.\nReplay:\n{}\nCompositor:\n{}",
+        replay_text.contains("LEFT_PANE_MARKER"),
+        "Replay should contain LEFT_PANE_MARKER.\nReplay:\n{}\nCompositor:\n{}",
         replay_text,
         compositor_text
     );
 
     assert!(
-        replay_text.contains("BOTTOM_PANE_MARKER"),
-        "Replay should contain BOTTOM_PANE_MARKER.\nReplay:\n{}\nCompositor:\n{}",
+        replay_text.contains("RIGHT_PANE_MARKER"),
+        "Replay should contain RIGHT_PANE_MARKER.\nReplay:\n{}\nCompositor:\n{}",
         replay_text,
         compositor_text
     );

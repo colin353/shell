@@ -5,8 +5,8 @@ To update your account to use zsh, pleasTo update your account to use zsh, pleas
 e run `chsh -s /bin/zsh`.               e run `chsh -s /bin/zsh`.               
 For more details, please visit https://sFor more details, please visit https://s
 upport.apple.com/kb/HT208050.           upport.apple.com/kb/HT208050.           
-bash-3.2$ printf 'TOP_PANE_MARKER\n'    bash-3.2$ printf 'BOTTOM_PANE_MARKER\n' 
-TOP_PANE_MARKER                         BOTTOM_PANE_MARKER                      
+bash-3.2$ printf 'LEFT_PANE_MARKER\n'   bash-3.2$ printf 'RIGHT_PANE_MARKER\n'  
+LEFT_PANE_MARKER                        RIGHT_PANE_MARKER                       
 bash-3.2$                               bash-3.2$                               
                                                                                 
                                                                                 

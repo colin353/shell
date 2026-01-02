@@ -86,7 +86,8 @@ impl TerminalEmulator {
         width: usize,
         height: usize,
     ) {
-        self.grid.blit_from(&source.grid, src_x, src_y, dst_x, dst_y, width, height);
+        self.grid
+            .blit_from(&source.grid, src_x, src_y, dst_x, dst_y, width, height);
     }
 
     /// Get the dimensions of this terminal (cols, rows)
