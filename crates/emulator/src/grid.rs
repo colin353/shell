@@ -527,6 +527,43 @@ impl TerminalGrid {
         }
     }
 
+    /// Blit a rectangular region from another grid into this one.
+    ///
+    /// Copies cells from `source` starting at (src_x, src_y) with dimensions (width, height)
+    /// into this grid at position (dst_x, dst_y).
+    pub fn blit_from(
+        &mut self,
+        source: &TerminalGrid,
+        src_x: usize,
+        src_y: usize,
+        dst_x: usize,
+        dst_y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        for row_offset in 0..height {
+            let src_row = src_y + row_offset;
+            let dst_row = dst_y + row_offset;
+
+            // Skip if source or destination row is out of bounds
+            if src_row >= source.rows || dst_row >= self.rows {
+                continue;
+            }
+
+            for col_offset in 0..width {
+                let src_col = src_x + col_offset;
+                let dst_col = dst_x + col_offset;
+
+                // Skip if source or destination column is out of bounds
+                if src_col >= source.cols || dst_col >= self.cols {
+                    continue;
+                }
+
+                self.cells[dst_row][dst_col] = source.cells[src_row][src_col].clone();
+            }
+        }
+    }
+
     /// Get text content of a line (trimmed)
     pub fn get_line_text(&self, y: usize) -> String {
         self.cells[y].iter().map(|c| c.character).collect()

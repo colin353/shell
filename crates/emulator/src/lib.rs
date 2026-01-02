@@ -62,6 +62,37 @@ impl TerminalEmulator {
     pub fn drain_responses(&mut self) -> Vec<Vec<u8>> {
         self.grid.drain_responses()
     }
+
+    /// Blit a rectangular region from another terminal emulator into this one.
+    ///
+    /// Copies cells from `source` starting at (src_x, src_y) with dimensions (width, height)
+    /// into this emulator at position (dst_x, dst_y).
+    ///
+    /// # Arguments
+    /// * `source` - The source terminal emulator to copy from
+    /// * `src_x` - Starting column in the source
+    /// * `src_y` - Starting row in the source
+    /// * `dst_x` - Destination column in this emulator
+    /// * `dst_y` - Destination row in this emulator
+    /// * `width` - Width of the region to copy
+    /// * `height` - Height of the region to copy
+    pub fn blit_from(
+        &mut self,
+        source: &TerminalEmulator,
+        src_x: usize,
+        src_y: usize,
+        dst_x: usize,
+        dst_y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        self.grid.blit_from(&source.grid, src_x, src_y, dst_x, dst_y, width, height);
+    }
+
+    /// Get the dimensions of this terminal (cols, rows)
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.grid.cols, self.grid.rows)
+    }
 }
 
 #[cfg(test)]

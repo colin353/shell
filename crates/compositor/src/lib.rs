@@ -15,12 +15,20 @@
 
 use nix::unistd::{pipe, read, write};
 use std::collections::VecDeque;
+use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// The main compositor that manages terminal panes and the event loop.
 pub struct Compositor {
     root: PaneCell,
+
+    // Global terminal emulator for compositing
+    global_emulator: emulator::TerminalEmulator,
+    // Previous frame for delta rendering
+    prev_frame: emulator::TerminalGrid,
+    // Output writer for rendering
+    output: Arc<Mutex<dyn Write + Send>>,
 
     // Event loop communication
     wake_read: OwnedFd,
@@ -67,7 +75,19 @@ impl Compositor {
     /// Create a new compositor with the given dimensions.
     ///
     /// This spawns a default shell in the root pane.
+    /// Output will be written to stdout by default.
     pub fn new(width: usize, height: usize) -> Result<Self, CompositorError> {
+        Self::with_output(width, height, Arc::new(Mutex::new(std::io::stdout())))
+    }
+
+    /// Create a new compositor with the given dimensions and custom output writer.
+    ///
+    /// This spawns a default shell in the root pane.
+    pub fn with_output(
+        width: usize,
+        height: usize,
+        output: Arc<Mutex<dyn Write + Send>>,
+    ) -> Result<Self, CompositorError> {
         // Create the wake pipe for signaling keyboard input
         let (wake_read, wake_write) = pipe().map_err(CompositorError::Pipe)?;
 
@@ -95,6 +115,9 @@ impl Compositor {
                 pos_y: 0,
                 focus: true,
             },
+            global_emulator: emulator::TerminalEmulator::new(width, height),
+            prev_frame: emulator::TerminalGrid::new(width, height),
+            output,
             wake_read,
             wake_write,
             input_queue: Mutex::new(VecDeque::new()),
@@ -129,13 +152,10 @@ impl Compositor {
     /// 1. Poll all PTY file descriptors and the wake pipe
     /// 2. Process any PTY output (feed to emulators)
     /// 3. Process any queued keyboard input
-    /// 4. Call the render callback
+    /// 4. Render the compositor
     ///
     /// Returns when all panes have exited or an error occurs.
-    pub fn run<F>(&mut self, mut on_update: F) -> Result<(), CompositorError>
-    where
-        F: FnMut(&mut Self),
-    {
+    pub fn run(&mut self) -> Result<(), CompositorError> {
         loop {
             // Collect all file descriptors to poll
             let mut poll_fds: Vec<libc::pollfd> = Vec::new();
@@ -198,8 +218,8 @@ impl Compositor {
             // Process queued keyboard input
             self.process_keyboard_queue();
 
-            // Call render callback
-            on_update(self);
+            // Render the compositor
+            self.render();
         }
     }
 
@@ -285,6 +305,33 @@ impl Compositor {
         }
     }
 
+    /// Render the compositor to the terminal.
+    ///
+    /// This traverses all panes, taking their grid contents and compositing them into
+    /// a single terminal emulator. Then, it uses delta rendering to output only the changed parts.
+    fn render(&mut self) {
+        // Clear the global emulator to prepare for compositing
+        let (cols, rows) = self.global_emulator.dimensions();
+        self.global_emulator = emulator::TerminalEmulator::new(cols, rows);
+
+        // Composite all panes into the global emulator
+        self.root.composite_into(&mut self.global_emulator);
+
+        // Compute the delta between the previous frame and current frame
+        let delta = emulator::compute_delta(&self.prev_frame, self.global_emulator.grid());
+
+        // Write the delta to the output
+        if !delta.is_empty() {
+            if let Ok(mut output) = self.output.lock() {
+                let _ = output.write_all(&delta);
+                let _ = output.flush();
+            }
+        }
+
+        // Save the current frame as the previous frame for next render
+        self.prev_frame = self.global_emulator.grid().clone();
+    }
+
     /// Get a reference to the root pane cell.
     pub fn root(&self) -> &PaneCell {
         &self.root
@@ -300,6 +347,191 @@ impl Compositor {
     /// This can be used to integrate the compositor into an external event loop.
     pub fn wake_fd(&self) -> RawFd {
         self.wake_read.as_raw_fd()
+    }
+
+    /// Create a new compositor with a horizontal split (top/bottom panes).
+    ///
+    /// The height is split evenly between the two panes.
+    pub fn with_hsplit(width: usize, height: usize) -> Result<Self, CompositorError> {
+        Self::with_hsplit_and_output(width, height, Arc::new(Mutex::new(std::io::stdout())))
+    }
+
+    pub fn with_vsplit_and_output(
+        width: usize,
+        height: usize,
+        output: Arc<Mutex<dyn Write + Send>>,
+    ) -> Result<Self, CompositorError> {
+        let (wake_read, wake_write) = pipe().map_err(CompositorError::Pipe)?;
+
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        let flags =
+            fcntl(wake_read.as_raw_fd(), FcntlArg::F_GETFL).map_err(CompositorError::Fcntl)?;
+        let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+        fcntl(wake_read.as_raw_fd(), FcntlArg::F_SETFL(new_flags))
+            .map_err(CompositorError::Fcntl)?;
+
+        let left_width = width / 2;
+        let right_width = width - left_width;
+
+        let left_pane = PaneCell {
+            inner: PaneCellInner::Pane(Pane {
+                terminal_emulator: emulator::TerminalEmulator::new(left_width, height),
+                pty: Some(
+                    pty::PtyProcess::spawn("/bin/bash", left_width as u16, height as u16)
+                        .map_err(CompositorError::Pty)?,
+                ),
+                read_buffer: [0u8; 4096],
+            }),
+            width: left_width,
+            height,
+            pos_x: 0,
+            pos_y: 0,
+            focus: true,
+        };
+
+        let right_pane = PaneCell {
+            inner: PaneCellInner::Pane(Pane {
+                terminal_emulator: emulator::TerminalEmulator::new(right_width, height),
+                pty: Some(
+                    pty::PtyProcess::spawn("/bin/bash", right_width as u16, height as u16)
+                        .map_err(CompositorError::Pty)?,
+                ),
+                read_buffer: [0u8; 4096],
+            }),
+            width: right_width,
+            height,
+            pos_x: left_width,
+            pos_y: 0,
+            focus: false,
+        };
+
+        Ok(Self {
+            root: PaneCell {
+                inner: PaneCellInner::VSplit(vec![left_pane, right_pane]),
+                width,
+                height,
+                pos_x: 0,
+                pos_y: 0,
+                focus: true,
+            },
+            global_emulator: emulator::TerminalEmulator::new(width, height),
+            prev_frame: emulator::TerminalGrid::new(width, height),
+            output,
+            wake_read,
+            wake_write,
+            input_queue: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    /// Create a new compositor with a horizontal split and custom output.
+    pub fn with_hsplit_and_output(
+        width: usize,
+        height: usize,
+        output: Arc<Mutex<dyn Write + Send>>,
+    ) -> Result<Self, CompositorError> {
+        let (wake_read, wake_write) = pipe().map_err(CompositorError::Pipe)?;
+
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        let flags =
+            fcntl(wake_read.as_raw_fd(), FcntlArg::F_GETFL).map_err(CompositorError::Fcntl)?;
+        let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+        fcntl(wake_read.as_raw_fd(), FcntlArg::F_SETFL(new_flags))
+            .map_err(CompositorError::Fcntl)?;
+
+        let top_height = height / 2;
+        let bottom_height = height - top_height;
+
+        let top_pane = PaneCell {
+            inner: PaneCellInner::Pane(Pane {
+                terminal_emulator: emulator::TerminalEmulator::new(width, top_height),
+                pty: Some(
+                    pty::PtyProcess::spawn("/bin/bash", width as u16, top_height as u16)
+                        .map_err(CompositorError::Pty)?,
+                ),
+                read_buffer: [0u8; 4096],
+            }),
+            width,
+            height: top_height,
+            pos_x: 0,
+            pos_y: 0,
+            focus: true,
+        };
+
+        let bottom_pane = PaneCell {
+            inner: PaneCellInner::Pane(Pane {
+                terminal_emulator: emulator::TerminalEmulator::new(width, bottom_height),
+                pty: Some(
+                    pty::PtyProcess::spawn("/bin/bash", width as u16, bottom_height as u16)
+                        .map_err(CompositorError::Pty)?,
+                ),
+                read_buffer: [0u8; 4096],
+            }),
+            width,
+            height: bottom_height,
+            pos_x: 0,
+            pos_y: top_height,
+            focus: false,
+        };
+
+        Ok(Self {
+            root: PaneCell {
+                inner: PaneCellInner::HSplit(vec![top_pane, bottom_pane]),
+                width,
+                height,
+                pos_x: 0,
+                pos_y: 0,
+                focus: true,
+            },
+            global_emulator: emulator::TerminalEmulator::new(width, height),
+            prev_frame: emulator::TerminalGrid::new(width, height),
+            output,
+            wake_read,
+            wake_write,
+            input_queue: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    /// Get a reference to the global emulator (for testing).
+    pub fn global_emulator(&self) -> &emulator::TerminalEmulator {
+        &self.global_emulator
+    }
+
+    /// Perform a render cycle and return the rendered output.
+    ///
+    /// This is useful for testing - it composites all panes and returns
+    /// the delta output that would be written to the terminal.
+    pub fn render_to_vec(&mut self) -> Vec<u8> {
+        // Clear the global emulator to prepare for compositing
+        let (cols, rows) = self.global_emulator.dimensions();
+        self.global_emulator = emulator::TerminalEmulator::new(cols, rows);
+
+        // Composite all panes into the global emulator
+        self.root.composite_into(&mut self.global_emulator);
+
+        // Compute the delta between the previous frame and current frame
+        let delta = emulator::compute_delta(&self.prev_frame, self.global_emulator.grid());
+
+        // Save the current frame as the previous frame for next render
+        self.prev_frame = self.global_emulator.grid().clone();
+
+        delta
+    }
+
+    /// Get the ASCII text content of the composited display.
+    ///
+    /// Returns a vector of strings, one per line.
+    pub fn get_text_lines(&self) -> Vec<String> {
+        let (_, rows) = self.global_emulator.dimensions();
+        (0..rows)
+            .map(|y| self.global_emulator.grid().get_line_text(y))
+            .collect()
+    }
+
+    /// Set focus to a specific pane by index in split.
+    ///
+    /// For an HSplit, index 0 is the top pane, index 1 is the bottom pane.
+    pub fn set_focus(&mut self, index: usize) {
+        self.root.set_focus_by_index(index);
     }
 }
 
@@ -385,6 +617,56 @@ impl PaneCell {
     /// Get a reference to the inner content.
     pub fn inner(&self) -> &PaneCellInner {
         &self.inner
+    }
+
+    /// Set focus to a child pane by index.
+    fn set_focus_by_index(&mut self, index: usize) {
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {
+                // Single pane, just set focus on self
+                self.focus = true;
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for (i, cell) in cells.iter_mut().enumerate() {
+                    cell.focus = i == index;
+                }
+            }
+        }
+    }
+
+    /// Get mutable access to a child pane by index.
+    pub fn get_child_mut(&mut self, index: usize) -> Option<&mut PaneCell> {
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => None,
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => cells.get_mut(index),
+        }
+    }
+
+    /// Composite this pane cell into the global emulator.
+    ///
+    /// Recursively traverses all child panes and blits their contents
+    /// into the destination emulator at the appropriate positions.
+    fn composite_into(&self, dest: &mut emulator::TerminalEmulator) {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                // Blit the pane's emulator content into the destination
+                dest.blit_from(
+                    &pane.terminal_emulator,
+                    0,           // source x (from origin of pane's emulator)
+                    0,           // source y
+                    self.pos_x,  // destination x (pane's position in compositor)
+                    self.pos_y,  // destination y
+                    self.width,  // width to copy
+                    self.height, // height to copy
+                );
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                // Recursively composite all child panes
+                for cell in cells {
+                    cell.composite_into(dest);
+                }
+            }
+        }
     }
 }
 
