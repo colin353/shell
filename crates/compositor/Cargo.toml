@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 emulator.path = "../emulator"
 pty.path = "../pty"
+nix = { version = "0.29", features = ["fs"] }
+libc = "0.2"
