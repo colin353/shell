@@ -74,8 +74,7 @@ fn wait_for_output(compositor: &mut Compositor, timeout_ms: u64) {
 fn test_hsplit_basic() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();
-    let mut compositor =
-        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to start up
     wait_for_output(&mut compositor, 500);
@@ -108,8 +107,7 @@ fn test_hsplit_basic() -> Result<(), CompositorError> {
 fn test_hsplit_echo_command() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
-    let mut compositor =
-        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -149,8 +147,7 @@ fn test_hsplit_echo_command() -> Result<(), CompositorError> {
 fn test_hsplit_separate_panes() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
-    let mut compositor =
-        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -212,8 +209,7 @@ fn test_hsplit_separate_panes() -> Result<(), CompositorError> {
 fn test_render_output_format() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
-    let mut compositor =
-        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -247,8 +243,7 @@ fn test_render_output_format() -> Result<(), CompositorError> {
 fn test_render_and_replay() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();
-    let mut compositor =
-        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -310,8 +305,7 @@ fn test_render_and_replay() -> Result<(), CompositorError> {
 fn test_vsplit_render_and_replay() -> Result<(), CompositorError> {
     // Create a compositor and split it vertically using Ctrl+b %
     let writer = MemoryWriter::new();
-    let mut compositor =
-        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
