@@ -730,3 +730,47 @@ fn test_vim_2() {
     let emulator = run_pty_test("vim", 84, 31, &[b"ihello to the world", b"\x1b", b":q\n"]);
     assert_grid_matches_attributes_fixture(&emulator, "vim-test-1.json", 31);
 }
+
+#[test]
+fn test_vim_3() {
+    if !command_available("vim") {
+        eprintln!("Skipping test: vim not available");
+        return;
+    }
+
+    // Start vim with no file, just the startup screen
+    // Using 84 columns and 31 lines to match the fixture
+    // Send escape as separate input to give vim time to process it before :q
+    let emulator = run_pty_test(
+        &format!(
+            "bash -c \"cd {}/../.. && vim -n crates/emulator/fixtures/terminal.rs\"",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+        84,
+        31,
+        &[],
+    );
+    assert_grid_matches_fixture(&emulator, "vim-test-2.txt", 31);
+}
+
+#[test]
+fn test_vim_4() {
+    if !command_available("vim") {
+        eprintln!("Skipping test: vim not available");
+        return;
+    }
+
+    // Start vim with no file, just the startup screen
+    // Using 84 columns and 31 lines to match the fixture
+    // Send escape as separate input to give vim time to process it before :q
+    let emulator = run_pty_test(
+        &format!(
+            "bash -c \"cd {}/../.. && vim -n crates/emulator/fixtures/terminal.rs\"",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+        84,
+        31,
+        &[b"\x04"],
+    );
+    assert_grid_matches_fixture(&emulator, "vim-test-3.txt", 31);
+}

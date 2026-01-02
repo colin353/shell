@@ -1,0 +1,31 @@
+use crate::emulator::Cell;
+use crate::tui;
+
+pub struct TermEmulator {}
+
+impl TermEmulatorState {
+    pub fn new() -> Self {
+        Self { lines: Vec::new() }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct TermEmulatorState {
+    pub lines: Vec<Line>,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum Line {
+    Command(String),
+    Text(String),
+    /// A line with per-cell attributes (colors, bold, etc.)
+    Cells(Vec<Cell>),
+}
+
+impl TermEmulator {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+"crates/emulator/fixtures/terminal.rs" 85L, 2351B
