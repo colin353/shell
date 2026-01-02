@@ -72,12 +72,19 @@ fn wait_for_output(compositor: &mut Compositor, timeout_ms: u64) {
 
 #[test]
 fn test_hsplit_basic() -> Result<(), CompositorError> {
-    // Create a compositor with horizontal split (80x24, split into two 80x12 panes)
+    // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();
     let mut compositor =
-        Compositor::with_hsplit_and_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
-    // Wait for bash to start up in both panes
+    // Wait for bash to start up
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split with Ctrl+b "
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+
+    // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
     // Render to capture the initial state
@@ -99,12 +106,19 @@ fn test_hsplit_basic() -> Result<(), CompositorError> {
 
 #[test]
 fn test_hsplit_echo_command() -> Result<(), CompositorError> {
-    // Create a compositor with horizontal split
+    // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
     let mut compositor =
-        Compositor::with_hsplit_and_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split with Ctrl+b "
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+
+    // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
     // Send "echo hello" to the focused (top) pane
@@ -133,12 +147,19 @@ fn test_hsplit_echo_command() -> Result<(), CompositorError> {
 
 #[test]
 fn test_hsplit_separate_panes() -> Result<(), CompositorError> {
-    // Create a compositor with horizontal split
+    // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
     let mut compositor =
-        Compositor::with_hsplit_and_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split with Ctrl+b "
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+
+    // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
     // Send "echo TOP" to the top pane (initially focused)
@@ -189,12 +210,19 @@ fn test_hsplit_separate_panes() -> Result<(), CompositorError> {
 
 #[test]
 fn test_render_output_format() -> Result<(), CompositorError> {
-    // Create a compositor with horizontal split
+    // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
     let mut compositor =
-        Compositor::with_hsplit_and_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split with Ctrl+b "
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+
+    // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
     // First render - should produce output to set up initial state
@@ -217,12 +245,19 @@ fn test_render_output_format() -> Result<(), CompositorError> {
 
 #[test]
 fn test_render_and_replay() -> Result<(), CompositorError> {
-    // Create a compositor with horizontal split
+    // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();
     let mut compositor =
-        Compositor::with_hsplit_and_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split with Ctrl+b "
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+
+    // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
     // Send commands to both panes to create a known state
@@ -273,12 +308,19 @@ fn test_render_and_replay() -> Result<(), CompositorError> {
 
 #[test]
 fn test_vsplit_render_and_replay() -> Result<(), CompositorError> {
-    // Create a compositor with horizontal split
+    // Create a compositor and split it vertically using Ctrl+b %
     let writer = MemoryWriter::new();
     let mut compositor =
-        Compositor::with_vsplit_and_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+        Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
     // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Create vertical split with Ctrl+b %
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'%']); // %
+
+    // Wait for the new pane's bash to start
     wait_for_output(&mut compositor, 500);
 
     // Send commands to both panes to create a known state

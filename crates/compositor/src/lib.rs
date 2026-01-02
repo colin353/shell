@@ -34,6 +34,9 @@ pub struct Compositor {
     wake_read: OwnedFd,
     wake_write: OwnedFd,
     input_queue: Mutex<VecDeque<Vec<u8>>>,
+
+    // Prefix mode for tmux-style commands (Ctrl+b)
+    prefix_mode: bool,
 }
 
 /// A cell in the pane tree, which can be a single pane or a split.
@@ -78,6 +81,15 @@ pub enum Direction {
     Right,
     Up,
     Down,
+}
+
+/// Direction for splitting a pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    /// Split horizontally (creates top/bottom panes)
+    Horizontal,
+    /// Split vertically (creates left/right panes)
+    Vertical,
 }
 
 impl Compositor {
@@ -130,6 +142,7 @@ impl Compositor {
             wake_read,
             wake_write,
             input_queue: Mutex::new(VecDeque::new()),
+            prefix_mode: false,
         })
     }
 
@@ -152,7 +165,45 @@ impl Compositor {
     ///
     /// This immediately sends the input to the focused pane's PTY.
     /// Intercepts Ctrl+h/j/k/l to move focus between panes (vim-style navigation).
+    /// Supports tmux-style Ctrl+b prefix for compositor commands:
+    /// - Ctrl+b " : Split horizontally (top/bottom)
+    /// - Ctrl+b % : Split vertically (left/right)
     pub fn handle_input(&mut self, input: &[u8]) {
+        // Handle prefix mode commands
+        if self.prefix_mode {
+            self.prefix_mode = false;
+            if input.len() == 1 {
+                match input[0] {
+                    b'"' => {
+                        // Ctrl+b " - horizontal split (top/bottom)
+                        let _ = self.split_focused_pane(SplitDirection::Horizontal);
+                        return;
+                    }
+                    b'%' => {
+                        // Ctrl+b % - vertical split (left/right)
+                        let _ = self.split_focused_pane(SplitDirection::Vertical);
+                        return;
+                    }
+                    0x02 => {
+                        // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
+                        self.root.handle_input(&[0x02]);
+                        return;
+                    }
+                    _ => {
+                        // Unknown command, ignore
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Check for prefix key (Ctrl+b = 0x02)
+        if input.len() == 1 && input[0] == 0x02 {
+            self.prefix_mode = true;
+            return;
+        }
+
         // Check for focus movement shortcuts (Ctrl+h/j/k/l)
         // Ctrl+h = 0x08, Ctrl+j = 0x0a, Ctrl+k = 0x0b, Ctrl+l = 0x0c
         if input.len() == 1 {
@@ -181,6 +232,13 @@ impl Compositor {
             }
         }
         self.root.handle_input(input);
+    }
+
+    /// Split the currently focused pane.
+    ///
+    /// Creates a new pane by splitting the focused pane either horizontally or vertically.
+    pub fn split_focused_pane(&mut self, direction: SplitDirection) -> Result<(), CompositorError> {
+        self.root.split_focused(direction)
     }
 
     /// Move focus in the specified direction.
@@ -397,148 +455,6 @@ impl Compositor {
         self.wake_read.as_raw_fd()
     }
 
-    /// Create a new compositor with a horizontal split (top/bottom panes).
-    ///
-    /// The height is split evenly between the two panes.
-    pub fn with_hsplit(width: usize, height: usize) -> Result<Self, CompositorError> {
-        Self::with_hsplit_and_output(width, height, Arc::new(Mutex::new(std::io::stdout())))
-    }
-
-    pub fn with_vsplit_and_output(
-        width: usize,
-        height: usize,
-        output: Arc<Mutex<dyn Write + Send>>,
-    ) -> Result<Self, CompositorError> {
-        let (wake_read, wake_write) = pipe().map_err(CompositorError::Pipe)?;
-
-        use nix::fcntl::{fcntl, FcntlArg, OFlag};
-        let flags =
-            fcntl(wake_read.as_raw_fd(), FcntlArg::F_GETFL).map_err(CompositorError::Fcntl)?;
-        let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-        fcntl(wake_read.as_raw_fd(), FcntlArg::F_SETFL(new_flags))
-            .map_err(CompositorError::Fcntl)?;
-
-        let left_width = width / 2;
-        let right_width = width - left_width;
-
-        let left_pane = PaneCell {
-            inner: PaneCellInner::Pane(Pane {
-                terminal_emulator: emulator::TerminalEmulator::new(left_width, height),
-                pty: Some(
-                    pty::PtyProcess::spawn("/bin/bash", left_width as u16, height as u16)
-                        .map_err(CompositorError::Pty)?,
-                ),
-                read_buffer: [0u8; 4096],
-            }),
-            width: left_width,
-            height,
-            pos_x: 0,
-            pos_y: 0,
-            focus: true,
-        };
-
-        let right_pane = PaneCell {
-            inner: PaneCellInner::Pane(Pane {
-                terminal_emulator: emulator::TerminalEmulator::new(right_width, height),
-                pty: Some(
-                    pty::PtyProcess::spawn("/bin/bash", right_width as u16, height as u16)
-                        .map_err(CompositorError::Pty)?,
-                ),
-                read_buffer: [0u8; 4096],
-            }),
-            width: right_width,
-            height,
-            pos_x: left_width,
-            pos_y: 0,
-            focus: false,
-        };
-
-        Ok(Self {
-            root: PaneCell {
-                inner: PaneCellInner::VSplit(vec![left_pane, right_pane]),
-                width,
-                height,
-                pos_x: 0,
-                pos_y: 0,
-                focus: true,
-            },
-            global_emulator: emulator::TerminalEmulator::new(width, height),
-            prev_frame: emulator::TerminalGrid::new(width, height),
-            output,
-            wake_read,
-            wake_write,
-            input_queue: Mutex::new(VecDeque::new()),
-        })
-    }
-
-    /// Create a new compositor with a horizontal split and custom output.
-    pub fn with_hsplit_and_output(
-        width: usize,
-        height: usize,
-        output: Arc<Mutex<dyn Write + Send>>,
-    ) -> Result<Self, CompositorError> {
-        let (wake_read, wake_write) = pipe().map_err(CompositorError::Pipe)?;
-
-        use nix::fcntl::{fcntl, FcntlArg, OFlag};
-        let flags =
-            fcntl(wake_read.as_raw_fd(), FcntlArg::F_GETFL).map_err(CompositorError::Fcntl)?;
-        let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-        fcntl(wake_read.as_raw_fd(), FcntlArg::F_SETFL(new_flags))
-            .map_err(CompositorError::Fcntl)?;
-
-        let top_height = height / 2;
-        let bottom_height = height - top_height;
-
-        let top_pane = PaneCell {
-            inner: PaneCellInner::Pane(Pane {
-                terminal_emulator: emulator::TerminalEmulator::new(width, top_height),
-                pty: Some(
-                    pty::PtyProcess::spawn("/bin/bash", width as u16, top_height as u16)
-                        .map_err(CompositorError::Pty)?,
-                ),
-                read_buffer: [0u8; 4096],
-            }),
-            width,
-            height: top_height,
-            pos_x: 0,
-            pos_y: 0,
-            focus: true,
-        };
-
-        let bottom_pane = PaneCell {
-            inner: PaneCellInner::Pane(Pane {
-                terminal_emulator: emulator::TerminalEmulator::new(width, bottom_height),
-                pty: Some(
-                    pty::PtyProcess::spawn("/bin/bash", width as u16, bottom_height as u16)
-                        .map_err(CompositorError::Pty)?,
-                ),
-                read_buffer: [0u8; 4096],
-            }),
-            width,
-            height: bottom_height,
-            pos_x: 0,
-            pos_y: top_height,
-            focus: false,
-        };
-
-        Ok(Self {
-            root: PaneCell {
-                inner: PaneCellInner::HSplit(vec![top_pane, bottom_pane]),
-                width,
-                height,
-                pos_x: 0,
-                pos_y: 0,
-                focus: true,
-            },
-            global_emulator: emulator::TerminalEmulator::new(width, height),
-            prev_frame: emulator::TerminalGrid::new(width, height),
-            output,
-            wake_read,
-            wake_write,
-            input_queue: Mutex::new(VecDeque::new()),
-        })
-    }
-
     /// Get a reference to the global emulator (for testing).
     pub fn global_emulator(&self) -> &emulator::TerminalEmulator {
         &self.global_emulator
@@ -748,6 +664,123 @@ impl PaneCell {
         }
     }
 
+    /// Split the focused pane in the given direction.
+    ///
+    /// If this cell is a pane with focus, it will be converted into a split.
+    /// If this cell is a split, it will recursively find the focused pane and split it.
+    pub fn split_focused(&mut self, direction: SplitDirection) -> Result<(), CompositorError> {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                if !self.focus {
+                    return Ok(());
+                }
+
+                // Create a new pane to add to the split
+                let (new_width, new_height, new_pos_x, new_pos_y) = match direction {
+                    SplitDirection::Horizontal => {
+                        // Split top/bottom: each pane gets half the height
+                        let top_height = self.height / 2;
+                        let bottom_height = self.height - top_height;
+                        (
+                            self.width,
+                            bottom_height,
+                            self.pos_x,
+                            self.pos_y + top_height,
+                        )
+                    }
+                    SplitDirection::Vertical => {
+                        // Split left/right: each pane gets half the width
+                        let left_width = self.width / 2;
+                        let right_width = self.width - left_width;
+                        (
+                            right_width,
+                            self.height,
+                            self.pos_x + left_width,
+                            self.pos_y,
+                        )
+                    }
+                };
+
+                // Resize the existing pane's emulator
+                let (old_width, old_height) = match direction {
+                    SplitDirection::Horizontal => (self.width, self.height / 2),
+                    SplitDirection::Vertical => (self.width / 2, self.height),
+                };
+
+                // Create the existing pane cell with updated dimensions
+                pane.terminal_emulator.resize(old_width, old_height);
+                if let Some(ref pty) = pane.pty {
+                    let _ = pty.resize(old_width as u16, old_height as u16);
+                }
+
+                // Create a new pane with a new shell
+                let new_pane = Pane {
+                    terminal_emulator: emulator::TerminalEmulator::new(new_width, new_height),
+                    pty: Some(
+                        pty::PtyProcess::spawn("/bin/bash", new_width as u16, new_height as u16)
+                            .map_err(CompositorError::Pty)?,
+                    ),
+                    read_buffer: [0u8; 4096],
+                };
+
+                // Take ownership of the old pane
+                let old_inner = std::mem::replace(
+                    &mut self.inner,
+                    PaneCellInner::Pane(Pane {
+                        terminal_emulator: emulator::TerminalEmulator::new(1, 1),
+                        pty: None,
+                        read_buffer: [0u8; 4096],
+                    }),
+                );
+
+                let old_pane = match old_inner {
+                    PaneCellInner::Pane(p) => p,
+                    _ => unreachable!(),
+                };
+
+                // Create the two child cells
+                let first_cell = PaneCell {
+                    inner: PaneCellInner::Pane(old_pane),
+                    width: old_width,
+                    height: old_height,
+                    pos_x: self.pos_x,
+                    pos_y: self.pos_y,
+                    focus: true, // Keep focus on the original pane
+                };
+
+                let second_cell = PaneCell {
+                    inner: PaneCellInner::Pane(new_pane),
+                    width: new_width,
+                    height: new_height,
+                    pos_x: new_pos_x,
+                    pos_y: new_pos_y,
+                    focus: false,
+                };
+
+                // Replace the inner content with a split
+                self.inner = match direction {
+                    SplitDirection::Horizontal => {
+                        PaneCellInner::HSplit(vec![first_cell, second_cell])
+                    }
+                    SplitDirection::Vertical => {
+                        PaneCellInner::VSplit(vec![first_cell, second_cell])
+                    }
+                };
+
+                Ok(())
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                // Find the focused child and split it
+                for cell in cells {
+                    if cell.focus {
+                        return cell.split_focused(direction);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Get mutable access to a child pane by index.
     pub fn get_child_mut(&mut self, index: usize) -> Option<&mut PaneCell> {
         match &mut self.inner {
@@ -844,11 +877,15 @@ mod tests {
 
     #[test]
     fn test_hsplit_focus_movement() {
-        // Create an HSplit compositor (top/bottom panes)
+        // Create an HSplit compositor (top/bottom panes) using Ctrl+b "
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_hsplit_and_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
 
-        // Initially, the top pane (index 0) should have focus
+        // Create horizontal split with Ctrl+b "
+        compositor.handle_input(&[0x02]); // Ctrl+b
+        compositor.handle_input(&[b'"']); // "
+
+        // The top pane (index 0) should have focus
         if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
             assert!(cells[0].has_focus());
             assert!(!cells[1].has_focus());
@@ -875,11 +912,15 @@ mod tests {
 
     #[test]
     fn test_vsplit_focus_movement() {
-        // Create a VSplit compositor (left/right panes)
+        // Create a VSplit compositor (left/right panes) using Ctrl+b %
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_vsplit_and_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
 
-        // Initially, the left pane (index 0) should have focus
+        // Create vertical split with Ctrl+b %
+        compositor.handle_input(&[0x02]); // Ctrl+b
+        compositor.handle_input(&[b'%']); // %
+
+        // The left pane (index 0) should have focus
         if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
             assert!(cells[0].has_focus());
             assert!(!cells[1].has_focus());
@@ -908,7 +949,11 @@ mod tests {
     fn test_focus_movement_at_boundary() {
         // Test that focus doesn't move past boundaries
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_hsplit_and_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+
+        // Create horizontal split with Ctrl+b "
+        compositor.handle_input(&[0x02]); // Ctrl+b
+        compositor.handle_input(&[b'"']); // "
 
         // Try to move up when already at top - should stay at top
         compositor.handle_input(&[0x0b]); // Ctrl+k
@@ -928,5 +973,95 @@ mod tests {
             assert!(!cells[0].has_focus());
             assert!(cells[1].has_focus());
         }
+    }
+
+    #[test]
+    fn test_prefix_mode_horizontal_split() {
+        // Test that Ctrl+b " creates a horizontal split
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+
+        // Initially should be a single pane
+        assert!(matches!(compositor.root().inner(), PaneCellInner::Pane(_)));
+
+        // Send Ctrl+b (0x02) to enter prefix mode
+        compositor.handle_input(&[0x02]);
+
+        // Send " to trigger horizontal split
+        compositor.handle_input(&[b'"']);
+
+        // Now should be an HSplit with two panes
+        if let PaneCellInner::HSplit(cells) = compositor.root().inner() {
+            assert_eq!(cells.len(), 2);
+            // First pane should have focus
+            assert!(cells[0].has_focus());
+            assert!(!cells[1].has_focus());
+            // Check dimensions - should be split vertically
+            assert_eq!(cells[0].dimensions(), (80, 12));
+            assert_eq!(cells[1].dimensions(), (80, 12));
+        } else {
+            panic!("Expected HSplit after Ctrl+b \"");
+        }
+    }
+
+    #[test]
+    fn test_prefix_mode_vertical_split() {
+        // Test that Ctrl+b % creates a vertical split
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+
+        // Initially should be a single pane
+        assert!(matches!(compositor.root().inner(), PaneCellInner::Pane(_)));
+
+        // Send Ctrl+b (0x02) to enter prefix mode
+        compositor.handle_input(&[0x02]);
+
+        // Send % to trigger vertical split
+        compositor.handle_input(&[b'%']);
+
+        // Now should be a VSplit with two panes
+        if let PaneCellInner::VSplit(cells) = compositor.root().inner() {
+            assert_eq!(cells.len(), 2);
+            // First pane should have focus
+            assert!(cells[0].has_focus());
+            assert!(!cells[1].has_focus());
+            // Check dimensions - should be split horizontally
+            assert_eq!(cells[0].dimensions(), (40, 24));
+            assert_eq!(cells[1].dimensions(), (40, 24));
+        } else {
+            panic!("Expected VSplit after Ctrl+b %");
+        }
+    }
+
+    #[test]
+    fn test_prefix_mode_escape() {
+        // Test that unknown keys in prefix mode are ignored
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+
+        // Send Ctrl+b to enter prefix mode
+        compositor.handle_input(&[0x02]);
+
+        // Send an unknown key - should exit prefix mode without doing anything
+        compositor.handle_input(&[b'x']);
+
+        // Should still be a single pane
+        assert!(matches!(compositor.root().inner(), PaneCellInner::Pane(_)));
+    }
+
+    #[test]
+    fn test_prefix_mode_send_ctrl_b() {
+        // Test that Ctrl+b Ctrl+b sends Ctrl+b to the terminal
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+
+        // Send Ctrl+b to enter prefix mode
+        compositor.handle_input(&[0x02]);
+
+        // Send Ctrl+b again - should send Ctrl+b to terminal and exit prefix mode
+        compositor.handle_input(&[0x02]);
+
+        // Should still be a single pane (Ctrl+b was forwarded to terminal, not interpreted)
+        assert!(matches!(compositor.root().inner(), PaneCellInner::Pane(_)));
     }
 }
