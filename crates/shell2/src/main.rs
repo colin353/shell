@@ -12,24 +12,6 @@ extern "C" fn handle_sigwinch(_: libc::c_int) {
     RESIZE_PENDING.store(true, Ordering::SeqCst);
 }
 
-struct DebugWriter<W: Write> {
-    inner: W,
-    log_file: std::fs::File,
-}
-
-impl<W: Write> Write for DebugWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.log_file.write_all(&buf[..n])?;
-        self.log_file.flush()?;
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
 fn main() {
     // Set up raw mode TTY for input
     let tty = std::fs::OpenOptions::new()
@@ -41,17 +23,15 @@ fn main() {
     // Get terminal size
     let (width, height) = get_terminal_size(tty.as_raw_fd());
 
-    // Create debug log file
-    let log_file = std::fs::File::create("shell2_debug.log").expect("Failed to create debug log");
+    // Open a SEPARATE /dev/tty for output - this is critical!
+    // We can't use try_clone() because that shares the file description,
+    // and when we set the input to non-blocking, it would affect the output too.
+    let tty_output_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .expect("Failed to open /dev/tty for output");
 
-    // Clone the TTY for output - the compositor will write to this
-    let tty_clone = tty.try_clone().expect("Failed to clone tty for output");
-    let debug_writer = DebugWriter {
-        inner: tty_clone,
-        log_file,
-    };
-
-    let tty_output: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(debug_writer));
+    let tty_output: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(tty_output_file));
 
     let mut tty_input = tty.try_clone().unwrap().guard_mode().unwrap();
     tty_input.set_raw_mode().expect("Failed to set raw mode");
