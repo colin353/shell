@@ -244,7 +244,19 @@ impl Drop for PtyProcess {
         // First, check if the process has already exited
         match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => {
-                // Process is still running, try graceful termination first
+                // Process is still running
+                // The child is a session leader (setsid in login_tty), so kill the whole process group
+                // Using negative PID sends the signal to the entire process group
+                let pgid = nix::unistd::Pid::from_raw(-self.child_pid.as_raw());
+                
+                // Send SIGHUP first - this is the proper signal for "terminal hung up"
+                // Many interactive programs handle SIGHUP by exiting cleanly
+                let _ = nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGHUP);
+                
+                // Also send SIGTERM for programs that don't handle SIGHUP
+                let _ = nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGTERM);
+                // Also signal the specific process in case the group signal failed
+                let _ = nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGHUP);
                 let _ = nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGTERM);
 
                 // Give it a short time to exit gracefully (up to 100ms)
@@ -256,7 +268,8 @@ impl Drop for PtyProcess {
                     }
                 }
 
-                // Process didn't exit gracefully, force kill
+                // Process didn't exit gracefully, force kill the process group
+                let _ = nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGKILL);
                 let _ = nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGKILL);
 
                 // Reap the zombie with non-blocking wait (SIGKILL is delivered asynchronously)
