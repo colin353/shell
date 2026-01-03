@@ -89,6 +89,33 @@ struct SavedScreen {
     scrollback: Vec<Vec<Cell>>,
 }
 
+impl SavedScreen {
+    /// Resize the saved screen to new dimensions
+    fn resize(&mut self, cols: usize, rows: usize) {
+        // Adjust rows
+        while self.cells.len() < rows {
+            self.cells.push((0..cols).map(|_| Cell::empty()).collect());
+        }
+        while self.cells.len() > rows {
+            self.cells.pop();
+        }
+
+        // Adjust columns
+        for row in &mut self.cells {
+            while row.len() < cols {
+                row.push(Cell::empty());
+            }
+            while row.len() > cols {
+                row.pop();
+            }
+        }
+
+        // Clamp cursor position
+        self.cursor_x = self.cursor_x.min(cols.saturating_sub(1));
+        self.cursor_y = self.cursor_y.min(rows.saturating_sub(1));
+    }
+}
+
 impl TerminalGrid {
     pub fn new(cols: usize, rows: usize) -> Self {
         let cells = (0..rows)
@@ -513,6 +540,13 @@ impl TerminalGrid {
         // Reset scroll region to full screen on resize
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
+
+        // Also resize the saved screen if we're in alternate screen mode
+        // This ensures that when we leave alternate screen, the restored
+        // screen has the correct dimensions
+        if let Some(ref mut saved) = self.saved_screen {
+            saved.resize(cols, rows);
+        }
     }
 
     /// Get a cell at position
@@ -646,10 +680,18 @@ impl TerminalGrid {
         }
 
         // Restore saved screen state
-        if let Some(saved) = self.saved_screen.take() {
+        if let Some(mut saved) = self.saved_screen.take() {
+            // Ensure the saved screen matches current dimensions
+            // (resize should have kept them in sync, but this is a safety check)
+            if saved.cells.len() != self.rows
+                || saved.cells.first().map(|r| r.len()).unwrap_or(0) != self.cols
+            {
+                saved.resize(self.cols, self.rows);
+            }
+
             self.cells = saved.cells;
-            self.cursor_x = saved.cursor_x;
-            self.cursor_y = saved.cursor_y;
+            self.cursor_x = saved.cursor_x.min(self.cols.saturating_sub(1));
+            self.cursor_y = saved.cursor_y.min(self.rows.saturating_sub(1));
             self.scrollback = saved.scrollback;
         }
 
@@ -832,5 +874,77 @@ mod tests {
         // Content outside scroll region should be unchanged
         assert_eq!(grid.get_cell(0, 0).character, '0');
         assert_eq!(grid.get_cell(0, 4).character, '4');
+    }
+
+    #[test]
+    fn test_resize_while_in_alternate_screen() {
+        // Simulate: user at 80x24, starts vim (enters alternate), resizes to 120x40, exits vim
+        let mut grid = TerminalGrid::new(80, 24);
+
+        // Write some content to main screen
+        for c in "Hello, World!".chars() {
+            grid.put_char(c);
+        }
+        assert_eq!(grid.cols, 80);
+        assert_eq!(grid.rows, 24);
+
+        // Enter alternate screen (like vim starting)
+        grid.enter_alternate_screen();
+        assert!(grid.in_alternate_screen);
+
+        // Write content in alternate screen
+        for c in "Vim content".chars() {
+            grid.put_char(c);
+        }
+
+        // Resize while in alternate screen (user drags window)
+        grid.resize(120, 40);
+        assert_eq!(grid.cols, 120);
+        assert_eq!(grid.rows, 40);
+
+        // Leave alternate screen (vim exits)
+        grid.leave_alternate_screen();
+        assert!(!grid.in_alternate_screen);
+
+        // Grid should still have correct dimensions
+        assert_eq!(grid.cols, 120);
+        assert_eq!(grid.rows, 40);
+        assert_eq!(grid.cells.len(), 40);
+        assert_eq!(grid.cells[0].len(), 120);
+
+        // Original content should be preserved (at least the part that fits)
+        assert_eq!(grid.get_cell(0, 0).character, 'H');
+        assert_eq!(grid.get_cell(1, 0).character, 'e');
+    }
+
+    #[test]
+    fn test_resize_smaller_while_in_alternate_screen() {
+        // Simulate: user at 80x24, starts vim, resizes smaller to 40x12, exits vim
+        let mut grid = TerminalGrid::new(80, 24);
+
+        // Write content across the screen
+        grid.move_cursor_to(50, 15);
+        for c in "Far content".chars() {
+            grid.put_char(c);
+        }
+
+        // Enter alternate screen
+        grid.enter_alternate_screen();
+
+        // Resize smaller
+        grid.resize(40, 12);
+
+        // Leave alternate screen
+        grid.leave_alternate_screen();
+
+        // Grid should have correct dimensions
+        assert_eq!(grid.cols, 40);
+        assert_eq!(grid.rows, 12);
+        assert_eq!(grid.cells.len(), 12);
+        assert_eq!(grid.cells[0].len(), 40);
+
+        // Cursor should be clamped to valid position
+        assert!(grid.cursor_x < 40);
+        assert!(grid.cursor_y < 12);
     }
 }

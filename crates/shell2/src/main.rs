@@ -67,12 +67,13 @@ fn main() {
         if RESIZE_PENDING.swap(false, Ordering::SeqCst) {
             let (new_width, new_height) = get_terminal_size(tty.as_raw_fd());
             compositor.resize(new_width, new_height);
-            // Clear screen and rerender after resize
+            // Clear screen and force a full redraw after resize
             {
                 let mut output = tty_output.lock().unwrap();
                 let _ = output.write_all(b"\x1b[2J\x1b[H");
                 let _ = output.flush();
             }
+            compositor.force_render();
         }
 
         // Check for keyboard input
