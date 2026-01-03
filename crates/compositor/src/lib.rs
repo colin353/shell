@@ -793,37 +793,40 @@ impl PaneCell {
                     return Ok(());
                 }
 
-                // Create a new pane to add to the split
-                let (new_width, new_height, new_pos_x, new_pos_y) = match direction {
-                    SplitDirection::Horizontal => {
-                        // Split top/bottom: each pane gets half the height
-                        let top_height = self.height / 2;
-                        let bottom_height = self.height - top_height;
-                        (
-                            self.width,
-                            bottom_height,
-                            self.pos_x,
-                            self.pos_y + top_height,
-                        )
-                    }
-                    SplitDirection::Vertical => {
-                        // Split left/right: each pane gets half the width
-                        let left_width = self.width / 2;
-                        let right_width = self.width - left_width;
-                        (
-                            right_width,
-                            self.height,
-                            self.pos_x + left_width,
-                            self.pos_y,
-                        )
-                    }
-                };
-
-                // Resize the existing pane's emulator
-                let (old_width, old_height) = match direction {
-                    SplitDirection::Horizontal => (self.width, self.height / 2),
-                    SplitDirection::Vertical => (self.width / 2, self.height),
-                };
+                // Calculate dimensions accounting for border (1 cell between panes)
+                let (old_width, old_height, new_width, new_height, new_pos_x, new_pos_y) =
+                    match direction {
+                        SplitDirection::Horizontal => {
+                            // Split top/bottom: each pane gets half the height minus border
+                            // Total height = top_height + 1 (border) + bottom_height
+                            let available_height = self.height.saturating_sub(1); // Reserve 1 for border
+                            let top_height = available_height / 2;
+                            let bottom_height = available_height - top_height;
+                            (
+                                self.width,
+                                top_height,
+                                self.width,
+                                bottom_height,
+                                self.pos_x,
+                                self.pos_y + top_height + 1, // +1 for border
+                            )
+                        }
+                        SplitDirection::Vertical => {
+                            // Split left/right: each pane gets half the width minus border
+                            // Total width = left_width + 1 (border) + right_width
+                            let available_width = self.width.saturating_sub(1); // Reserve 1 for border
+                            let left_width = available_width / 2;
+                            let right_width = available_width - left_width;
+                            (
+                                left_width,
+                                self.height,
+                                right_width,
+                                self.height,
+                                self.pos_x + left_width + 1, // +1 for border
+                                self.pos_y,
+                            )
+                        }
+                    };
 
                 // Create the existing pane cell with updated dimensions
                 pane.terminal_emulator.resize(old_width, old_height);
@@ -925,15 +928,333 @@ impl PaneCell {
                     self.height, // height to copy
                 );
             }
-            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+            PaneCellInner::VSplit(cells) => {
                 // Recursively composite all child panes
                 for cell in cells {
                     cell.composite_into(dest);
+                }
+                // Draw vertical borders between panes
+                self.draw_vsplit_borders(cells, dest);
+            }
+            PaneCellInner::HSplit(cells) => {
+                // Recursively composite all child panes
+                for cell in cells {
+                    cell.composite_into(dest);
+                }
+                // Draw horizontal borders between panes
+                self.draw_hsplit_borders(cells, dest);
+            }
+        }
+    }
+
+    /// Draw vertical borders between VSplit panes.
+    fn draw_vsplit_borders(&self, cells: &[PaneCell], dest: &mut emulator::TerminalEmulator) {
+        for i in 0..cells.len().saturating_sub(1) {
+            // Border is positioned right after the current cell
+            let border_x = cells[i].pos_x + cells[i].width;
+
+            // Draw vertical line for the height of this split
+            for y in self.pos_y..(self.pos_y + self.height) {
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if border_x < cols && y < rows {
+                    let existing = dest.grid().get_cell(border_x, y).character;
+                    let border_char = get_border_char(existing, '│');
+                    dest.grid_mut().set_cell(
+                        border_x,
+                        y,
+                        emulator::Cell::new(border_char, emulator::CellAttributes::default()),
+                    );
+                }
+            }
+
+            // Check the row above for a horizontal border and add DOWN direction to create T-junction
+            if self.pos_y > 0 {
+                let y_above = self.pos_y - 1;
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if border_x < cols && y_above < rows {
+                    let existing = dest.grid().get_cell(border_x, y_above).character;
+                    let existing_dirs = BorderDirections::from_char(existing);
+                    // If there's a horizontal border above (has left+right), add down direction
+                    if existing_dirs.left && existing_dirs.right {
+                        let new_dirs = existing_dirs.merge(BorderDirections {
+                            up: false,
+                            down: true,
+                            left: false,
+                            right: false,
+                        });
+                        dest.grid_mut().set_cell(
+                            border_x,
+                            y_above,
+                            emulator::Cell::new(
+                                new_dirs.to_char(),
+                                emulator::CellAttributes::default(),
+                            ),
+                        );
+                    }
+                }
+            }
+
+            // Check the column to the right for horizontal borders and add LEFT direction
+            let x_right = border_x + 1;
+            let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+            if x_right < cols {
+                for y in self.pos_y..(self.pos_y + self.height) {
+                    if y < rows {
+                        let right_char = dest.grid().get_cell(x_right, y).character;
+                        let right_dirs = BorderDirections::from_char(right_char);
+                        // If there's a horizontal border to the right (has left+right), add right direction to current
+                        if right_dirs.left && right_dirs.right {
+                            let current = dest.grid().get_cell(border_x, y).character;
+                            let current_dirs = BorderDirections::from_char(current);
+                            let new_dirs = current_dirs.merge(BorderDirections {
+                                up: false,
+                                down: false,
+                                left: false,
+                                right: true,
+                            });
+                            dest.grid_mut().set_cell(
+                                border_x,
+                                y,
+                                emulator::Cell::new(
+                                    new_dirs.to_char(),
+                                    emulator::CellAttributes::default(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Check the column to the left for horizontal borders and add RIGHT direction
+            if border_x > 0 {
+                let x_left = border_x - 1;
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if x_left < cols {
+                    for y in self.pos_y..(self.pos_y + self.height) {
+                        if y < rows {
+                            let left_char = dest.grid().get_cell(x_left, y).character;
+                            let left_dirs = BorderDirections::from_char(left_char);
+                            // If there's a horizontal border to the left (has left+right), add left direction to current
+                            if left_dirs.left && left_dirs.right {
+                                let current = dest.grid().get_cell(border_x, y).character;
+                                let current_dirs = BorderDirections::from_char(current);
+                                let new_dirs = current_dirs.merge(BorderDirections {
+                                    up: false,
+                                    down: false,
+                                    left: true,
+                                    right: false,
+                                });
+                                dest.grid_mut().set_cell(
+                                    border_x,
+                                    y,
+                                    emulator::Cell::new(
+                                        new_dirs.to_char(),
+                                        emulator::CellAttributes::default(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
+    /// Draw horizontal borders between HSplit panes.
+    fn draw_hsplit_borders(&self, cells: &[PaneCell], dest: &mut emulator::TerminalEmulator) {
+        for i in 0..cells.len().saturating_sub(1) {
+            // Border is positioned right after the current cell
+            let border_y = cells[i].pos_y + cells[i].height;
+
+            // Draw horizontal line for the width of this split
+            for x in self.pos_x..(self.pos_x + self.width) {
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if x < cols && border_y < rows {
+                    let existing = dest.grid().get_cell(x, border_y).character;
+                    let border_char = get_border_char(existing, '─');
+                    dest.grid_mut().set_cell(
+                        x,
+                        border_y,
+                        emulator::Cell::new(border_char, emulator::CellAttributes::default()),
+                    );
+                }
+            }
+
+            // Check the row below for vertical borders and add DOWN direction to create T-junction
+            let y_below = border_y + 1;
+            let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+            if y_below < rows {
+                for x in self.pos_x..(self.pos_x + self.width) {
+                    if x < cols {
+                        let below_char = dest.grid().get_cell(x, y_below).character;
+                        let below_dirs = BorderDirections::from_char(below_char);
+                        // If there's a vertical border below (has up+down), add down direction to current
+                        if below_dirs.up && below_dirs.down {
+                            let current = dest.grid().get_cell(x, border_y).character;
+                            let current_dirs = BorderDirections::from_char(current);
+                            let new_dirs = current_dirs.merge(BorderDirections {
+                                up: false,
+                                down: true,
+                                left: false,
+                                right: false,
+                            });
+                            dest.grid_mut().set_cell(
+                                x,
+                                border_y,
+                                emulator::Cell::new(
+                                    new_dirs.to_char(),
+                                    emulator::CellAttributes::default(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Check the row above for vertical borders and add UP direction to create T-junction
+            if border_y > 0 {
+                let y_above = border_y - 1;
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if y_above < rows {
+                    for x in self.pos_x..(self.pos_x + self.width) {
+                        if x < cols {
+                            let above_char = dest.grid().get_cell(x, y_above).character;
+                            let above_dirs = BorderDirections::from_char(above_char);
+                            // If there's a vertical border above (has up+down), add up direction to current
+                            if above_dirs.up && above_dirs.down {
+                                let current = dest.grid().get_cell(x, border_y).character;
+                                let current_dirs = BorderDirections::from_char(current);
+                                let new_dirs = current_dirs.merge(BorderDirections {
+                                    up: true,
+                                    down: false,
+                                    left: false,
+                                    right: false,
+                                });
+                                dest.grid_mut().set_cell(
+                                    x,
+                                    border_y,
+                                    emulator::Cell::new(
+                                        new_dirs.to_char(),
+                                        emulator::CellAttributes::default(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Flags representing which directions a border character connects to
+#[derive(Clone, Copy, Default)]
+struct BorderDirections {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+impl BorderDirections {
+    /// Get directions from an existing character
+    fn from_char(c: char) -> Self {
+        match c {
+            '─' => Self {
+                left: true,
+                right: true,
+                up: false,
+                down: false,
+            },
+            '│' => Self {
+                left: false,
+                right: false,
+                up: true,
+                down: true,
+            },
+            '├' => Self {
+                left: false,
+                right: true,
+                up: true,
+                down: true,
+            },
+            '┤' => Self {
+                left: true,
+                right: false,
+                up: true,
+                down: true,
+            },
+            '┬' => Self {
+                left: true,
+                right: true,
+                up: false,
+                down: true,
+            },
+            '┴' => Self {
+                left: true,
+                right: true,
+                up: true,
+                down: false,
+            },
+            '┼' => Self {
+                left: true,
+                right: true,
+                up: true,
+                down: true,
+            },
+            _ => Self::default(),
+        }
+    }
+
+    /// Merge with another set of directions
+    fn merge(&self, other: Self) -> Self {
+        Self {
+            up: self.up || other.up,
+            down: self.down || other.down,
+            left: self.left || other.left,
+            right: self.right || other.right,
+        }
+    }
+
+    /// Convert to the appropriate border character
+    fn to_char(&self) -> char {
+        match (self.up, self.down, self.left, self.right) {
+            // Four-way
+            (true, true, true, true) => '┼',
+            // Three-way (T-junctions)
+            (true, true, false, true) => '├',
+            (true, true, true, false) => '┤',
+            (false, true, true, true) => '┬',
+            (true, false, true, true) => '┴',
+            // Two-way
+            (true, true, false, false) => '│',
+            (false, false, true, true) => '─',
+            // Corners (for completeness, though we may not use them)
+            (false, true, false, true) => '┌',
+            (false, true, true, false) => '┐',
+            (true, false, false, true) => '└',
+            (true, false, true, false) => '┘',
+            // Single direction or none - shouldn't happen in practice
+            _ => ' ',
+        }
+    }
+}
+
+/// Get the appropriate border character by merging existing with new directions.
+fn get_border_char(existing: char, default: char) -> char {
+    let existing_dirs = BorderDirections::from_char(existing);
+    let new_dirs = BorderDirections::from_char(default);
+    let merged = existing_dirs.merge(new_dirs);
+
+    // If we have any directions, use the merged result; otherwise use default
+    if merged.up || merged.down || merged.left || merged.right {
+        merged.to_char()
+    } else {
+        default
+    }
+}
+
+impl PaneCell {
     /// Get the cursor info from the focused pane.
     ///
     /// Returns the cursor position in global coordinates (x, y) and visibility.
@@ -984,14 +1305,17 @@ impl PaneCell {
                 }
             }
             PaneCellInner::VSplit(cells) => {
-                // Distribute width evenly among children
+                // Distribute width evenly among children, reserving 1 column for each border
                 let num_cells = cells.len();
                 if num_cells == 0 {
                     return;
                 }
 
-                let base_width = width / num_cells;
-                let extra = width % num_cells;
+                // Reserve 1 column for each border between panes
+                let num_borders = num_cells.saturating_sub(1);
+                let available_width = width.saturating_sub(num_borders);
+                let base_width = available_width / num_cells;
+                let extra = available_width % num_cells;
                 let mut current_x = pos_x;
 
                 for (i, cell) in cells.iter_mut().enumerate() {
@@ -999,17 +1323,24 @@ impl PaneCell {
                     let cell_width = base_width + if i < extra { 1 } else { 0 };
                     cell.resize(current_x, pos_y, cell_width, height);
                     current_x += cell_width;
+                    // Skip 1 column for border after each pane (except the last)
+                    if i < num_cells - 1 {
+                        current_x += 1;
+                    }
                 }
             }
             PaneCellInner::HSplit(cells) => {
-                // Distribute height evenly among children
+                // Distribute height evenly among children, reserving 1 row for each border
                 let num_cells = cells.len();
                 if num_cells == 0 {
                     return;
                 }
 
-                let base_height = height / num_cells;
-                let extra = height % num_cells;
+                // Reserve 1 row for each border between panes
+                let num_borders = num_cells.saturating_sub(1);
+                let available_height = height.saturating_sub(num_borders);
+                let base_height = available_height / num_cells;
+                let extra = available_height % num_cells;
                 let mut current_y = pos_y;
 
                 for (i, cell) in cells.iter_mut().enumerate() {
@@ -1017,6 +1348,10 @@ impl PaneCell {
                     let cell_height = base_height + if i < extra { 1 } else { 0 };
                     cell.resize(pos_x, current_y, width, cell_height);
                     current_y += cell_height;
+                    // Skip 1 row for border after each pane (except the last)
+                    if i < num_cells - 1 {
+                        current_y += 1;
+                    }
                 }
             }
         }
@@ -1203,8 +1538,9 @@ mod tests {
             // Second pane (newly created) should have focus
             assert!(!cells[0].has_focus());
             assert!(cells[1].has_focus());
-            // Check dimensions - should be split vertically
-            assert_eq!(cells[0].dimensions(), (80, 12));
+            // Check dimensions - should be split vertically with 1 row border
+            // 24 rows - 1 border = 23 available, split as 11 + 12
+            assert_eq!(cells[0].dimensions(), (80, 11));
             assert_eq!(cells[1].dimensions(), (80, 12));
         } else {
             panic!("Expected HSplit after Ctrl+b \"");
@@ -1232,8 +1568,9 @@ mod tests {
             // Second pane (newly created) should have focus
             assert!(!cells[0].has_focus());
             assert!(cells[1].has_focus());
-            // Check dimensions - should be split horizontally
-            assert_eq!(cells[0].dimensions(), (40, 24));
+            // Check dimensions - should be split horizontally with 1 column border
+            // 80 cols - 1 border = 79 available, split as 39 + 40
+            assert_eq!(cells[0].dimensions(), (39, 24));
             assert_eq!(cells[1].dimensions(), (40, 24));
         } else {
             panic!("Expected VSplit after Ctrl+b %");
@@ -1307,9 +1644,9 @@ mod tests {
         compositor.handle_input(&[0x02]); // Ctrl+b
         compositor.handle_input(&[b'%']); // %
 
-        // Verify initial split dimensions
+        // Verify initial split dimensions (80 cols - 1 border = 79, split as 39 + 40)
         if let PaneCellInner::VSplit(cells) = compositor.root().inner() {
-            assert_eq!(cells[0].dimensions(), (40, 24));
+            assert_eq!(cells[0].dimensions(), (39, 24));
             assert_eq!(cells[1].dimensions(), (40, 24));
         } else {
             panic!("Expected VSplit");
@@ -1318,10 +1655,10 @@ mod tests {
         // Resize the compositor
         compositor.resize(100, 30);
 
-        // Verify dimensions are redistributed
+        // Verify dimensions are redistributed (100 cols - 1 border = 99, split as 50 + 49)
         if let PaneCellInner::VSplit(cells) = compositor.root().inner() {
             assert_eq!(cells[0].dimensions(), (50, 30));
-            assert_eq!(cells[1].dimensions(), (50, 30));
+            assert_eq!(cells[1].dimensions(), (49, 30));
         } else {
             panic!("Expected VSplit after resize");
         }
@@ -1329,10 +1666,10 @@ mod tests {
         // Resize to smaller
         compositor.resize(60, 20);
 
-        // Verify dimensions are redistributed
+        // Verify dimensions are redistributed (60 cols - 1 border = 59, split as 30 + 29)
         if let PaneCellInner::VSplit(cells) = compositor.root().inner() {
             assert_eq!(cells[0].dimensions(), (30, 20));
-            assert_eq!(cells[1].dimensions(), (30, 20));
+            assert_eq!(cells[1].dimensions(), (29, 20));
         } else {
             panic!("Expected VSplit after resize");
         }

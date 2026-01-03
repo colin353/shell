@@ -394,3 +394,52 @@ fn compare_with_fixture(compositor: &Compositor, fixture_name: &str) {
         );
     }
 }
+
+#[test]
+fn test_render_and_replay_hvsplit() -> Result<(), CompositorError> {
+    // Create a compositor and split it horizontally using Ctrl+b "
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split with Ctrl+b "
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+
+    // Create a vertical split with Ctrl+b %
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'%']); // %
+
+    // Wait for the new pane's bash to start
+    wait_for_output(&mut compositor, 500);
+
+    // Render to get the full output
+    let render_output = compositor.render_to_vec();
+
+    // Now create a fresh emulator and replay the render output onto it
+    let mut replay_emulator = emulator::TerminalEmulator::new(80, 24);
+    replay_emulator.process(&render_output);
+
+    // Compare the replay emulator with the compositor's global emulator
+    let compositor_lines = compositor.get_text_lines();
+    let replay_lines: Vec<String> = (0..24)
+        .map(|y| replay_emulator.grid().get_line_text(y))
+        .collect();
+
+    save_fixture("hvsplit_replay_fixture.txt", &replay_lines);
+
+    // The replay should contain the same markers
+    let replay_text: String = replay_lines.join("\n");
+    let compositor_text: String = compositor_lines.join("\n");
+
+    assert!(
+        replay_text.contains("┬"),
+        "Replay should contain ┬.\nReplay:\n{}\nCompositor:\n{}",
+        replay_text,
+        compositor_text
+    );
+
+    Ok(())
+}
