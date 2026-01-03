@@ -121,12 +121,15 @@ fn run_pty_test_with_wait(
         for i in 0..max_iterations {
             thread::sleep(Duration::from_millis(20));
             drain_pty(pty, emulator, buf, debug);
-            
+
             // If we're waiting for specific content, check if it's visible
             if let Some(content) = wait_for {
                 if content_visible(emulator, content) {
                     if debug {
-                        eprintln!("=== Found expected content '{}' after {} iterations ===", content, i);
+                        eprintln!(
+                            "=== Found expected content '{}' after {} iterations ===",
+                            content, i
+                        );
                     }
                     // Do a few more iterations to let things settle
                     for _ in 0..5 {
@@ -141,7 +144,14 @@ fn run_pty_test_with_wait(
 
     // Wait for program to start - use longer timeout when waiting for content
     let initial_iterations = if wait_for_content.is_some() { 100 } else { 30 };
-    wait_and_drain(&pty, &mut emulator, &mut buf, initial_iterations, wait_for_content, debug);
+    wait_and_drain(
+        &pty,
+        &mut emulator,
+        &mut buf,
+        initial_iterations,
+        wait_for_content,
+        debug,
+    );
 
     // Send each input sequence with a wait period between
     for input in inputs {
@@ -767,11 +777,11 @@ fn test_vim_startup() {
     // Using 84 columns and 31 lines to match the fixture
     // Wait for "VIM - Vi IMproved" to appear to ensure vim has fully started
     let emulator = run_pty_test_wait_for("vim", 84, 31, &[b""], "VIM - Vi IMproved");
-    
+
     // The vim startup screen has rotating messages (sponsor, Uganda, etc.)
     // so we can't compare the full screen. Instead verify key invariants:
     let grid = emulator.grid();
-    
+
     // Check that VIM title is present
     let mut found_vim_title = false;
     let mut found_exit_hint = false;
@@ -784,9 +794,12 @@ fn test_vim_startup() {
             found_exit_hint = true;
         }
     }
-    
+
     assert!(found_vim_title, "VIM title not found in startup screen");
-    assert!(found_exit_hint, "Exit hint (:q) not found in startup screen");
+    assert!(
+        found_exit_hint,
+        "Exit hint (:q) not found in startup screen"
+    );
 }
 
 #[test]
@@ -798,13 +811,19 @@ fn test_vim_2() {
 
     // Start vim, type some text, then exit
     // Wait for vim to be ready before sending input
-    let emulator = run_pty_test_wait_for("vim", 84, 31, &[b"ihello to the world", b"\x1b", b":q!\n"], "VIM - Vi IMproved");
-    
+    let emulator = run_pty_test_wait_for(
+        "vim",
+        84,
+        31,
+        &[b"ihello to the world", b"\x1b", b":q!\n"],
+        "VIM - Vi IMproved",
+    );
+
     // After :q!, vim should have exited - verify we're back at shell or vim has closed
     // The terminal may show exit state or be empty
     let grid = emulator.grid();
-    
-    // Verify that either vim has exited (no "VIM - Vi IMproved" visible) 
+
+    // Verify that either vim has exited (no "VIM - Vi IMproved" visible)
     // or we typed the expected text
     let mut found_hello = false;
     for y in 0..31 {
@@ -816,7 +835,10 @@ fn test_vim_2() {
     }
     // After quit, either the text was shown (captured) or we exited
     // This is a softer assertion since vim state after quit varies
-    assert!(found_hello || true, "Test completed - vim interaction worked");
+    assert!(
+        found_hello || true,
+        "Test completed - vim interaction worked"
+    );
 }
 
 #[test]
@@ -838,19 +860,26 @@ fn test_vim_3() {
         &[],
         "terminal.rs", // Wait for filename to appear in status line
     );
-    
+
     // Verify the file content is displayed
     let grid = emulator.grid();
     let mut found_rust_content = false;
     for y in 0..31 {
         let line = grid.get_line_text(y);
         // Look for typical Rust file content
-        if line.contains("use ") || line.contains("fn ") || line.contains("struct ") || line.contains("//") {
+        if line.contains("use ")
+            || line.contains("fn ")
+            || line.contains("struct ")
+            || line.contains("//")
+        {
             found_rust_content = true;
             break;
         }
     }
-    assert!(found_rust_content, "Expected Rust file content not found in vim display");
+    assert!(
+        found_rust_content,
+        "Expected Rust file content not found in vim display"
+    );
 }
 
 #[test]
@@ -868,21 +897,29 @@ fn test_vim_4() {
         ),
         84,
         31,
-        &[b"\x04"], // Ctrl+D to scroll down
+        &[b"\x04"],    // Ctrl+D to scroll down
         "terminal.rs", // Wait for file to load first
     );
-    
+
     // Verify the file is still displayed after scrolling
     let grid = emulator.grid();
     let mut found_content = false;
     for y in 0..31 {
         let line = grid.get_line_text(y);
         // After scroll, we should still see file content
-        if line.contains("use ") || line.contains("fn ") || line.contains("struct ") || 
-           line.contains("//") || line.contains("let ") || line.contains("pub ") {
+        if line.contains("use ")
+            || line.contains("fn ")
+            || line.contains("struct ")
+            || line.contains("//")
+            || line.contains("let ")
+            || line.contains("pub ")
+        {
             found_content = true;
             break;
         }
     }
-    assert!(found_content, "Expected file content not found after Ctrl+D scroll");
+    assert!(
+        found_content,
+        "Expected file content not found after Ctrl+D scroll"
+    );
 }

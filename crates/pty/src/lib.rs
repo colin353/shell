@@ -248,11 +248,11 @@ impl Drop for PtyProcess {
                 // The child is a session leader (setsid in login_tty), so kill the whole process group
                 // Using negative PID sends the signal to the entire process group
                 let pgid = nix::unistd::Pid::from_raw(-self.child_pid.as_raw());
-                
+
                 // Send SIGHUP first - this is the proper signal for "terminal hung up"
                 // Many interactive programs handle SIGHUP by exiting cleanly
                 let _ = nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGHUP);
-                
+
                 // Also send SIGTERM for programs that don't handle SIGHUP
                 let _ = nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGTERM);
                 // Also signal the specific process in case the group signal failed
