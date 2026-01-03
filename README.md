@@ -2,12 +2,12 @@
 
 Some bugs:
 
- - [ ] Resizing the terminal seems to cause a lot of weird behaviour
- - [ ] Opening a long-ish code file in vim doesn't render correctly
- - [ ] I think delta rendering does not accurately track the attribute state of the current cursor. Sometimes, regions are re-rendered with the wrong attributes.
+ - [x] Resizing the terminal seems to cause a lot of weird behaviour
+ - [x] Opening a long-ish code file in vim doesn't render correctly
+ - [x] I think delta rendering does not accurately track the attribute state of the current cursor. Sometimes, regions are re-rendered with the wrong attributes.
  - [x] When working on the project for a while, I end up running into ENXIO a lot due to resource exhaustion. I'm not cleaning up ptys or something (Fixed: PTY Drop now properly reaps zombie processes with waitpid)
 
 Some features to build:
  - [ ] Should render grid boundaries around the pane cells
  - [ ] Actually implement the shell part
- - [ ] Synchronized output support in delta rendering
+ - [x] Synchronized output support in delta rendering

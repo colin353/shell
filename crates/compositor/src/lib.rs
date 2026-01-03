@@ -19,6 +19,11 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
 
+/// Escape sequence for Begin Synchronized Update (BSU)
+const BSU: &[u8] = b"\x1b[?2026h";
+/// Escape sequence for End Synchronized Update (ESU)
+const ESU: &[u8] = b"\x1b[?2026l";
+
 /// The main compositor that manages terminal panes and the event loop.
 pub struct Compositor {
     root: PaneCell,
@@ -37,6 +42,9 @@ pub struct Compositor {
 
     // Prefix mode for tmux-style commands (Ctrl+b)
     prefix_mode: bool,
+
+    // Whether the terminal supports synchronized output mode
+    synchronized_output: bool,
 }
 
 /// A cell in the pane tree, which can be a single pane or a split.
@@ -143,6 +151,7 @@ impl Compositor {
             wake_write,
             input_queue: Mutex::new(VecDeque::new()),
             prefix_mode: false,
+            synchronized_output: false,
         })
     }
 
@@ -451,10 +460,16 @@ impl Compositor {
         // Compute the delta between the previous frame and current frame
         let delta = emulator::compute_delta(&self.prev_frame, self.global_emulator.grid());
 
-        // Write the delta to the output
+        // Write the delta to the output, wrapped in BSU/ESU if synchronized output is enabled
         if !delta.is_empty() {
             if let Ok(mut output) = self.output.lock() {
+                if self.synchronized_output {
+                    let _ = output.write_all(BSU);
+                }
                 let _ = output.write_all(&delta);
+                if self.synchronized_output {
+                    let _ = output.write_all(ESU);
+                }
                 let _ = output.flush();
             }
         }
@@ -550,6 +565,49 @@ impl Compositor {
     pub fn force_render(&mut self) {
         self.render();
     }
+
+    /// Enable or disable synchronized output mode.
+    ///
+    /// When enabled, the compositor wraps each render update with BSU (Begin Synchronized
+    /// Update) and ESU (End Synchronized Update) escape sequences. This prevents screen
+    /// tearing in terminals that support this feature.
+    ///
+    /// Use `detect_synchronized_output_support()` to check if the terminal supports this mode.
+    pub fn set_synchronized_output(&mut self, enabled: bool) {
+        self.synchronized_output = enabled;
+    }
+
+    /// Check if synchronized output mode is currently enabled.
+    pub fn synchronized_output_enabled(&self) -> bool {
+        self.synchronized_output
+    }
+}
+
+/// Escape sequence to query synchronized output mode support (DECRQM for mode 2026)
+pub const SYNC_QUERY: &[u8] = b"\x1b[?2026$p";
+
+/// Check a terminal response to see if synchronized output is supported.
+///
+/// The terminal should respond to DECRQM with `\x1b[?2026;Ps$y` where:
+/// - Ps=1: mode is set
+/// - Ps=2: mode is reset
+/// - Ps=3: mode is permanently set
+/// - Ps=4: mode is permanently reset
+/// - Ps=0: mode is not recognized
+///
+/// Any value other than 0 indicates support.
+pub fn parse_sync_query_response(response: &[u8]) -> bool {
+    // Look for the pattern: ESC [ ? 2026 ; Ps $ y
+    // We check for the presence of "2026;" followed by a digit other than '0'
+    if let Some(pos) = response.windows(5).position(|w| w == b"2026;") {
+        let after_semicolon = pos + 5;
+        if after_semicolon < response.len() {
+            let ps = response[after_semicolon];
+            // Ps should be '1', '2', '3', or '4' for supported
+            return ps >= b'1' && ps <= b'4';
+        }
+    }
+    false
 }
 
 /// Errors that can occur in the compositor.
@@ -1296,5 +1354,75 @@ mod tests {
         // After resize + render, there should be some output
         // (even if just cursor visibility/position commands)
         assert!(!output_data.is_empty() || true); // Rendering an empty screen may produce no output
+    }
+
+    #[test]
+    fn test_synchronized_output_setting() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+
+        // Default should be disabled
+        assert!(!compositor.synchronized_output_enabled());
+
+        // Enable synchronized output
+        compositor.set_synchronized_output(true);
+        assert!(compositor.synchronized_output_enabled());
+
+        // Disable synchronized output
+        compositor.set_synchronized_output(false);
+        assert!(!compositor.synchronized_output_enabled());
+    }
+
+    #[test]
+    fn test_parse_sync_query_response() {
+        // Test valid responses indicating support
+        // Mode is reset (Ps=2)
+        assert!(parse_sync_query_response(b"\x1b[?2026;2$y"));
+        // Mode is set (Ps=1)
+        assert!(parse_sync_query_response(b"\x1b[?2026;1$y"));
+        // Mode is permanently set (Ps=3)
+        assert!(parse_sync_query_response(b"\x1b[?2026;3$y"));
+        // Mode is permanently reset (Ps=4)
+        assert!(parse_sync_query_response(b"\x1b[?2026;4$y"));
+
+        // Test response indicating no support (Ps=0)
+        assert!(!parse_sync_query_response(b"\x1b[?2026;0$y"));
+
+        // Test invalid/malformed responses
+        assert!(!parse_sync_query_response(b""));
+        assert!(!parse_sync_query_response(b"garbage"));
+        assert!(!parse_sync_query_response(b"\x1b[?1234;2$y")); // Wrong mode number
+
+        // Test response with extra data
+        assert!(parse_sync_query_response(b"prefix\x1b[?2026;2$ysuffix"));
+    }
+
+    #[test]
+    fn test_synchronized_output_in_render() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output.clone()).unwrap();
+
+        // Enable synchronized output
+        compositor.set_synchronized_output(true);
+
+        // Wait for shell prompt and trigger a render
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        compositor.force_render();
+
+        let output_data = output.lock().unwrap();
+
+        // If there was any output, it should be wrapped with BSU/ESU
+        if !output_data.is_empty() {
+            // Check for BSU at the start
+            assert!(
+                output_data.starts_with(BSU),
+                "Output should start with BSU sequence"
+            );
+            // Check for ESU at the end
+            assert!(
+                output_data.ends_with(ESU),
+                "Output should end with ESU sequence"
+            );
+        }
     }
 }

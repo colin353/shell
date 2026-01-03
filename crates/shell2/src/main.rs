@@ -40,6 +40,10 @@ fn main() {
     let mut compositor = compositor::Compositor::with_output(width, height, tty_output.clone())
         .expect("Failed to create compositor");
 
+    // Always enable synchronized output - terminals that don't support it will
+    // ignore the BSU/ESU sequences.
+    compositor.set_synchronized_output(true);
+
     // Set tty_input to non-blocking
     let fd = tty_input.as_raw_fd();
     unsafe {
