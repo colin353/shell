@@ -8,6 +8,6 @@ Some bugs:
  - [x] When working on the project for a while, I end up running into ENXIO a lot due to resource exhaustion. I'm not cleaning up ptys or something (Fixed: PTY Drop now properly reaps zombie processes with waitpid)
 
 Some features to build:
- - [ ] Should render grid boundaries around the pane cells
+ - [x] Should render grid boundaries around the pane cells
  - [ ] Actually implement the shell part
  - [x] Synchronized output support in delta rendering
