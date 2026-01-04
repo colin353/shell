@@ -337,7 +337,10 @@ impl TerminalGrid {
                 // Remove the top line of the scroll region
                 let line = self.cells.remove(self.scroll_top);
                 // Only add to scrollback if scroll region is the full screen and not in alternate screen
-                if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 && !self.in_alternate_screen {
+                if self.scroll_top == 0
+                    && self.scroll_bottom == self.rows - 1
+                    && !self.in_alternate_screen
+                {
                     if self.scrollback.len() >= self.max_scrollback {
                         self.scrollback.pop_front();
                     }

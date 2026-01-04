@@ -355,7 +355,8 @@ impl Compositor {
                 }
                 b'g' => {
                     // g - jump to top of scrollback (oldest content)
-                    if let Some((_, scrollback_len)) = self.active_tab().root.get_scrollback_info() {
+                    if let Some((_, scrollback_len)) = self.active_tab().root.get_scrollback_info()
+                    {
                         self.active_tab_mut().root.scroll_up(scrollback_len);
                         self.render();
                     }
@@ -745,12 +746,12 @@ impl Compositor {
             scroll_attrs.fg_color = Some(emulator::Color::Black);
             scroll_attrs.bold = true;
 
-            if let Some((scroll_offset, scrollback_len)) = 
-                self.tabs[self.active_tab].root.get_scrollback_info() 
+            if let Some((scroll_offset, scrollback_len)) =
+                self.tabs[self.active_tab].root.get_scrollback_info()
             {
                 let current_line = scrollback_len.saturating_sub(scroll_offset);
                 let scroll_text = format!(" SCROLL {}/{} ", current_line, scrollback_len);
-                
+
                 let text_start_x = cols.saturating_sub(scroll_text.len());
                 for (i, ch) in scroll_text.chars().enumerate() {
                     let x = text_start_x + i;
@@ -1098,9 +1099,7 @@ impl PaneCell {
     /// Get scrollback info from the focused pane (scroll_offset, scrollback_len)
     pub fn get_scrollback_info(&self) -> Option<(usize, usize)> {
         match &self.inner {
-            PaneCellInner::Pane(pane) => {
-                Some((pane.scroll_offset(), pane.scrollback_len()))
-            }
+            PaneCellInner::Pane(pane) => Some((pane.scroll_offset(), pane.scrollback_len())),
             PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
                 for cell in cells {
                     if cell.focus {
@@ -1343,10 +1342,10 @@ impl PaneCell {
                     // In scrollback mode with active scrolling - composite scrollback + grid content
                     let grid = pane.terminal_emulator.grid();
                     let scrollback_len = grid.scrollback_len();
-                    
+
                     for row in 0..self.height {
                         let dst_y = self.pos_y + row;
-                        
+
                         // Calculate which line to display
                         // scroll_offset = number of lines scrolled up from bottom
                         // So if scroll_offset = 5, we show 5 lines from scrollback at the top
@@ -1354,7 +1353,8 @@ impl PaneCell {
                             // This row should show scrollback content
                             // scroll_offset lines are shown from scrollback
                             // row 0 shows scrollback[scrollback_len - scroll_offset]
-                            let scrollback_idx = scrollback_len.saturating_sub(pane.scroll_offset) + row;
+                            let scrollback_idx =
+                                scrollback_len.saturating_sub(pane.scroll_offset) + row;
                             if scrollback_idx < scrollback_len {
                                 Some((true, scrollback_idx))
                             } else {
@@ -1369,14 +1369,14 @@ impl PaneCell {
                                 None
                             }
                         };
-                        
+
                         if let Some((is_scrollback, line_idx)) = source_line {
                             let source_row = if is_scrollback {
                                 grid.get_scrollback_row(line_idx)
                             } else {
                                 grid.get_row(line_idx)
                             };
-                            
+
                             if let Some(cells) = source_row {
                                 for col in 0..self.width {
                                     let dst_x = self.pos_x + col;
@@ -1385,7 +1385,10 @@ impl PaneCell {
                                         let cell = if col < cells.len() {
                                             cells[col].clone()
                                         } else {
-                                            emulator::Cell::new(' ', emulator::CellAttributes::default())
+                                            emulator::Cell::new(
+                                                ' ',
+                                                emulator::CellAttributes::default(),
+                                            )
                                         };
                                         dest.grid_mut().set_cell(dst_x, dst_y, cell);
                                     }
