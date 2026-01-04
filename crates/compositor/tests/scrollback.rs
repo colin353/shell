@@ -114,11 +114,11 @@ fn test_scrollback_basic() -> Result<(), CompositorError> {
 
     // After scrolling up significantly, we should see earlier content
     let screen_text_after: String = lines_after.join("\n");
-    
+
     // After scrolling up, we should see content from the middle of the file
     // Line 30 has SCROLLBACK_VISIBLE_LINE - verify we can scroll to see it
     assert!(
-        screen_text_after.contains("SCROLLBACK_VISIBLE_LINE") 
+        screen_text_after.contains("SCROLLBACK_VISIBLE_LINE")
             || screen_text_after.contains("SEARCHABLE_MARKER_BETA")
             || screen_text_after.contains("Line 2"),
         "Expected earlier content to be visible after scrolling up. Got:\n{}",
