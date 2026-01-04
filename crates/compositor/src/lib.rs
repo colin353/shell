@@ -19,14 +19,61 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
 
+/// Number of rows reserved for the status bar at the bottom of the terminal
+const STATUS_BAR_HEIGHT: usize = 1;
+
 /// Escape sequence for Begin Synchronized Update (BSU)
 const BSU: &[u8] = b"\x1b[?2026h";
 /// Escape sequence for End Synchronized Update (ESU)
 const ESU: &[u8] = b"\x1b[?2026l";
 
+/// A tab containing a name and its own root pane tree
+pub struct Tab {
+    /// The display name for this tab
+    pub name: String,
+    /// The root pane cell for this tab's content
+    pub root: PaneCell,
+}
+
+impl Tab {
+    /// Create a new tab with the given name and dimensions
+    pub fn new(name: String, width: usize, height: usize) -> Result<Self, CompositorError> {
+        Ok(Self {
+            name,
+            root: PaneCell {
+                inner: PaneCellInner::Pane(Pane {
+                    terminal_emulator: emulator::TerminalEmulator::new(width, height),
+                    pty: Some(
+                        pty::PtyProcess::spawn("/bin/bash", width as u16, height as u16)
+                            .map_err(CompositorError::Pty)?,
+                    ),
+                    read_buffer: [0u8; 4096],
+                }),
+                width,
+                height,
+                pos_x: 0,
+                pos_y: 0,
+                focus: true,
+            },
+        })
+    }
+
+    /// Resize the tab's root pane to new dimensions
+    pub fn resize(&mut self, width: usize, height: usize) {
+        self.root.resize(0, 0, width, height);
+    }
+}
+
 /// The main compositor that manages terminal panes and the event loop.
 pub struct Compositor {
-    root: PaneCell,
+    /// List of tabs, each with its own root pane tree
+    tabs: Vec<Tab>,
+    /// Index of the currently active tab
+    active_tab: usize,
+    /// Total terminal width
+    width: usize,
+    /// Total terminal height (including status bar)
+    height: usize,
 
     // Global terminal emulator for compositing
     global_emulator: emulator::TerminalEmulator,
@@ -128,22 +175,17 @@ impl Compositor {
         fcntl(wake_read.as_raw_fd(), FcntlArg::F_SETFL(new_flags))
             .map_err(CompositorError::Fcntl)?;
 
+        // Calculate pane height (total height minus status bar)
+        let pane_height = height.saturating_sub(STATUS_BAR_HEIGHT);
+
+        // Create the initial tab
+        let tab = Tab::new("bash".to_string(), width, pane_height)?;
+
         Ok(Self {
-            root: PaneCell {
-                inner: PaneCellInner::Pane(Pane {
-                    terminal_emulator: emulator::TerminalEmulator::new(width, height),
-                    pty: Some(
-                        pty::PtyProcess::spawn("/bin/bash", width as u16, height as u16)
-                            .map_err(CompositorError::Pty)?,
-                    ),
-                    read_buffer: [0u8; 4096],
-                }),
-                width,
-                height,
-                pos_x: 0,
-                pos_y: 0,
-                focus: true,
-            },
+            tabs: vec![tab],
+            active_tab: 0,
+            width,
+            height,
             global_emulator: emulator::TerminalEmulator::new(width, height),
             prev_frame: emulator::TerminalGrid::new(width, height),
             output,
@@ -177,6 +219,8 @@ impl Compositor {
     /// Supports tmux-style Ctrl+b prefix for compositor commands:
     /// - Ctrl+b " : Split horizontally (top/bottom)
     /// - Ctrl+b % : Split vertically (left/right)
+    /// - Ctrl+b c : Create new tab
+    /// - Ctrl+b 1-9 : Switch to tab 1-9
     pub fn handle_input(&mut self, input: &[u8]) {
         // Handle prefix mode commands
         if self.prefix_mode {
@@ -193,9 +237,30 @@ impl Compositor {
                         let _ = self.split_focused_pane(SplitDirection::Vertical);
                         return;
                     }
+                    b'c' => {
+                        // Ctrl+b c - create new tab
+                        let _ = self.create_tab();
+                        return;
+                    }
+                    b'n' => {
+                        // Ctrl+b n - next tab
+                        self.next_tab();
+                        return;
+                    }
+                    b'p' => {
+                        // Ctrl+b p - previous tab
+                        self.prev_tab();
+                        return;
+                    }
+                    b'0'..=b'9' => {
+                        // Ctrl+b 0-9 - switch to tab 0-9
+                        let tab_index = (input[0] - b'0') as usize;
+                        self.switch_to_tab(tab_index);
+                        return;
+                    }
                     0x02 => {
                         // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
-                        self.root.handle_input(&[0x02]);
+                        self.active_tab_mut().root.handle_input(&[0x02]);
                         return;
                     }
                     _ => {
@@ -244,14 +309,73 @@ impl Compositor {
                 _ => {}
             }
         }
-        self.root.handle_input(input);
+        self.active_tab_mut().root.handle_input(input);
+    }
+
+    /// Get a reference to the currently active tab
+    #[allow(dead_code)]
+    fn active_tab(&self) -> &Tab {
+        &self.tabs[self.active_tab]
+    }
+
+    /// Get a mutable reference to the currently active tab
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active_tab]
+    }
+
+    /// Create a new tab and switch to it
+    pub fn create_tab(&mut self) -> Result<(), CompositorError> {
+        let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+        let tab = Tab::new("bash".to_string(), self.width, pane_height)?;
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        self.render();
+        Ok(())
+    }
+
+    /// Switch to the tab at the given index (0-based)
+    pub fn switch_to_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active_tab = index;
+            self.render();
+        }
+    }
+
+    /// Switch to the next tab (wraps around)
+    pub fn next_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            self.render();
+        }
+    }
+
+    /// Switch to the previous tab (wraps around)
+    pub fn prev_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = if self.active_tab == 0 {
+                self.tabs.len() - 1
+            } else {
+                self.active_tab - 1
+            };
+            self.render();
+        }
+    }
+
+    /// Get the number of tabs
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// Get the active tab index
+    pub fn active_tab_index(&self) -> usize {
+        self.active_tab
     }
 
     /// Split the currently focused pane.
     ///
     /// Creates a new pane by splitting the focused pane either horizontally or vertically.
     pub fn split_focused_pane(&mut self, direction: SplitDirection) -> Result<(), CompositorError> {
-        self.root.split_focused(direction)
+        self.active_tab_mut().root.split_focused(direction)
     }
 
     /// Move focus in the specified direction.
@@ -262,7 +386,7 @@ impl Compositor {
     /// - Up (k): Move to the pane above
     /// - Right (l): Move to the pane on the right
     pub fn move_focus(&mut self, direction: Direction) {
-        self.root.move_focus(direction);
+        self.active_tab_mut().root.move_focus(direction);
     }
 
     /// Run the event loop. This blocks and handles all events.
@@ -288,8 +412,10 @@ impl Compositor {
             });
             fd_to_pane.push(None);
 
-            // Collect PTY fds from all panes
-            self.root.collect_poll_fds(&mut poll_fds, &mut fd_to_pane);
+            // Collect PTY fds from all tabs
+            for tab in &mut self.tabs {
+                tab.root.collect_poll_fds(&mut poll_fds, &mut fd_to_pane);
+            }
 
             // If no PTYs are left, we're done
             if poll_fds.len() == 1 {
@@ -363,8 +489,10 @@ impl Compositor {
         });
         fd_to_pane.push(None);
 
-        // Collect PTY fds from all panes
-        self.root.collect_poll_fds(&mut poll_fds, &mut fd_to_pane);
+        // Collect PTY fds from all tabs
+        for tab in &mut self.tabs {
+            tab.root.collect_poll_fds(&mut poll_fds, &mut fd_to_pane);
+        }
 
         // Poll with timeout
         let n = unsafe {
@@ -433,7 +561,7 @@ impl Compositor {
         };
 
         for input in inputs {
-            self.root.handle_input(&input);
+            self.active_tab_mut().root.handle_input(&input);
         }
     }
 
@@ -446,11 +574,18 @@ impl Compositor {
         let (cols, rows) = self.global_emulator.dimensions();
         self.global_emulator = emulator::TerminalEmulator::new(cols, rows);
 
-        // Composite all panes into the global emulator
-        self.root.composite_into(&mut self.global_emulator);
+        // Composite the active tab's panes into the global emulator
+        self.tabs[self.active_tab]
+            .root
+            .composite_into(&mut self.global_emulator);
+
+        // Render the status bar at the bottom
+        self.render_status_bar();
 
         // Set the cursor position and visibility from the focused pane
-        if let Some((cursor_x, cursor_y, cursor_visible)) = self.root.get_focused_cursor_info() {
+        if let Some((cursor_x, cursor_y, cursor_visible)) =
+            self.tabs[self.active_tab].root.get_focused_cursor_info()
+        {
             let grid = self.global_emulator.grid_mut();
             grid.cursor_x = cursor_x;
             grid.cursor_y = cursor_y;
@@ -478,14 +613,89 @@ impl Compositor {
         self.prev_frame = self.global_emulator.grid().clone();
     }
 
-    /// Get a reference to the root pane cell.
-    pub fn root(&self) -> &PaneCell {
-        &self.root
+    /// Render the status bar at the bottom of the terminal.
+    ///
+    /// The status bar contains:
+    /// - Left side: tabs with numbers and names
+    /// - Right side: current date/time
+    fn render_status_bar(&mut self) {
+        let (cols, rows) = self.global_emulator.dimensions();
+        if rows < STATUS_BAR_HEIGHT {
+            return;
+        }
+
+        let status_bar_y = rows - STATUS_BAR_HEIGHT;
+
+        // Create attributes for the status bar background
+        let mut bar_attrs = emulator::CellAttributes::default();
+        bar_attrs.bg_color = Some(emulator::Color::Green);
+        bar_attrs.fg_color = Some(emulator::Color::Black);
+
+        // Create attributes for the active tab
+        let mut active_tab_attrs = emulator::CellAttributes::default();
+        active_tab_attrs.bg_color = Some(emulator::Color::Black);
+        active_tab_attrs.fg_color = Some(emulator::Color::Green);
+        active_tab_attrs.bold = true;
+
+        // Fill the status bar rows with the background color
+        for y in status_bar_y..rows {
+            for x in 0..cols {
+                self.global_emulator.grid_mut().set_cell(
+                    x,
+                    y,
+                    emulator::Cell::new(' ', bar_attrs.clone()),
+                );
+            }
+        }
+
+        // Render tabs on the left side of the first status bar row
+        let mut x_pos = 0;
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let tab_text = format!(" {} {} ", i, tab.name);
+            let attrs = if i == self.active_tab {
+                active_tab_attrs.clone()
+            } else {
+                bar_attrs.clone()
+            };
+
+            for ch in tab_text.chars() {
+                if x_pos < cols {
+                    self.global_emulator.grid_mut().set_cell(
+                        x_pos,
+                        status_bar_y,
+                        emulator::Cell::new(ch, attrs.clone()),
+                    );
+                    x_pos += 1;
+                }
+            }
+        }
+
+        // Render the date/time on the right side of the first status bar row
+        let now = std::time::SystemTime::now();
+        let datetime = chrono::DateTime::<chrono::Local>::from(now);
+        let time_str = datetime.format(" %Y-%m-%d %H:%M ").to_string();
+
+        let time_start_x = cols.saturating_sub(time_str.len());
+        for (i, ch) in time_str.chars().enumerate() {
+            let x = time_start_x + i;
+            if x < cols {
+                self.global_emulator.grid_mut().set_cell(
+                    x,
+                    status_bar_y,
+                    emulator::Cell::new(ch, bar_attrs.clone()),
+                );
+            }
+        }
     }
 
-    /// Get a mutable reference to the root pane cell.
+    /// Get a reference to the root pane cell of the active tab.
+    pub fn root(&self) -> &PaneCell {
+        &self.tabs[self.active_tab].root
+    }
+
+    /// Get a mutable reference to the root pane cell of the active tab.
     pub fn root_mut(&mut self) -> &mut PaneCell {
-        &mut self.root
+        &mut self.tabs[self.active_tab].root
     }
 
     /// Get the wake file descriptor for external polling.
@@ -509,11 +719,18 @@ impl Compositor {
         let (cols, rows) = self.global_emulator.dimensions();
         self.global_emulator = emulator::TerminalEmulator::new(cols, rows);
 
-        // Composite all panes into the global emulator
-        self.root.composite_into(&mut self.global_emulator);
+        // Composite the active tab's panes into the global emulator
+        self.tabs[self.active_tab]
+            .root
+            .composite_into(&mut self.global_emulator);
+
+        // Render the status bar
+        self.render_status_bar();
 
         // Set the cursor position and visibility from the focused pane
-        if let Some((cursor_x, cursor_y, cursor_visible)) = self.root.get_focused_cursor_info() {
+        if let Some((cursor_x, cursor_y, cursor_visible)) =
+            self.tabs[self.active_tab].root.get_focused_cursor_info()
+        {
             let grid = self.global_emulator.grid_mut();
             grid.cursor_x = cursor_x;
             grid.cursor_y = cursor_y;
@@ -549,13 +766,21 @@ impl Compositor {
     /// After calling resize, you should call `force_render()` to redraw the screen,
     /// since the previous frame dimensions no longer match.
     pub fn resize(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+
         // Resize the global emulator and prev_frame to the new dimensions.
         // prev_frame is reset to a blank grid so the next render will be a full redraw.
         self.global_emulator = emulator::TerminalEmulator::new(width, height);
         self.prev_frame = emulator::TerminalGrid::new(width, height);
 
-        // Recursively resize all panes starting from root
-        self.root.resize(0, 0, width, height);
+        // Calculate pane height (total height minus status bar)
+        let pane_height = height.saturating_sub(STATUS_BAR_HEIGHT);
+
+        // Recursively resize all tabs
+        for tab in &mut self.tabs {
+            tab.resize(width, pane_height);
+        }
     }
 
     /// Force a full render of the compositor.
@@ -1539,9 +1764,9 @@ mod tests {
             assert!(!cells[0].has_focus());
             assert!(cells[1].has_focus());
             // Check dimensions - should be split vertically with 1 row border
-            // 24 rows - 1 border = 23 available, split as 11 + 12
+            // 24 rows - 1 status bar = 23 for panes, minus 1 border = 22 available, split as 11 + 11
             assert_eq!(cells[0].dimensions(), (80, 11));
-            assert_eq!(cells[1].dimensions(), (80, 12));
+            assert_eq!(cells[1].dimensions(), (80, 11));
         } else {
             panic!("Expected HSplit after Ctrl+b \"");
         }
@@ -1570,8 +1795,9 @@ mod tests {
             assert!(cells[1].has_focus());
             // Check dimensions - should be split horizontally with 1 column border
             // 80 cols - 1 border = 79 available, split as 39 + 40
-            assert_eq!(cells[0].dimensions(), (39, 24));
-            assert_eq!(cells[1].dimensions(), (40, 24));
+            // Height is 24 - 1 status bar = 23
+            assert_eq!(cells[0].dimensions(), (39, 23));
+            assert_eq!(cells[1].dimensions(), (40, 23));
         } else {
             panic!("Expected VSplit after Ctrl+b %");
         }
@@ -1615,22 +1841,22 @@ mod tests {
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut compositor = Compositor::with_output(80, 24, output).unwrap();
 
-        // Verify initial dimensions
-        assert_eq!(compositor.root().dimensions(), (80, 24));
+        // Verify initial dimensions (pane height is total - 1 for status bar)
+        assert_eq!(compositor.root().dimensions(), (80, 23));
         assert_eq!(compositor.global_emulator().dimensions(), (80, 24));
 
         // Resize to larger dimensions
         compositor.resize(120, 40);
 
-        // Verify new dimensions
-        assert_eq!(compositor.root().dimensions(), (120, 40));
+        // Verify new dimensions (pane height is 40 - 1 = 39)
+        assert_eq!(compositor.root().dimensions(), (120, 39));
         assert_eq!(compositor.global_emulator().dimensions(), (120, 40));
 
         // Resize to smaller dimensions
         compositor.resize(40, 12);
 
-        // Verify new dimensions
-        assert_eq!(compositor.root().dimensions(), (40, 12));
+        // Verify new dimensions (pane height is 12 - 1 = 11)
+        assert_eq!(compositor.root().dimensions(), (40, 11));
         assert_eq!(compositor.global_emulator().dimensions(), (40, 12));
     }
 
@@ -1645,9 +1871,10 @@ mod tests {
         compositor.handle_input(&[b'%']); // %
 
         // Verify initial split dimensions (80 cols - 1 border = 79, split as 39 + 40)
+        // Height is 24 - 1 status bar = 23
         if let PaneCellInner::VSplit(cells) = compositor.root().inner() {
-            assert_eq!(cells[0].dimensions(), (39, 24));
-            assert_eq!(cells[1].dimensions(), (40, 24));
+            assert_eq!(cells[0].dimensions(), (39, 23));
+            assert_eq!(cells[1].dimensions(), (40, 23));
         } else {
             panic!("Expected VSplit");
         }
@@ -1656,9 +1883,10 @@ mod tests {
         compositor.resize(100, 30);
 
         // Verify dimensions are redistributed (100 cols - 1 border = 99, split as 50 + 49)
+        // Height is 30 - 1 = 29
         if let PaneCellInner::VSplit(cells) = compositor.root().inner() {
-            assert_eq!(cells[0].dimensions(), (50, 30));
-            assert_eq!(cells[1].dimensions(), (49, 30));
+            assert_eq!(cells[0].dimensions(), (50, 29));
+            assert_eq!(cells[1].dimensions(), (49, 29));
         } else {
             panic!("Expected VSplit after resize");
         }
@@ -1667,9 +1895,10 @@ mod tests {
         compositor.resize(60, 20);
 
         // Verify dimensions are redistributed (60 cols - 1 border = 59, split as 30 + 29)
+        // Height is 20 - 1 = 19
         if let PaneCellInner::VSplit(cells) = compositor.root().inner() {
-            assert_eq!(cells[0].dimensions(), (30, 20));
-            assert_eq!(cells[1].dimensions(), (29, 20));
+            assert_eq!(cells[0].dimensions(), (30, 19));
+            assert_eq!(cells[1].dimensions(), (29, 19));
         } else {
             panic!("Expected VSplit after resize");
         }
