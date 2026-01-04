@@ -1,5 +1,7 @@
 //! Terminal grid - the 2D character buffer
 
+use std::collections::VecDeque;
+
 use super::cell::{Cell, CellAttributes, Line};
 
 /// Character set designations
@@ -33,7 +35,7 @@ pub struct TerminalGrid {
     pub cursor_y: usize,
     pub current_attrs: CellAttributes,
     /// Lines that have scrolled off the top
-    pub scrollback: Vec<Vec<Cell>>,
+    pub scrollback: VecDeque<Vec<Cell>>,
     /// Maximum scrollback lines to keep
     pub max_scrollback: usize,
     /// Saved main screen buffer (for alternate screen support)
@@ -86,7 +88,7 @@ struct SavedScreen {
     cells: Vec<Vec<Cell>>,
     cursor_x: usize,
     cursor_y: usize,
-    scrollback: Vec<Vec<Cell>>,
+    scrollback: VecDeque<Vec<Cell>>,
 }
 
 impl SavedScreen {
@@ -132,8 +134,8 @@ impl TerminalGrid {
             cursor_x: 0,
             cursor_y: 0,
             current_attrs: CellAttributes::default(),
-            scrollback: Vec::new(),
-            max_scrollback: 1000,
+            scrollback: VecDeque::new(),
+            max_scrollback: 100_000,
             saved_screen: None,
             in_alternate_screen: false,
             cursor_visible: true,
@@ -293,13 +295,24 @@ impl TerminalGrid {
 
     /// Scroll the display up by n lines (full screen)
     pub fn scroll_up(&mut self, n: usize) {
+        // Don't add to scrollback if in alternate screen mode
+        if self.in_alternate_screen {
+            for _ in 0..n {
+                if !self.cells.is_empty() {
+                    self.cells.remove(0);
+                    self.cells
+                        .push((0..self.cols).map(|_| Cell::empty()).collect());
+                }
+            }
+            return;
+        }
         for _ in 0..n {
             if !self.cells.is_empty() {
                 let line = self.cells.remove(0);
                 if self.scrollback.len() >= self.max_scrollback {
-                    self.scrollback.remove(0);
+                    self.scrollback.pop_front();
                 }
-                self.scrollback.push(line);
+                self.scrollback.push_back(line);
                 self.cells
                     .push((0..self.cols).map(|_| Cell::empty()).collect());
             }
@@ -323,12 +336,12 @@ impl TerminalGrid {
             if self.scroll_top < self.scroll_bottom {
                 // Remove the top line of the scroll region
                 let line = self.cells.remove(self.scroll_top);
-                // Only add to scrollback if scroll region is the full screen
-                if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 {
+                // Only add to scrollback if scroll region is the full screen and not in alternate screen
+                if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 && !self.in_alternate_screen {
                     if self.scrollback.len() >= self.max_scrollback {
-                        self.scrollback.remove(0);
+                        self.scrollback.pop_front();
                     }
-                    self.scrollback.push(line);
+                    self.scrollback.push_back(line);
                 }
                 // Insert a new empty line at the bottom of the scroll region
                 self.cells.insert(
@@ -559,6 +572,21 @@ impl TerminalGrid {
         if y < self.rows && x < self.cols {
             self.cells[y][x] = cell;
         }
+    }
+
+    /// Get the number of lines in the scrollback buffer
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Get a row from the scrollback buffer (0 = oldest line)
+    pub fn get_scrollback_row(&self, index: usize) -> Option<&Vec<Cell>> {
+        self.scrollback.get(index)
+    }
+
+    /// Get a row from the main grid
+    pub fn get_row(&self, y: usize) -> Option<&Vec<Cell>> {
+        self.cells.get(y)
     }
 
     /// Blit a rectangular region from another grid into this one.

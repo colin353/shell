@@ -48,6 +48,8 @@ impl Tab {
                             .map_err(CompositorError::Pty)?,
                     ),
                     read_buffer: [0u8; 4096],
+                    scrollback_mode: false,
+                    scroll_offset: 0,
                 }),
                 width,
                 height,
@@ -109,6 +111,10 @@ pub struct Pane {
     terminal_emulator: emulator::TerminalEmulator,
     pty: Option<pty::PtyProcess>,
     read_buffer: [u8; 4096],
+    /// Whether the pane is in scrollback mode
+    scrollback_mode: bool,
+    /// Scroll offset (number of lines scrolled up from the bottom)
+    scroll_offset: usize,
 }
 
 /// The inner content of a pane cell.
@@ -221,7 +227,14 @@ impl Compositor {
     /// - Ctrl+b % : Split vertically (left/right)
     /// - Ctrl+b c : Create new tab
     /// - Ctrl+b 1-9 : Switch to tab 1-9
+    /// - Ctrl+b [ : Enter scrollback mode
     pub fn handle_input(&mut self, input: &[u8]) {
+        // Check if we're in scrollback mode
+        if self.active_tab().root.is_in_scrollback_mode() {
+            self.handle_scrollback_input(input);
+            return;
+        }
+
         // Handle prefix mode commands
         if self.prefix_mode {
             self.prefix_mode = false;
@@ -256,6 +269,12 @@ impl Compositor {
                         // Ctrl+b 0-9 - switch to tab 0-9
                         let tab_index = (input[0] - b'0') as usize;
                         self.switch_to_tab(tab_index);
+                        return;
+                    }
+                    b'[' => {
+                        // Ctrl+b [ - enter scrollback mode
+                        self.active_tab_mut().root.enter_scrollback_mode();
+                        self.render();
                         return;
                     }
                     0x02 => {
@@ -310,6 +329,54 @@ impl Compositor {
             }
         }
         self.active_tab_mut().root.handle_input(input);
+    }
+
+    /// Handle input while in scrollback mode.
+    ///
+    /// - Ctrl+u: Scroll up by half screen
+    /// - Ctrl+d: Scroll down by half screen
+    /// - g: Jump to top of scrollback
+    /// - G: Jump to bottom of scrollback
+    /// - Escape/q: Exit scrollback mode
+    fn handle_scrollback_input(&mut self, input: &[u8]) {
+        if input.len() == 1 {
+            match input[0] {
+                0x15 => {
+                    // Ctrl+u - scroll up by half screen
+                    let half_height = self.height.saturating_sub(STATUS_BAR_HEIGHT) / 2;
+                    self.active_tab_mut().root.scroll_up(half_height.max(1));
+                    self.render();
+                }
+                0x04 => {
+                    // Ctrl+d - scroll down by half screen
+                    let half_height = self.height.saturating_sub(STATUS_BAR_HEIGHT) / 2;
+                    self.active_tab_mut().root.scroll_down(half_height.max(1));
+                    self.render();
+                }
+                b'g' => {
+                    // g - jump to top of scrollback (oldest content)
+                    if let Some((_, scrollback_len)) = self.active_tab().root.get_scrollback_info() {
+                        self.active_tab_mut().root.scroll_up(scrollback_len);
+                        self.render();
+                    }
+                }
+                b'G' => {
+                    // G - jump to bottom of scrollback (most recent content)
+                    if let Some((scroll_offset, _)) = self.active_tab().root.get_scrollback_info() {
+                        self.active_tab_mut().root.scroll_down(scroll_offset);
+                        self.render();
+                    }
+                }
+                0x1b | b'q' => {
+                    // Escape or 'q' - exit scrollback mode
+                    self.active_tab_mut().root.exit_scrollback_mode();
+                    self.render();
+                }
+                _ => {
+                    // Ignore other keys in scrollback mode
+                }
+            }
+        }
     }
 
     /// Get a reference to the currently active tab
@@ -670,13 +737,43 @@ impl Compositor {
             }
         }
 
-        // Render the date/time on the right side of the first status bar row
-        let now = std::time::SystemTime::now();
-        let datetime = chrono::DateTime::<chrono::Local>::from(now);
-        let time_str = datetime.format(" %Y-%m-%d %H:%M ").to_string();
+        // Check if we're in scrollback mode and render scroll indicator instead of date/time
+        let right_text = if self.tabs[self.active_tab].root.is_in_scrollback_mode() {
+            // Create attributes for scrollback indicator
+            let mut scroll_attrs = emulator::CellAttributes::default();
+            scroll_attrs.bg_color = Some(emulator::Color::Yellow);
+            scroll_attrs.fg_color = Some(emulator::Color::Black);
+            scroll_attrs.bold = true;
 
-        let time_start_x = cols.saturating_sub(time_str.len());
-        for (i, ch) in time_str.chars().enumerate() {
+            if let Some((scroll_offset, scrollback_len)) = 
+                self.tabs[self.active_tab].root.get_scrollback_info() 
+            {
+                let current_line = scrollback_len.saturating_sub(scroll_offset);
+                let scroll_text = format!(" SCROLL {}/{} ", current_line, scrollback_len);
+                
+                let text_start_x = cols.saturating_sub(scroll_text.len());
+                for (i, ch) in scroll_text.chars().enumerate() {
+                    let x = text_start_x + i;
+                    if x < cols {
+                        self.global_emulator.grid_mut().set_cell(
+                            x,
+                            status_bar_y,
+                            emulator::Cell::new(ch, scroll_attrs.clone()),
+                        );
+                    }
+                }
+                return;
+            }
+            return;
+        } else {
+            // Render the date/time on the right side of the first status bar row
+            let now = std::time::SystemTime::now();
+            let datetime = chrono::DateTime::<chrono::Local>::from(now);
+            datetime.format(" %Y-%m-%d %H:%M ").to_string()
+        };
+
+        let time_start_x = cols.saturating_sub(right_text.len());
+        for (i, ch) in right_text.chars().enumerate() {
             let x = time_start_x + i;
             if x < cols {
                 self.global_emulator.grid_mut().set_cell(
@@ -919,6 +1016,102 @@ impl PaneCell {
         &self.inner
     }
 
+    /// Enter scrollback mode on the focused pane
+    pub fn enter_scrollback_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.enter_scrollback_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.enter_scrollback_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exit scrollback mode on the focused pane
+    pub fn exit_scrollback_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.exit_scrollback_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.exit_scrollback_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if the focused pane is in scrollback mode
+    pub fn is_in_scrollback_mode(&self) -> bool {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.is_in_scrollback_mode(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.is_in_scrollback_mode();
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Scroll the focused pane up by the given number of lines
+    pub fn scroll_up(&mut self, lines: usize) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.scroll_up(lines);
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.scroll_up(lines);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scroll the focused pane down by the given number of lines
+    pub fn scroll_down(&mut self, lines: usize) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.scroll_down(lines);
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.scroll_down(lines);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get scrollback info from the focused pane (scroll_offset, scrollback_len)
+    pub fn get_scrollback_info(&self) -> Option<(usize, usize)> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                Some((pane.scroll_offset(), pane.scrollback_len()))
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_scrollback_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Move focus in the specified direction.
     ///
     /// Returns true if focus was successfully moved, false otherwise.
@@ -1067,6 +1260,8 @@ impl PaneCell {
                             .map_err(CompositorError::Pty)?,
                     ),
                     read_buffer: [0u8; 4096],
+                    scrollback_mode: false,
+                    scroll_offset: 0,
                 };
 
                 // Take ownership of the old pane
@@ -1076,6 +1271,8 @@ impl PaneCell {
                         terminal_emulator: emulator::TerminalEmulator::new(1, 1),
                         pty: None,
                         read_buffer: [0u8; 4096],
+                        scrollback_mode: false,
+                        scroll_offset: 0,
                     }),
                 );
 
@@ -1142,16 +1339,72 @@ impl PaneCell {
     fn composite_into(&self, dest: &mut emulator::TerminalEmulator) {
         match &self.inner {
             PaneCellInner::Pane(pane) => {
-                // Blit the pane's emulator content into the destination
-                dest.blit_from(
-                    &pane.terminal_emulator,
-                    0,           // source x (from origin of pane's emulator)
-                    0,           // source y
-                    self.pos_x,  // destination x (pane's position in compositor)
-                    self.pos_y,  // destination y
-                    self.width,  // width to copy
-                    self.height, // height to copy
-                );
+                if pane.scrollback_mode && pane.scroll_offset > 0 {
+                    // In scrollback mode with active scrolling - composite scrollback + grid content
+                    let grid = pane.terminal_emulator.grid();
+                    let scrollback_len = grid.scrollback_len();
+                    
+                    for row in 0..self.height {
+                        let dst_y = self.pos_y + row;
+                        
+                        // Calculate which line to display
+                        // scroll_offset = number of lines scrolled up from bottom
+                        // So if scroll_offset = 5, we show 5 lines from scrollback at the top
+                        let source_line = if row < pane.scroll_offset {
+                            // This row should show scrollback content
+                            // scroll_offset lines are shown from scrollback
+                            // row 0 shows scrollback[scrollback_len - scroll_offset]
+                            let scrollback_idx = scrollback_len.saturating_sub(pane.scroll_offset) + row;
+                            if scrollback_idx < scrollback_len {
+                                Some((true, scrollback_idx))
+                            } else {
+                                None
+                            }
+                        } else {
+                            // This row should show grid content
+                            let grid_row = row - pane.scroll_offset;
+                            if grid_row < grid.rows {
+                                Some((false, grid_row))
+                            } else {
+                                None
+                            }
+                        };
+                        
+                        if let Some((is_scrollback, line_idx)) = source_line {
+                            let source_row = if is_scrollback {
+                                grid.get_scrollback_row(line_idx)
+                            } else {
+                                grid.get_row(line_idx)
+                            };
+                            
+                            if let Some(cells) = source_row {
+                                for col in 0..self.width {
+                                    let dst_x = self.pos_x + col;
+                                    let (dest_cols, dest_rows) = dest.dimensions();
+                                    if dst_x < dest_cols && dst_y < dest_rows {
+                                        let cell = if col < cells.len() {
+                                            cells[col].clone()
+                                        } else {
+                                            emulator::Cell::new(' ', emulator::CellAttributes::default())
+                                        };
+                                        dest.grid_mut().set_cell(dst_x, dst_y, cell);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Normal mode or scrollback mode at offset 0 - blit normally
+                    dest.blit_from(
+                        &pane.terminal_emulator,
+                        0,           // source x (from origin of pane's emulator)
+                        0,           // source y
+                        self.pos_x,  // destination x (pane's position in compositor)
+                        self.pos_y,  // destination y
+                        self.width,  // width to copy
+                        self.height, // height to copy
+                    );
+                }
             }
             PaneCellInner::VSplit(cells) => {
                 // Recursively composite all child panes
@@ -1491,6 +1744,10 @@ impl PaneCell {
 
         match &self.inner {
             PaneCellInner::Pane(pane) => {
+                // Hide cursor when in scrollback mode
+                if pane.scrollback_mode {
+                    return Some((0, 0, false));
+                }
                 let (cursor_x, cursor_y) = pane.terminal_emulator.cursor_position();
                 let cursor_visible = pane.terminal_emulator.grid().cursor_visible;
                 // Transform cursor position to global coordinates
@@ -1618,6 +1875,53 @@ impl Pane {
     /// Check if the PTY process is still running.
     pub fn is_running(&self) -> bool {
         self.pty.as_ref().map_or(false, |p| p.is_running())
+    }
+
+    /// Enter scrollback mode
+    pub fn enter_scrollback_mode(&mut self) {
+        // Don't enter scrollback mode if in alternate screen
+        if self.terminal_emulator.grid().in_alternate_screen {
+            return;
+        }
+        self.scrollback_mode = true;
+        self.scroll_offset = 0;
+    }
+
+    /// Exit scrollback mode
+    pub fn exit_scrollback_mode(&mut self) {
+        self.scrollback_mode = false;
+        self.scroll_offset = 0;
+    }
+
+    /// Check if in scrollback mode
+    pub fn is_in_scrollback_mode(&self) -> bool {
+        self.scrollback_mode
+    }
+
+    /// Scroll up by the given number of lines (increases scroll_offset)
+    pub fn scroll_up(&mut self, lines: usize) {
+        let max_offset = self.terminal_emulator.grid().scrollback_len();
+        self.scroll_offset = (self.scroll_offset + lines).min(max_offset);
+    }
+
+    /// Scroll down by the given number of lines (decreases scroll_offset)
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    }
+
+    /// Get the current scroll offset
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// Get the total number of scrollback lines
+    pub fn scrollback_len(&self) -> usize {
+        self.terminal_emulator.grid().scrollback_len()
+    }
+
+    /// Get the terminal emulator
+    pub fn emulator(&self) -> &emulator::TerminalEmulator {
+        &self.terminal_emulator
     }
 }
 
