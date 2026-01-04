@@ -1,0 +1,1018 @@
+use crate::border::{get_border_char, BorderDirections};
+use crate::error::CompositorError;
+use crate::pane::Pane;
+use crate::types::{Direction, SplitDirection};
+use pty;
+use std::os::fd::AsRawFd;
+
+/// A cell in the pane tree, which can be a single pane or a split.
+pub struct PaneCell {
+    pub inner: PaneCellInner,
+    pub width: usize,
+    pub height: usize,
+    pub pos_x: usize,
+    pub pos_y: usize,
+    pub focus: bool,
+}
+
+/// The inner content of a pane cell.
+pub enum PaneCellInner {
+    Pane(Pane),
+    VSplit(Vec<PaneCell>),
+    HSplit(Vec<PaneCell>),
+}
+
+impl PaneCell {
+    /// Handle keyboard input by routing it to the focused pane.
+    pub fn handle_input(&mut self, input: &[u8]) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.handle_input(input);
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.handle_input(input);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Collect PTY file descriptors for polling.
+    pub fn collect_poll_fds(
+        &mut self,
+        fds: &mut Vec<libc::pollfd>,
+        pane_map: &mut Vec<Option<*mut Pane>>,
+    ) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                if let Some(ref pty) = pane.pty {
+                    fds.push(libc::pollfd {
+                        fd: pty.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
+                    pane_map.push(Some(pane as *mut Pane));
+                }
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    cell.collect_poll_fds(fds, pane_map);
+                }
+            }
+        }
+    }
+
+    /// Check if this cell or any of its children have focus.
+    pub fn has_focus(&self) -> bool {
+        self.focus
+    }
+
+    /// Get the dimensions of this cell.
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// Get the position of this cell.
+    pub fn position(&self) -> (usize, usize) {
+        (self.pos_x, self.pos_y)
+    }
+
+    /// Get a reference to the inner content.
+    pub fn inner(&self) -> &PaneCellInner {
+        &self.inner
+    }
+
+    /// Enter scrollback mode on the focused pane
+    pub fn enter_scrollback_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.enter_scrollback_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.enter_scrollback_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exit scrollback mode on the focused pane
+    pub fn exit_scrollback_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.exit_scrollback_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.exit_scrollback_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if the focused pane is in scrollback mode
+    pub fn is_in_scrollback_mode(&self) -> bool {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.is_in_scrollback_mode(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.is_in_scrollback_mode();
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Scroll the focused pane up by the given number of lines
+    pub fn scroll_up(&mut self, lines: usize) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.scroll_up(lines);
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.scroll_up(lines);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scroll the focused pane down by the given number of lines
+    pub fn scroll_down(&mut self, lines: usize) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.scroll_down(lines);
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.scroll_down(lines);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get scrollback info from the focused pane (scroll_offset, scrollback_len)
+    pub fn get_scrollback_info(&self) -> Option<(usize, usize)> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => Some((pane.scroll_offset(), pane.scrollback_len())),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_scrollback_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Enter search mode on the focused pane
+    pub fn enter_search_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.enter_search_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.enter_search_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exit search mode on the focused pane
+    pub fn exit_search_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.exit_search_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.exit_search_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if the focused pane is in search mode
+    pub fn is_in_search_mode(&self) -> bool {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.is_in_search_mode(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.is_in_search_mode();
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Input a character to the search query
+    pub fn search_input_char(&mut self, c: char) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.search_input_char(c);
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.search_input_char(c);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle backspace in search query
+    pub fn search_input_backspace(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.search_input_backspace();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.search_input_backspace();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clear the search query
+    pub fn search_clear(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.search_clear();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.search_clear();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Jump to next match
+    pub fn next_match(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.next_match();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.next_match();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Jump to previous match
+    pub fn prev_match(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.prev_match();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.prev_match();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get search info from the focused pane
+    pub fn get_search_info(&self) -> Option<(String, Option<usize>, usize)> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                let (current, total) = pane.search_match_info();
+                Some((pane.search_query().to_string(), current, total))
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_search_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Move focus in the specified direction.
+    ///
+    /// Returns true if focus was successfully moved, false otherwise.
+    pub fn move_focus(&mut self, direction: Direction) -> bool {
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {
+                // Single pane, cannot move focus
+                false
+            }
+            PaneCellInner::VSplit(cells) => {
+                // VSplit arranges panes horizontally (left to right)
+                // Left/Right moves between siblings, Up/Down goes into children
+                let focused_idx = cells.iter().position(|c| c.focus);
+
+                match (direction, focused_idx) {
+                    (Direction::Left, Some(idx)) if idx > 0 => {
+                        // Move focus to the left sibling
+                        cells[idx].clear_focus();
+                        cells[idx - 1].set_focus_first();
+                        true
+                    }
+                    (Direction::Right, Some(idx)) if idx < cells.len() - 1 => {
+                        // Move focus to the right sibling
+                        cells[idx].clear_focus();
+                        cells[idx + 1].set_focus_first();
+                        true
+                    }
+                    (_, Some(idx)) => {
+                        // Try to move focus within the focused child
+                        cells[idx].move_focus(direction)
+                    }
+                    _ => false,
+                }
+            }
+            PaneCellInner::HSplit(cells) => {
+                // HSplit arranges panes vertically (top to bottom)
+                // Up/Down moves between siblings, Left/Right goes into children
+                let focused_idx = cells.iter().position(|c| c.focus);
+
+                match (direction, focused_idx) {
+                    (Direction::Up, Some(idx)) if idx > 0 => {
+                        // Move focus to the upper sibling
+                        cells[idx].clear_focus();
+                        cells[idx - 1].set_focus_first();
+                        true
+                    }
+                    (Direction::Down, Some(idx)) if idx < cells.len() - 1 => {
+                        // Move focus to the lower sibling
+                        cells[idx].clear_focus();
+                        cells[idx + 1].set_focus_first();
+                        true
+                    }
+                    (_, Some(idx)) => {
+                        // Try to move focus within the focused child
+                        cells[idx].move_focus(direction)
+                    }
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    /// Clear focus on this cell and all children.
+    pub fn clear_focus(&mut self) {
+        self.focus = false;
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {}
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    cell.clear_focus();
+                }
+            }
+        }
+    }
+
+    /// Set focus on the first (or leftmost/topmost) pane in this cell.
+    pub fn set_focus_first(&mut self) {
+        self.focus = true;
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {}
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                if let Some(first) = cells.first_mut() {
+                    first.set_focus_first();
+                }
+            }
+        }
+    }
+
+    /// Split the focused pane in the given direction.
+    ///
+    /// If this cell is a pane with focus, it will be converted into a split.
+    /// If this cell is a split, it will recursively find the focused pane and split it.
+    pub fn split_focused(&mut self, direction: SplitDirection) -> Result<(), CompositorError> {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                if !self.focus {
+                    return Ok(());
+                }
+
+                // Calculate dimensions accounting for border (1 cell between panes)
+                let (old_width, old_height, new_width, new_height, new_pos_x, new_pos_y) =
+                    match direction {
+                        SplitDirection::Horizontal => {
+                            // Split top/bottom: each pane gets half the height minus border
+                            // Total height = top_height + 1 (border) + bottom_height
+                            let available_height = self.height.saturating_sub(1); // Reserve 1 for border
+                            let top_height = available_height / 2;
+                            let bottom_height = available_height - top_height;
+                            (
+                                self.width,
+                                top_height,
+                                self.width,
+                                bottom_height,
+                                self.pos_x,
+                                self.pos_y + top_height + 1, // +1 for border
+                            )
+                        }
+                        SplitDirection::Vertical => {
+                            // Split left/right: each pane gets half the width minus border
+                            // Total width = left_width + 1 (border) + right_width
+                            let available_width = self.width.saturating_sub(1); // Reserve 1 for border
+                            let left_width = available_width / 2;
+                            let right_width = available_width - left_width;
+                            (
+                                left_width,
+                                self.height,
+                                right_width,
+                                self.height,
+                                self.pos_x + left_width + 1, // +1 for border
+                                self.pos_y,
+                            )
+                        }
+                    };
+
+                // Create the existing pane cell with updated dimensions
+                pane.terminal_emulator.resize(old_width, old_height);
+                if let Some(ref pty) = pane.pty {
+                    let _ = pty.resize(old_width as u16, old_height as u16);
+                }
+
+                // Create a new pane with a new shell
+                let new_pane = Pane {
+                    terminal_emulator: emulator::TerminalEmulator::new(new_width, new_height),
+                    pty: Some(
+                        pty::PtyProcess::spawn("/bin/bash", new_width as u16, new_height as u16)
+                            .map_err(CompositorError::Pty)?,
+                    ),
+                    read_buffer: [0u8; 4096],
+                    scrollback_mode: false,
+                    scroll_offset: 0,
+                    search_mode: false,
+                    search_query: String::new(),
+                    search_matches: Vec::new(),
+                    current_match_index: None,
+                };
+
+                // Take ownership of the old pane
+                let old_inner = std::mem::replace(
+                    &mut self.inner,
+                    PaneCellInner::Pane(Pane {
+                        terminal_emulator: emulator::TerminalEmulator::new(1, 1),
+                        pty: None,
+                        read_buffer: [0u8; 4096],
+                        scrollback_mode: false,
+                        scroll_offset: 0,
+                        search_mode: false,
+                        search_query: String::new(),
+                        search_matches: Vec::new(),
+                        current_match_index: None,
+                    }),
+                );
+
+                let old_pane = match old_inner {
+                    PaneCellInner::Pane(p) => p,
+                    _ => unreachable!(),
+                };
+
+                // Create the two child cells
+                let first_cell = PaneCell {
+                    inner: PaneCellInner::Pane(old_pane),
+                    width: old_width,
+                    height: old_height,
+                    pos_x: self.pos_x,
+                    pos_y: self.pos_y,
+                    focus: false, // Original pane loses focus
+                };
+
+                let second_cell = PaneCell {
+                    inner: PaneCellInner::Pane(new_pane),
+                    width: new_width,
+                    height: new_height,
+                    pos_x: new_pos_x,
+                    pos_y: new_pos_y,
+                    focus: true, // New pane gets focus
+                };
+
+                // Replace the inner content with a split
+                self.inner = match direction {
+                    SplitDirection::Horizontal => {
+                        PaneCellInner::HSplit(vec![first_cell, second_cell])
+                    }
+                    SplitDirection::Vertical => {
+                        PaneCellInner::VSplit(vec![first_cell, second_cell])
+                    }
+                };
+
+                Ok(())
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                // Find the focused child and split it
+                for cell in cells {
+                    if cell.focus {
+                        return cell.split_focused(direction);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Get mutable access to a child pane by index.
+    pub fn get_child_mut(&mut self, index: usize) -> Option<&mut PaneCell> {
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => None,
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => cells.get_mut(index),
+        }
+    }
+
+    /// Composite this pane cell into the global emulator.
+    ///
+    /// Recursively traverses all child panes and blits their contents
+    /// into the destination emulator at the appropriate positions.
+    pub fn composite_into(&self, dest: &mut emulator::TerminalEmulator) {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                let grid = pane.terminal_emulator.grid();
+                let scrollback_len = grid.scrollback_len();
+
+                // Build a helper to check if a position matches a search result
+                let is_match = |line_index: isize, col: usize| -> Option<bool> {
+                    if !pane.search_mode || pane.search_matches.is_empty() {
+                        return None;
+                    }
+                    for (i, m) in pane.search_matches.iter().enumerate() {
+                        if m.line_index == line_index && col >= m.start_col && col < m.end_col {
+                            let is_current = Some(i) == pane.current_match_index;
+                            return Some(is_current);
+                        }
+                    }
+                    None
+                };
+
+                if pane.scrollback_mode && pane.scroll_offset > 0 {
+                    // In scrollback mode with active scrolling - composite scrollback + grid content
+                    for row in 0..self.height {
+                        let dst_y = self.pos_y + row;
+
+                        // Calculate which line to display
+                        // scroll_offset = number of lines scrolled up from bottom
+                        // So if scroll_offset = 5, we show 5 lines from scrollback at the top
+                        let source_line = if row < pane.scroll_offset {
+                            // This row should show scrollback content
+                            // scroll_offset lines are shown from scrollback
+                            // row 0 shows scrollback[scrollback_len - scroll_offset]
+                            let scrollback_idx =
+                                scrollback_len.saturating_sub(pane.scroll_offset) + row;
+                            if scrollback_idx < scrollback_len {
+                                // Convert scrollback_idx to line_index format
+                                let line_index =
+                                    (scrollback_idx as isize) - (scrollback_len as isize);
+                                Some((true, scrollback_idx, line_index))
+                            } else {
+                                None
+                            }
+                        } else {
+                            // This row should show grid content
+                            let grid_row = row - pane.scroll_offset;
+                            if grid_row < grid.rows {
+                                Some((false, grid_row, grid_row as isize))
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some((is_scrollback, line_idx, line_index)) = source_line {
+                            let source_row = if is_scrollback {
+                                grid.get_scrollback_row(line_idx)
+                            } else {
+                                grid.get_row(line_idx)
+                            };
+
+                            if let Some(cells) = source_row {
+                                for col in 0..self.width {
+                                    let dst_x = self.pos_x + col;
+                                    let (dest_cols, dest_rows) = dest.dimensions();
+                                    if dst_x < dest_cols && dst_y < dest_rows {
+                                        let mut cell = if col < cells.len() {
+                                            cells[col].clone()
+                                        } else {
+                                            emulator::Cell::new(
+                                                ' ',
+                                                emulator::CellAttributes::default(),
+                                            )
+                                        };
+
+                                        // Apply search highlighting
+                                        if let Some(is_current) = is_match(line_index, col) {
+                                            if is_current {
+                                                // Current match: bright magenta background, white text, bold
+                                                cell.attrs.bg_color =
+                                                    Some(emulator::Color::Magenta);
+                                                cell.attrs.fg_color = Some(emulator::Color::White);
+                                                cell.attrs.bold = true;
+                                            } else {
+                                                // Other matches: yellow background
+                                                cell.attrs.bg_color = Some(emulator::Color::Yellow);
+                                                cell.attrs.fg_color = Some(emulator::Color::Black);
+                                            }
+                                        }
+
+                                        dest.grid_mut().set_cell(dst_x, dst_y, cell);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if pane.search_mode && !pane.search_matches.is_empty() {
+                    // Search mode with scroll_offset = 0: blit with highlighting
+                    for row in 0..self.height.min(grid.rows) {
+                        let dst_y = self.pos_y + row;
+                        if let Some(cells) = grid.get_row(row) {
+                            for col in 0..self.width.min(cells.len()) {
+                                let dst_x = self.pos_x + col;
+                                let (dest_cols, dest_rows) = dest.dimensions();
+                                if dst_x < dest_cols && dst_y < dest_rows {
+                                    let mut cell = cells[col].clone();
+
+                                    // Apply search highlighting
+                                    if let Some(is_current) = is_match(row as isize, col) {
+                                        if is_current {
+                                            // Current match: bright magenta background, white text, bold
+                                            cell.attrs.bg_color = Some(emulator::Color::Magenta);
+                                            cell.attrs.fg_color = Some(emulator::Color::White);
+                                            cell.attrs.bold = true;
+                                        } else {
+                                            // Other matches: yellow background
+                                            cell.attrs.bg_color = Some(emulator::Color::Yellow);
+                                            cell.attrs.fg_color = Some(emulator::Color::Black);
+                                        }
+                                    }
+
+                                    dest.grid_mut().set_cell(dst_x, dst_y, cell);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Normal mode or scrollback mode at offset 0 without search - blit normally
+                    dest.blit_from(
+                        &pane.terminal_emulator,
+                        0,           // source x (from origin of pane's emulator)
+                        0,           // source y
+                        self.pos_x,  // destination x (pane's position in compositor)
+                        self.pos_y,  // destination y
+                        self.width,  // width to copy
+                        self.height, // height to copy
+                    );
+                }
+            }
+            PaneCellInner::VSplit(cells) => {
+                // Recursively composite all child panes
+                for cell in cells {
+                    cell.composite_into(dest);
+                }
+                // Draw vertical borders between panes
+                self.draw_vsplit_borders(cells, dest);
+            }
+            PaneCellInner::HSplit(cells) => {
+                // Recursively composite all child panes
+                for cell in cells {
+                    cell.composite_into(dest);
+                }
+                // Draw horizontal borders between panes
+                self.draw_hsplit_borders(cells, dest);
+            }
+        }
+    }
+
+    /// Draw vertical borders between VSplit panes.
+    fn draw_vsplit_borders(&self, cells: &[PaneCell], dest: &mut emulator::TerminalEmulator) {
+        for i in 0..cells.len().saturating_sub(1) {
+            // Border is positioned right after the current cell
+            let border_x = cells[i].pos_x + cells[i].width;
+
+            // Draw vertical line for the height of this split
+            for y in self.pos_y..(self.pos_y + self.height) {
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if border_x < cols && y < rows {
+                    let existing = dest.grid().get_cell(border_x, y).character;
+                    let border_char = get_border_char(existing, '│');
+                    dest.grid_mut().set_cell(
+                        border_x,
+                        y,
+                        emulator::Cell::new(border_char, emulator::CellAttributes::default()),
+                    );
+                }
+            }
+
+            // Check the row above for a horizontal border and add DOWN direction to create T-junction
+            if self.pos_y > 0 {
+                let y_above = self.pos_y - 1;
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if border_x < cols && y_above < rows {
+                    let existing = dest.grid().get_cell(border_x, y_above).character;
+                    let existing_dirs = BorderDirections::from_char(existing);
+                    // If there's a horizontal border above (has left+right), add down direction
+                    if existing_dirs.left && existing_dirs.right {
+                        let new_dirs = existing_dirs.merge(BorderDirections {
+                            up: false,
+                            down: true,
+                            left: false,
+                            right: false,
+                        });
+                        dest.grid_mut().set_cell(
+                            border_x,
+                            y_above,
+                            emulator::Cell::new(
+                                new_dirs.to_char(),
+                                emulator::CellAttributes::default(),
+                            ),
+                        );
+                    }
+                }
+            }
+
+            // Check the column to the right for horizontal borders and add LEFT direction
+            let x_right = border_x + 1;
+            let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+            if x_right < cols {
+                for y in self.pos_y..(self.pos_y + self.height) {
+                    if y < rows {
+                        let right_char = dest.grid().get_cell(x_right, y).character;
+                        let right_dirs = BorderDirections::from_char(right_char);
+                        // If there's a horizontal border to the right (has left+right), add right direction to current
+                        if right_dirs.left && right_dirs.right {
+                            let current = dest.grid().get_cell(border_x, y).character;
+                            let current_dirs = BorderDirections::from_char(current);
+                            let new_dirs = current_dirs.merge(BorderDirections {
+                                up: false,
+                                down: false,
+                                left: false,
+                                right: true,
+                            });
+                            dest.grid_mut().set_cell(
+                                border_x,
+                                y,
+                                emulator::Cell::new(
+                                    new_dirs.to_char(),
+                                    emulator::CellAttributes::default(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Check the column to the left for horizontal borders and add RIGHT direction
+            if border_x > 0 {
+                let x_left = border_x - 1;
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if x_left < cols {
+                    for y in self.pos_y..(self.pos_y + self.height) {
+                        if y < rows {
+                            let left_char = dest.grid().get_cell(x_left, y).character;
+                            let left_dirs = BorderDirections::from_char(left_char);
+                            // If there's a horizontal border to the left (has left+right), add left direction to current
+                            if left_dirs.left && left_dirs.right {
+                                let current = dest.grid().get_cell(border_x, y).character;
+                                let current_dirs = BorderDirections::from_char(current);
+                                let new_dirs = current_dirs.merge(BorderDirections {
+                                    up: false,
+                                    down: false,
+                                    left: true,
+                                    right: false,
+                                });
+                                dest.grid_mut().set_cell(
+                                    border_x,
+                                    y,
+                                    emulator::Cell::new(
+                                        new_dirs.to_char(),
+                                        emulator::CellAttributes::default(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw horizontal borders between HSplit panes.
+    fn draw_hsplit_borders(&self, cells: &[PaneCell], dest: &mut emulator::TerminalEmulator) {
+        for i in 0..cells.len().saturating_sub(1) {
+            // Border is positioned right after the current cell
+            let border_y = cells[i].pos_y + cells[i].height;
+
+            // Draw horizontal line for the width of this split
+            for x in self.pos_x..(self.pos_x + self.width) {
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if x < cols && border_y < rows {
+                    let existing = dest.grid().get_cell(x, border_y).character;
+                    let border_char = get_border_char(existing, '─');
+                    dest.grid_mut().set_cell(
+                        x,
+                        border_y,
+                        emulator::Cell::new(border_char, emulator::CellAttributes::default()),
+                    );
+                }
+            }
+
+            // Check the row below for vertical borders and add DOWN direction to create T-junction
+            let y_below = border_y + 1;
+            let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+            if y_below < rows {
+                for x in self.pos_x..(self.pos_x + self.width) {
+                    if x < cols {
+                        let below_char = dest.grid().get_cell(x, y_below).character;
+                        let below_dirs = BorderDirections::from_char(below_char);
+                        // If there's a vertical border below (has up+down), add down direction to current
+                        if below_dirs.up && below_dirs.down {
+                            let current = dest.grid().get_cell(x, border_y).character;
+                            let current_dirs = BorderDirections::from_char(current);
+                            let new_dirs = current_dirs.merge(BorderDirections {
+                                up: false,
+                                down: true,
+                                left: false,
+                                right: false,
+                            });
+                            dest.grid_mut().set_cell(
+                                x,
+                                border_y,
+                                emulator::Cell::new(
+                                    new_dirs.to_char(),
+                                    emulator::CellAttributes::default(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Check the row above for vertical borders and add UP direction to create T-junction
+            if border_y > 0 {
+                let y_above = border_y - 1;
+                let (cols, rows) = (dest.grid().cols, dest.grid().rows);
+                if y_above < rows {
+                    for x in self.pos_x..(self.pos_x + self.width) {
+                        if x < cols {
+                            let above_char = dest.grid().get_cell(x, y_above).character;
+                            let above_dirs = BorderDirections::from_char(above_char);
+                            // If there's a vertical border above (has up+down), add up direction to current
+                            if above_dirs.up && above_dirs.down {
+                                let current = dest.grid().get_cell(x, border_y).character;
+                                let current_dirs = BorderDirections::from_char(current);
+                                let new_dirs = current_dirs.merge(BorderDirections {
+                                    up: true,
+                                    down: false,
+                                    left: false,
+                                    right: false,
+                                });
+                                dest.grid_mut().set_cell(
+                                    x,
+                                    border_y,
+                                    emulator::Cell::new(
+                                        new_dirs.to_char(),
+                                        emulator::CellAttributes::default(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get the cursor info from the focused pane.
+    ///
+    /// Returns the cursor position in global coordinates (x, y) and visibility.
+    /// Returns None if no pane has focus.
+    pub fn get_focused_cursor_info(&self) -> Option<(usize, usize, bool)> {
+        if !self.focus {
+            return None;
+        }
+
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                // Hide cursor when in scrollback mode
+                if pane.scrollback_mode {
+                    return Some((0, 0, false));
+                }
+                let (cursor_x, cursor_y) = pane.terminal_emulator.cursor_position();
+                let cursor_visible = pane.terminal_emulator.grid().cursor_visible;
+                // Transform cursor position to global coordinates
+                let global_x = self.pos_x + cursor_x;
+                let global_y = self.pos_y + cursor_y;
+                Some((global_x, global_y, cursor_visible))
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                // Find the focused child and get its cursor info
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_focused_cursor_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Resize this pane cell to new dimensions and position.
+    ///
+    /// For splits, this distributes space evenly among children.
+    /// For leaf panes, this resizes the terminal emulator and PTY.
+    pub fn resize(&mut self, pos_x: usize, pos_y: usize, width: usize, height: usize) {
+        self.pos_x = pos_x;
+        self.pos_y = pos_y;
+        self.width = width;
+        self.height = height;
+
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                // Resize the terminal emulator
+                pane.terminal_emulator.resize(width, height);
+                // Resize the PTY if present
+                if let Some(ref pty) = pane.pty {
+                    let _ = pty.resize(width as u16, height as u16);
+                }
+            }
+            PaneCellInner::VSplit(cells) => {
+                // Distribute width evenly among children, reserving 1 column for each border
+                let num_cells = cells.len();
+                if num_cells == 0 {
+                    return;
+                }
+
+                // Reserve 1 column for each border between panes
+                let num_borders = num_cells.saturating_sub(1);
+                let available_width = width.saturating_sub(num_borders);
+                let base_width = available_width / num_cells;
+                let extra = available_width % num_cells;
+                let mut current_x = pos_x;
+
+                for (i, cell) in cells.iter_mut().enumerate() {
+                    // Give extra pixels to the first 'extra' cells
+                    let cell_width = base_width + if i < extra { 1 } else { 0 };
+                    cell.resize(current_x, pos_y, cell_width, height);
+                    current_x += cell_width;
+                    // Skip 1 column for border after each pane (except the last)
+                    if i < num_cells - 1 {
+                        current_x += 1;
+                    }
+                }
+            }
+            PaneCellInner::HSplit(cells) => {
+                // Distribute height evenly among children, reserving 1 row for each border
+                let num_cells = cells.len();
+                if num_cells == 0 {
+                    return;
+                }
+
+                // Reserve 1 row for each border between panes
+                let num_borders = num_cells.saturating_sub(1);
+                let available_height = height.saturating_sub(num_borders);
+                let base_height = available_height / num_cells;
+                let extra = available_height % num_cells;
+                let mut current_y = pos_y;
+
+                for (i, cell) in cells.iter_mut().enumerate() {
+                    // Give extra pixels to the first 'extra' cells
+                    let cell_height = base_height + if i < extra { 1 } else { 0 };
+                    cell.resize(pos_x, current_y, width, cell_height);
+                    current_y += cell_height;
+                    // Skip 1 row for border after each pane (except the last)
+                    if i < num_cells - 1 {
+                        current_y += 1;
+                    }
+                }
+            }
+        }
+    }
+}
