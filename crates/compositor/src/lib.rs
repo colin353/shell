@@ -50,6 +50,10 @@ impl Tab {
                     read_buffer: [0u8; 4096],
                     scrollback_mode: false,
                     scroll_offset: 0,
+                    search_mode: false,
+                    search_query: String::new(),
+                    search_matches: Vec::new(),
+                    current_match_index: None,
                 }),
                 width,
                 height,
@@ -107,6 +111,18 @@ pub struct PaneCell {
 }
 
 /// A single terminal pane with its emulator and PTY process.
+/// A match found during search, storing the line index and column range
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchMatch {
+    /// Line index (negative values are scrollback lines, counting from -1 as most recent scrollback)
+    /// 0 and positive values are grid lines
+    line_index: isize,
+    /// Starting column of the match
+    start_col: usize,
+    /// Ending column of the match (exclusive)
+    end_col: usize,
+}
+
 pub struct Pane {
     terminal_emulator: emulator::TerminalEmulator,
     pty: Option<pty::PtyProcess>,
@@ -115,6 +131,14 @@ pub struct Pane {
     scrollback_mode: bool,
     /// Scroll offset (number of lines scrolled up from the bottom)
     scroll_offset: usize,
+    /// Whether the pane is in search mode (sub-mode of scrollback)
+    search_mode: bool,
+    /// Current search query
+    search_query: String,
+    /// All matches found for the current search
+    search_matches: Vec<SearchMatch>,
+    /// Index of the currently selected match (if any)
+    current_match_index: Option<usize>,
 }
 
 /// The inner content of a pane cell.
@@ -337,8 +361,15 @@ impl Compositor {
     /// - Ctrl+d: Scroll down by half screen
     /// - g: Jump to top of scrollback
     /// - G: Jump to bottom of scrollback
-    /// - Escape/q: Exit scrollback mode
+    /// - /: Enter search mode
+    /// - Escape/q: Exit scrollback mode (or exit search mode if in search)
     fn handle_scrollback_input(&mut self, input: &[u8]) {
+        // Check if we're in search mode
+        if self.active_tab().root.is_in_search_mode() {
+            self.handle_search_input(input);
+            return;
+        }
+
         if input.len() == 1 {
             match input[0] {
                 0x15 => {
@@ -368,6 +399,11 @@ impl Compositor {
                         self.render();
                     }
                 }
+                b'/' => {
+                    // / - enter search mode
+                    self.active_tab_mut().root.enter_search_mode();
+                    self.render();
+                }
                 0x1b | b'q' => {
                     // Escape or 'q' - exit scrollback mode
                     self.active_tab_mut().root.exit_scrollback_mode();
@@ -376,6 +412,103 @@ impl Compositor {
                 _ => {
                     // Ignore other keys in scrollback mode
                 }
+            }
+        }
+    }
+
+    /// Handle input while in search mode.
+    fn handle_search_input(&mut self, input: &[u8]) {
+        if input.is_empty() {
+            return;
+        }
+
+        // Check for escape sequences (CSI sequences starting with ESC [)
+        if input.len() >= 3 && input[0] == 0x1b && input[1] == b'[' {
+            // Check for up/down arrow keys for match navigation
+            if input.len() == 3 {
+                match input[2] {
+                    b'A' => {
+                        // Up arrow - go to next match (older / up on screen)
+                        self.active_tab_mut().root.next_match();
+                        self.render();
+                        return;
+                    }
+                    b'B' => {
+                        // Down arrow - go to previous match (more recent / down on screen)
+                        self.active_tab_mut().root.prev_match();
+                        self.render();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            // Other escape sequences - ignore
+            return;
+        }
+
+        // Single byte input
+        if input.len() == 1 {
+            match input[0] {
+                0x1b => {
+                    // Escape - exit search mode (back to scrollback mode)
+                    self.active_tab_mut().root.exit_search_mode();
+                    self.render();
+                }
+                0x0d | 0x10 | 0x15 => {
+                    // Enter or Ctrl+P or Ctrl+U - go to next match (older / up on screen)
+                    self.active_tab_mut().root.next_match();
+                    self.render();
+                }
+                0x0e | 0x04 => {
+                    // Ctrl+N or Ctrl+D - go to previous match (more recent / down on screen)
+                    self.active_tab_mut().root.prev_match();
+                    self.render();
+                }
+                0x17 => {
+                    // Ctrl+W - clear search input
+                    self.active_tab_mut().root.search_clear();
+                    self.render();
+                }
+                0x7f => {
+                    // Backspace (0x7f) - delete last character
+                    self.active_tab_mut().root.search_input_backspace();
+                    self.render();
+                }
+                b if b >= 0x20 && b < 0x7f => {
+                    // Printable ASCII character
+                    self.active_tab_mut().root.search_input_char(b as char);
+                    self.render();
+                }
+                _ => {
+                    // Ignore other control characters
+                }
+            }
+        } else if input.len() == 2 && input[0] == 0x1b {
+            // Alt+key or other 2-byte sequences
+            // Check for Shift+Enter or Ctrl+Enter (some terminals send this as ESC + Enter)
+            if input[1] == 0x0d || input[1] == 0x0a {
+                // Shift+Enter or Ctrl+Enter - go to previous match (more recent / down on screen)
+                self.active_tab_mut().root.prev_match();
+                self.render();
+            }
+        } else if input.len() >= 4 && input[0] == 0x1b && input[1] == b'[' {
+            // Some terminals send CSI sequences for modified Enter
+            // e.g., ESC [13;5u for Ctrl+Enter in kitty keyboard protocol
+            // For now, check if it looks like a modified Enter sequence
+            if input.ends_with(b"5u") || input.ends_with(b"5~") {
+                // Ctrl+Enter variant - go to previous match
+                self.active_tab_mut().root.prev_match();
+                self.render();
+            }
+        } else {
+            // Try to interpret as UTF-8 string for multi-byte characters
+            if let Ok(s) = std::str::from_utf8(input) {
+                for c in s.chars() {
+                    if c >= ' ' && c != '\x7f' {
+                        self.active_tab_mut().root.search_input_char(c);
+                    }
+                }
+                self.render();
             }
         }
     }
@@ -736,6 +869,75 @@ impl Compositor {
                     x_pos += 1;
                 }
             }
+        }
+
+        // Check if we're in search mode (sub-mode of scrollback) first
+        if self.tabs[self.active_tab].root.is_in_search_mode() {
+            // Create attributes for search indicator
+            let mut search_attrs = emulator::CellAttributes::default();
+            search_attrs.bg_color = Some(emulator::Color::Cyan);
+            search_attrs.fg_color = Some(emulator::Color::Black);
+            search_attrs.bold = true;
+
+            if let Some((query, current_idx, total)) =
+                self.tabs[self.active_tab].root.get_search_info()
+            {
+                // Show search query on the left after tabs
+                let search_prefix = " / ";
+                for ch in search_prefix.chars() {
+                    if x_pos < cols {
+                        self.global_emulator.grid_mut().set_cell(
+                            x_pos,
+                            status_bar_y,
+                            emulator::Cell::new(ch, search_attrs.clone()),
+                        );
+                        x_pos += 1;
+                    }
+                }
+                for ch in query.chars() {
+                    if x_pos < cols {
+                        self.global_emulator.grid_mut().set_cell(
+                            x_pos,
+                            status_bar_y,
+                            emulator::Cell::new(ch, search_attrs.clone()),
+                        );
+                        x_pos += 1;
+                    }
+                }
+                // Add trailing space
+                if x_pos < cols {
+                    self.global_emulator.grid_mut().set_cell(
+                        x_pos,
+                        status_bar_y,
+                        emulator::Cell::new(' ', search_attrs.clone()),
+                    );
+                }
+
+                // Show match count on the right
+                let match_text = if total == 0 {
+                    " No matches ".to_string()
+                } else if total >= 100 {
+                    let current_display = current_idx.map(|i| i + 1).unwrap_or(0);
+                    format!(" {}/100+ ", current_display)
+                } else {
+                    let current_display = current_idx.map(|i| i + 1).unwrap_or(0);
+                    format!(" {}/{} ", current_display, total)
+                };
+
+                let text_start_x = cols.saturating_sub(match_text.len());
+                for (i, ch) in match_text.chars().enumerate() {
+                    let x = text_start_x + i;
+                    if x < cols {
+                        self.global_emulator.grid_mut().set_cell(
+                            x,
+                            status_bar_y,
+                            emulator::Cell::new(ch, search_attrs.clone()),
+                        );
+                    }
+                }
+                return;
+            }
+            return;
         }
 
         // Check if we're in scrollback mode and render scroll indicator instead of date/time
@@ -1111,6 +1313,151 @@ impl PaneCell {
         }
     }
 
+    /// Enter search mode on the focused pane
+    pub fn enter_search_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.enter_search_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.enter_search_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exit search mode on the focused pane
+    pub fn exit_search_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.exit_search_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.exit_search_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if the focused pane is in search mode
+    pub fn is_in_search_mode(&self) -> bool {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.is_in_search_mode(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.is_in_search_mode();
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Input a character to the search query
+    pub fn search_input_char(&mut self, c: char) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.search_input_char(c);
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.search_input_char(c);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle backspace in search query
+    pub fn search_input_backspace(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.search_input_backspace();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.search_input_backspace();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clear the search query
+    pub fn search_clear(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.search_clear();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.search_clear();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Jump to next match
+    pub fn next_match(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.next_match();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.next_match();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Jump to previous match
+    pub fn prev_match(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.prev_match();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.prev_match();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get search info from the focused pane
+    pub fn get_search_info(&self) -> Option<(String, Option<usize>, usize)> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                let (current, total) = pane.search_match_info();
+                Some((pane.search_query().to_string(), current, total))
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_search_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Move focus in the specified direction.
     ///
     /// Returns true if focus was successfully moved, false otherwise.
@@ -1261,6 +1608,10 @@ impl PaneCell {
                     read_buffer: [0u8; 4096],
                     scrollback_mode: false,
                     scroll_offset: 0,
+                    search_mode: false,
+                    search_query: String::new(),
+                    search_matches: Vec::new(),
+                    current_match_index: None,
                 };
 
                 // Take ownership of the old pane
@@ -1272,6 +1623,10 @@ impl PaneCell {
                         read_buffer: [0u8; 4096],
                         scrollback_mode: false,
                         scroll_offset: 0,
+                        search_mode: false,
+                        search_query: String::new(),
+                        search_matches: Vec::new(),
+                        current_match_index: None,
                     }),
                 );
 
@@ -1338,11 +1693,25 @@ impl PaneCell {
     fn composite_into(&self, dest: &mut emulator::TerminalEmulator) {
         match &self.inner {
             PaneCellInner::Pane(pane) => {
+                let grid = pane.terminal_emulator.grid();
+                let scrollback_len = grid.scrollback_len();
+
+                // Build a helper to check if a position matches a search result
+                let is_match = |line_index: isize, col: usize| -> Option<bool> {
+                    if !pane.search_mode || pane.search_matches.is_empty() {
+                        return None;
+                    }
+                    for (i, m) in pane.search_matches.iter().enumerate() {
+                        if m.line_index == line_index && col >= m.start_col && col < m.end_col {
+                            let is_current = Some(i) == pane.current_match_index;
+                            return Some(is_current);
+                        }
+                    }
+                    None
+                };
+
                 if pane.scrollback_mode && pane.scroll_offset > 0 {
                     // In scrollback mode with active scrolling - composite scrollback + grid content
-                    let grid = pane.terminal_emulator.grid();
-                    let scrollback_len = grid.scrollback_len();
-
                     for row in 0..self.height {
                         let dst_y = self.pos_y + row;
 
@@ -1356,7 +1725,9 @@ impl PaneCell {
                             let scrollback_idx =
                                 scrollback_len.saturating_sub(pane.scroll_offset) + row;
                             if scrollback_idx < scrollback_len {
-                                Some((true, scrollback_idx))
+                                // Convert scrollback_idx to line_index format
+                                let line_index = (scrollback_idx as isize) - (scrollback_len as isize);
+                                Some((true, scrollback_idx, line_index))
                             } else {
                                 None
                             }
@@ -1364,13 +1735,13 @@ impl PaneCell {
                             // This row should show grid content
                             let grid_row = row - pane.scroll_offset;
                             if grid_row < grid.rows {
-                                Some((false, grid_row))
+                                Some((false, grid_row, grid_row as isize))
                             } else {
                                 None
                             }
                         };
 
-                        if let Some((is_scrollback, line_idx)) = source_line {
+                        if let Some((is_scrollback, line_idx, line_index)) = source_line {
                             let source_row = if is_scrollback {
                                 grid.get_scrollback_row(line_idx)
                             } else {
@@ -1382,7 +1753,7 @@ impl PaneCell {
                                     let dst_x = self.pos_x + col;
                                     let (dest_cols, dest_rows) = dest.dimensions();
                                     if dst_x < dest_cols && dst_y < dest_rows {
-                                        let cell = if col < cells.len() {
+                                        let mut cell = if col < cells.len() {
                                             cells[col].clone()
                                         } else {
                                             emulator::Cell::new(
@@ -1390,14 +1761,59 @@ impl PaneCell {
                                                 emulator::CellAttributes::default(),
                                             )
                                         };
+                                        
+                                        // Apply search highlighting
+                                        if let Some(is_current) = is_match(line_index, col) {
+                                            if is_current {
+                                                // Current match: bright magenta background, white text, bold
+                                                cell.attrs.bg_color = Some(emulator::Color::Magenta);
+                                                cell.attrs.fg_color = Some(emulator::Color::White);
+                                                cell.attrs.bold = true;
+                                            } else {
+                                                // Other matches: yellow background
+                                                cell.attrs.bg_color = Some(emulator::Color::Yellow);
+                                                cell.attrs.fg_color = Some(emulator::Color::Black);
+                                            }
+                                        }
+                                        
                                         dest.grid_mut().set_cell(dst_x, dst_y, cell);
                                     }
                                 }
                             }
                         }
                     }
+                } else if pane.search_mode && !pane.search_matches.is_empty() {
+                    // Search mode with scroll_offset = 0: blit with highlighting
+                    for row in 0..self.height.min(grid.rows) {
+                        let dst_y = self.pos_y + row;
+                        if let Some(cells) = grid.get_row(row) {
+                            for col in 0..self.width.min(cells.len()) {
+                                let dst_x = self.pos_x + col;
+                                let (dest_cols, dest_rows) = dest.dimensions();
+                                if dst_x < dest_cols && dst_y < dest_rows {
+                                    let mut cell = cells[col].clone();
+                                    
+                                    // Apply search highlighting
+                                    if let Some(is_current) = is_match(row as isize, col) {
+                                        if is_current {
+                                            // Current match: bright magenta background, white text, bold
+                                            cell.attrs.bg_color = Some(emulator::Color::Magenta);
+                                            cell.attrs.fg_color = Some(emulator::Color::White);
+                                            cell.attrs.bold = true;
+                                        } else {
+                                            // Other matches: yellow background
+                                            cell.attrs.bg_color = Some(emulator::Color::Yellow);
+                                            cell.attrs.fg_color = Some(emulator::Color::Black);
+                                        }
+                                    }
+                                    
+                                    dest.grid_mut().set_cell(dst_x, dst_y, cell);
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    // Normal mode or scrollback mode at offset 0 - blit normally
+                    // Normal mode or scrollback mode at offset 0 without search - blit normally
                     dest.blit_from(
                         &pane.terminal_emulator,
                         0,           // source x (from origin of pane's emulator)
@@ -1894,6 +2310,11 @@ impl Pane {
     pub fn exit_scrollback_mode(&mut self) {
         self.scrollback_mode = false;
         self.scroll_offset = 0;
+        // Also clear search state
+        self.search_mode = false;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.current_match_index = None;
     }
 
     /// Check if in scrollback mode
@@ -1925,6 +2346,261 @@ impl Pane {
     /// Get the terminal emulator
     pub fn emulator(&self) -> &emulator::TerminalEmulator {
         &self.terminal_emulator
+    }
+
+    /// Enter search mode (must be in scrollback mode first)
+    pub fn enter_search_mode(&mut self) {
+        if self.scrollback_mode {
+            self.search_mode = true;
+            self.search_query.clear();
+            self.search_matches.clear();
+            self.current_match_index = None;
+        }
+    }
+
+    /// Exit search mode (back to scrollback mode)
+    pub fn exit_search_mode(&mut self) {
+        self.search_mode = false;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.current_match_index = None;
+    }
+
+    /// Check if in search mode
+    pub fn is_in_search_mode(&self) -> bool {
+        self.search_mode
+    }
+
+    /// Get the current search query
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Get the current match index and total matches
+    pub fn search_match_info(&self) -> (Option<usize>, usize) {
+        (self.current_match_index, self.search_matches.len())
+    }
+
+    /// Handle a character input for the search query
+    pub fn search_input_char(&mut self, c: char) {
+        self.search_query.push(c);
+        self.update_search();
+    }
+
+    /// Handle backspace for the search query
+    pub fn search_input_backspace(&mut self) {
+        self.search_query.pop();
+        self.update_search();
+    }
+
+    /// Clear the search query
+    pub fn search_clear(&mut self) {
+        self.search_query.clear();
+        self.update_search();
+    }
+
+    /// Update search results based on current query
+    fn update_search(&mut self) {
+        self.search_matches.clear();
+        self.current_match_index = None;
+
+        if self.search_query.is_empty() {
+            return;
+        }
+
+        const MAX_MATCHES: usize = 100;
+
+        let query_lower = self.search_query.to_lowercase();
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
+
+        // Search from bottom to top (most recent first) so we find the most relevant matches
+        // when hitting the MAX_MATCHES limit
+        
+        // First, search current grid from bottom to top
+        'grid: for y in (0..grid.rows).rev() {
+            if let Some(row) = grid.get_row(y) {
+                let line_text: String = row.iter().map(|c| c.character).collect();
+                let line_lower = line_text.to_lowercase();
+                
+                // Find all matches in this line (still left to right within line)
+                let mut search_start = 0;
+                while let Some(pos) = line_lower[search_start..].find(&query_lower) {
+                    let start_col = search_start + pos;
+                    let end_col = start_col + self.search_query.len();
+                    self.search_matches.push(SearchMatch {
+                        line_index: y as isize,
+                        start_col,
+                        end_col,
+                    });
+                    if self.search_matches.len() >= MAX_MATCHES {
+                        break 'grid;
+                    }
+                    search_start = start_col + 1;
+                    if search_start >= line_lower.len() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Then search scrollback from newest to oldest (only if we haven't hit the limit)
+        // Scrollback index scrollback_len-1 is the most recent, 0 is the oldest
+        if self.search_matches.len() < MAX_MATCHES {
+            'scrollback: for i in (0..scrollback_len).rev() {
+                if let Some(row) = grid.get_scrollback_row(i) {
+                    let line_text: String = row.iter().map(|c| c.character).collect();
+                    let line_lower = line_text.to_lowercase();
+                    
+                    // Find all matches in this line
+                    let mut search_start = 0;
+                    while let Some(pos) = line_lower[search_start..].find(&query_lower) {
+                        let start_col = search_start + pos;
+                        let end_col = start_col + self.search_query.len();
+                        // Convert scrollback index to our line_index format:
+                        // scrollback line 0 (oldest) -> -(scrollback_len) 
+                        // scrollback line (scrollback_len - 1) (newest) -> -1
+                        let line_index = (i as isize) - (scrollback_len as isize);
+                        self.search_matches.push(SearchMatch {
+                            line_index,
+                            start_col,
+                            end_col,
+                        });
+                        if self.search_matches.len() >= MAX_MATCHES {
+                            break 'scrollback;
+                        }
+                        search_start = start_col + 1;
+                        if search_start >= line_lower.len() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Initially select the first match (which is now the most recent/bottom-most
+        // since we searched from bottom to top)
+        if !self.search_matches.is_empty() {
+            self.current_match_index = Some(0);
+            self.jump_to_current_match();
+        }
+    }
+
+    /// Jump to the next match (toward bottom/more recent)
+    pub fn next_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        match self.current_match_index {
+            Some(idx) if idx < self.search_matches.len() - 1 => {
+                self.current_match_index = Some(idx + 1);
+            }
+            _ => {
+                // Wrap to start
+                self.current_match_index = Some(0);
+            }
+        }
+        self.jump_to_current_match();
+    }
+
+    /// Jump to the previous match (toward top/older)
+    pub fn prev_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        match self.current_match_index {
+            Some(idx) if idx > 0 => {
+                self.current_match_index = Some(idx - 1);
+            }
+            _ => {
+                // Wrap to end
+                self.current_match_index = Some(self.search_matches.len() - 1);
+            }
+        }
+        self.jump_to_current_match();
+    }
+
+    /// Adjust scroll_offset to make the current match visible
+    fn jump_to_current_match(&mut self) {
+        if let Some(idx) = self.current_match_index {
+            if let Some(m) = self.search_matches.get(idx) {
+                let grid = self.terminal_emulator.grid();
+                let scrollback_len = grid.scrollback_len();
+                let visible_rows = grid.rows;
+
+                // The display model (from composite_into):
+                // - scroll_offset = number of scrollback lines shown at the top of the screen
+                // - For screen row `row`:
+                //   - If row < scroll_offset: shows scrollback[scrollback_len - scroll_offset + row]
+                //   - If row >= scroll_offset: shows grid[row - scroll_offset]
+                //
+                // line_index encoding:
+                // - Negative: scrollback line, -1 = most recent (scrollback_idx = scrollback_len - 1)
+                // - Non-negative: grid row number
+
+                if m.line_index < 0 {
+                    // This is a scrollback line
+                    // lines_back = how many lines back from grid start (1 = most recent scrollback)
+                    let lines_back = (-m.line_index) as usize;
+                    
+                    // The scrollback line at `lines_back` has scrollback_idx = scrollback_len - lines_back
+                    // It appears at screen row = scroll_offset - lines_back
+                    // For it to be visible (row >= 0 and row < visible_rows):
+                    //   scroll_offset >= lines_back (so row >= 0)
+                    //   scroll_offset - lines_back < visible_rows (so row < visible_rows)
+                    //     => scroll_offset < visible_rows + lines_back
+                    
+                    // Minimum scroll_offset to see this line (appears at bottom of scrollback area)
+                    let min_offset = lines_back;
+                    
+                    // Maximum scroll_offset to see this line (line must appear in visible area)
+                    // row = scroll_offset - lines_back < visible_rows
+                    // scroll_offset < visible_rows + lines_back
+                    let max_offset = (visible_rows + lines_back).saturating_sub(1);
+                    
+                    // Try to center the line on screen
+                    // We want row ≈ visible_rows / 2
+                    // scroll_offset - lines_back = visible_rows / 2
+                    // scroll_offset = lines_back + visible_rows / 2
+                    let ideal_offset = lines_back + visible_rows / 2;
+                    
+                    // Clamp to valid range
+                    self.scroll_offset = ideal_offset
+                        .max(min_offset)
+                        .min(max_offset)
+                        .min(scrollback_len);
+                } else {
+                    // This is a grid line
+                    let grid_line = m.line_index as usize;
+                    
+                    // Grid row `grid_line` appears at screen row = scroll_offset + grid_line
+                    // For it to be visible: scroll_offset + grid_line < visible_rows
+                    // So: scroll_offset < visible_rows - grid_line
+                    // Max valid scroll_offset = visible_rows - grid_line - 1
+                    
+                    if grid_line < visible_rows {
+                        let max_offset = visible_rows - grid_line - 1;
+                        if self.scroll_offset > max_offset {
+                            self.scroll_offset = max_offset;
+                        }
+                    } else {
+                        // Grid line is beyond visible area - shouldn't happen normally
+                        // but handle gracefully by scrolling to 0
+                        self.scroll_offset = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get search matches for highlighting
+    pub fn get_search_matches(&self) -> &[SearchMatch] {
+        &self.search_matches
+    }
+
+    /// Get the current match index
+    pub fn current_match_index(&self) -> Option<usize> {
+        self.current_match_index
     }
 }
 
@@ -2297,5 +2973,59 @@ mod tests {
                 "Output should end with ESU sequence"
             );
         }
+    }
+
+    #[test]
+    fn test_search_mode() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output.clone()).unwrap();
+
+        // Initially not in scrollback or search mode
+        assert!(!compositor.root().is_in_scrollback_mode());
+        assert!(!compositor.root().is_in_search_mode());
+
+        // Enter scrollback mode with Ctrl+b [
+        compositor.handle_input(&[0x02]); // Ctrl+b
+        compositor.handle_input(&[b'[']);
+
+        assert!(compositor.root().is_in_scrollback_mode());
+        assert!(!compositor.root().is_in_search_mode());
+
+        // Enter search mode with /
+        compositor.handle_input(&[b'/']);
+
+        assert!(compositor.root().is_in_scrollback_mode());
+        assert!(compositor.root().is_in_search_mode());
+
+        // Type search query
+        compositor.handle_input(&[b'h']);
+        compositor.handle_input(&[b'e']);
+        compositor.handle_input(&[b'l']);
+        compositor.handle_input(&[b'l']);
+        compositor.handle_input(&[b'o']);
+
+        // Check search info
+        if let Some((query, _, _)) = compositor.root().get_search_info() {
+            assert_eq!(query, "hello");
+        } else {
+            panic!("Expected search info");
+        }
+
+        // Backspace should remove last char
+        compositor.handle_input(&[0x7f]); // Backspace
+        if let Some((query, _, _)) = compositor.root().get_search_info() {
+            assert_eq!(query, "hell");
+        }
+
+        // Escape should exit search mode but stay in scrollback
+        compositor.handle_input(&[0x1b]); // Escape
+
+        assert!(compositor.root().is_in_scrollback_mode());
+        assert!(!compositor.root().is_in_search_mode());
+
+        // Escape again should exit scrollback mode
+        compositor.handle_input(&[0x1b]); // Escape
+
+        assert!(!compositor.root().is_in_scrollback_mode());
     }
 }
