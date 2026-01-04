@@ -1726,7 +1726,8 @@ impl PaneCell {
                                 scrollback_len.saturating_sub(pane.scroll_offset) + row;
                             if scrollback_idx < scrollback_len {
                                 // Convert scrollback_idx to line_index format
-                                let line_index = (scrollback_idx as isize) - (scrollback_len as isize);
+                                let line_index =
+                                    (scrollback_idx as isize) - (scrollback_len as isize);
                                 Some((true, scrollback_idx, line_index))
                             } else {
                                 None
@@ -1761,12 +1762,13 @@ impl PaneCell {
                                                 emulator::CellAttributes::default(),
                                             )
                                         };
-                                        
+
                                         // Apply search highlighting
                                         if let Some(is_current) = is_match(line_index, col) {
                                             if is_current {
                                                 // Current match: bright magenta background, white text, bold
-                                                cell.attrs.bg_color = Some(emulator::Color::Magenta);
+                                                cell.attrs.bg_color =
+                                                    Some(emulator::Color::Magenta);
                                                 cell.attrs.fg_color = Some(emulator::Color::White);
                                                 cell.attrs.bold = true;
                                             } else {
@@ -1775,7 +1777,7 @@ impl PaneCell {
                                                 cell.attrs.fg_color = Some(emulator::Color::Black);
                                             }
                                         }
-                                        
+
                                         dest.grid_mut().set_cell(dst_x, dst_y, cell);
                                     }
                                 }
@@ -1792,7 +1794,7 @@ impl PaneCell {
                                 let (dest_cols, dest_rows) = dest.dimensions();
                                 if dst_x < dest_cols && dst_y < dest_rows {
                                     let mut cell = cells[col].clone();
-                                    
+
                                     // Apply search highlighting
                                     if let Some(is_current) = is_match(row as isize, col) {
                                         if is_current {
@@ -1806,7 +1808,7 @@ impl PaneCell {
                                             cell.attrs.fg_color = Some(emulator::Color::Black);
                                         }
                                     }
-                                    
+
                                     dest.grid_mut().set_cell(dst_x, dst_y, cell);
                                 }
                             }
@@ -2416,13 +2418,13 @@ impl Pane {
 
         // Search from bottom to top (most recent first) so we find the most relevant matches
         // when hitting the MAX_MATCHES limit
-        
+
         // First, search current grid from bottom to top
         'grid: for y in (0..grid.rows).rev() {
             if let Some(row) = grid.get_row(y) {
                 let line_text: String = row.iter().map(|c| c.character).collect();
                 let line_lower = line_text.to_lowercase();
-                
+
                 // Find all matches in this line (still left to right within line)
                 let mut search_start = 0;
                 while let Some(pos) = line_lower[search_start..].find(&query_lower) {
@@ -2451,14 +2453,14 @@ impl Pane {
                 if let Some(row) = grid.get_scrollback_row(i) {
                     let line_text: String = row.iter().map(|c| c.character).collect();
                     let line_lower = line_text.to_lowercase();
-                    
+
                     // Find all matches in this line
                     let mut search_start = 0;
                     while let Some(pos) = line_lower[search_start..].find(&query_lower) {
                         let start_col = search_start + pos;
                         let end_col = start_col + self.search_query.len();
                         // Convert scrollback index to our line_index format:
-                        // scrollback line 0 (oldest) -> -(scrollback_len) 
+                        // scrollback line 0 (oldest) -> -(scrollback_len)
                         // scrollback line (scrollback_len - 1) (newest) -> -1
                         let line_index = (i as isize) - (scrollback_len as isize);
                         self.search_matches.push(SearchMatch {
@@ -2542,28 +2544,28 @@ impl Pane {
                     // This is a scrollback line
                     // lines_back = how many lines back from grid start (1 = most recent scrollback)
                     let lines_back = (-m.line_index) as usize;
-                    
+
                     // The scrollback line at `lines_back` has scrollback_idx = scrollback_len - lines_back
                     // It appears at screen row = scroll_offset - lines_back
                     // For it to be visible (row >= 0 and row < visible_rows):
                     //   scroll_offset >= lines_back (so row >= 0)
                     //   scroll_offset - lines_back < visible_rows (so row < visible_rows)
                     //     => scroll_offset < visible_rows + lines_back
-                    
+
                     // Minimum scroll_offset to see this line (appears at bottom of scrollback area)
                     let min_offset = lines_back;
-                    
+
                     // Maximum scroll_offset to see this line (line must appear in visible area)
                     // row = scroll_offset - lines_back < visible_rows
                     // scroll_offset < visible_rows + lines_back
                     let max_offset = (visible_rows + lines_back).saturating_sub(1);
-                    
+
                     // Try to center the line on screen
                     // We want row ≈ visible_rows / 2
                     // scroll_offset - lines_back = visible_rows / 2
                     // scroll_offset = lines_back + visible_rows / 2
                     let ideal_offset = lines_back + visible_rows / 2;
-                    
+
                     // Clamp to valid range
                     self.scroll_offset = ideal_offset
                         .max(min_offset)
@@ -2572,12 +2574,12 @@ impl Pane {
                 } else {
                     // This is a grid line
                     let grid_line = m.line_index as usize;
-                    
+
                     // Grid row `grid_line` appears at screen row = scroll_offset + grid_line
                     // For it to be visible: scroll_offset + grid_line < visible_rows
                     // So: scroll_offset < visible_rows - grid_line
                     // Max valid scroll_offset = visible_rows - grid_line - 1
-                    
+
                     if grid_line < visible_rows {
                         let max_offset = visible_rows - grid_line - 1;
                         if self.scroll_offset > max_offset {
