@@ -64,13 +64,9 @@ fn run_pty_test(command: &str, cols: u16, rows: u16, inputs: &[&[u8]]) -> Termin
         }
     }
 
-    // Send quit command to cleanly exit vim
-    pty.write(b":q!\r").expect("Failed to write quit command");
-    for _ in 0..20 {
-        thread::sleep(Duration::from_millis(20));
-        drain_pty(&pty, &mut emulator, &mut buf);
-    }
-
+    // Return emulator state BEFORE quitting vim, so we capture
+    // the cursor position while vim is still running.
+    // The pty process will be killed when it goes out of scope.
     emulator
 }
 
@@ -289,8 +285,17 @@ fn visualize_engine_grid(lines: &[String], engine: &VimCursorEngine) -> String {
     output
 }
 
-#[test]
-fn test_vim_cursor_movement_and_selection() {
+/// Helper function to compare VimCursorEngine against real vim.
+///
+/// This function:
+/// 1. Spawns real vim with the test fixture file
+/// 2. Sends the given input sequences to vim
+/// 3. Creates a VimCursorEngine with the same file content
+/// 4. Sends the same inputs to the engine
+/// 5. Compares cursor position and selection state
+///
+/// Panics with detailed visualization if there's a mismatch.
+fn assert_vim_engine_match(inputs: &[&[u8]]) {
     // Check if vim is available
     if !std::process::Command::new("which")
         .arg("vim")
@@ -311,18 +316,8 @@ fn test_vim_cursor_movement_and_selection() {
         .join("fixtures")
         .join("test_code.rs");
 
-    // Prepare input sequences:
-    // 1. Move cursor down 4 lines (jjjj)
-    // 2. Move cursor to end of line
-    // 3. Enter visual mode and select to end of line (v$)
-    let inputs: &[&[u8]] = &[
-        b"jjjj", // Move down 4 lines
-        b"$",    // Move to end of line
-        b"v$",   // Visual mode and select to end of line
-    ];
-
     // Run real vim
-    let vim_command = format!("vim {}", fixture_path.display());
+    let vim_command = format!("vim -n {}", fixture_path.display());
     let vim_emulator = run_pty_test(&vim_command, cols, rows, inputs);
     let vim_cursor_info = detect_cursor_info(&vim_emulator);
 
@@ -359,16 +354,24 @@ fn test_vim_cursor_movement_and_selection() {
         },
     };
 
-    println!("Vim cursor info: {:?}", vim_cursor_info);
-    println!("Engine cursor info: {:?}", engine_cursor_info);
+    // Format input sequence for error messages
+    let input_str: String = inputs
+        .iter()
+        .map(|i| String::from_utf8_lossy(i).to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    println!("Testing input sequence: {}", input_str);
+    println!("  Vim cursor: {:?}", vim_cursor_info);
+    println!("  Engine cursor: {:?}", engine_cursor_info);
 
     // Compare cursor positions
     if vim_cursor_info.row != engine_cursor_info.row {
         eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
         eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
         panic!(
-            "Cursor row mismatch: vim={}, engine={}",
-            vim_cursor_info.row, engine_cursor_info.row
+            "Cursor row mismatch for inputs [{}]: vim={}, engine={}",
+            input_str, vim_cursor_info.row, engine_cursor_info.row
         );
     }
 
@@ -376,8 +379,8 @@ fn test_vim_cursor_movement_and_selection() {
         eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
         eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
         panic!(
-            "Cursor column mismatch: vim={}, engine={}",
-            vim_cursor_info.col, engine_cursor_info.col
+            "Cursor column mismatch for inputs [{}]: vim={}, engine={}",
+            input_str, vim_cursor_info.col, engine_cursor_info.col
         );
     }
 
@@ -386,8 +389,8 @@ fn test_vim_cursor_movement_and_selection() {
         eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
         eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
         panic!(
-            "Selection state mismatch: vim has_selection={}, engine has_selection={}",
-            vim_cursor_info.has_selection, engine_cursor_info.has_selection
+            "Selection state mismatch for inputs [{}]: vim has_selection={}, engine has_selection={}",
+            input_str, vim_cursor_info.has_selection, engine_cursor_info.has_selection
         );
     }
 
@@ -396,8 +399,8 @@ fn test_vim_cursor_movement_and_selection() {
             eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
             eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
             panic!(
-                "Selection start mismatch: vim={:?}, engine={:?}",
-                vim_cursor_info.selection_start, engine_cursor_info.selection_start
+                "Selection start mismatch for inputs [{}]: vim={:?}, engine={:?}",
+                input_str, vim_cursor_info.selection_start, engine_cursor_info.selection_start
             );
         }
 
@@ -405,77 +408,21 @@ fn test_vim_cursor_movement_and_selection() {
             eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
             eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
             panic!(
-                "Selection end mismatch: vim={:?}, engine={:?}",
-                vim_cursor_info.selection_end, engine_cursor_info.selection_end
+                "Selection end mismatch for inputs [{}]: vim={:?}, engine={:?}",
+                input_str, vim_cursor_info.selection_end, engine_cursor_info.selection_end
             );
         }
     }
 }
 
 #[test]
+fn test_vim_cursor_movement_and_selection() {
+    // Move down 4 lines, to end of line, then visual select to end
+    assert_vim_engine_match(&[b"jjjj", b"$", b"v$"]);
+}
+
+#[test]
 fn test_vim_basic_cursor_movement() {
-    // Check if vim is available
-    if !std::process::Command::new("which")
-        .arg("vim")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        eprintln!("vim not found, skipping test");
-        return;
-    }
-
-    let cols = 100u16;
-    let rows = 32u16;
-
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let fixture_path = Path::new(manifest_dir)
-        .join("fixtures")
-        .join("test_code.rs");
-
     // Simple movement: down 5 lines, right 3 columns
-    let inputs: &[&[u8]] = &[b"5j", b"3l"];
-
-    let vim_emulator = run_pty_test(
-        &format!("vim {}", fixture_path.display()),
-        cols,
-        rows,
-        inputs,
-    );
-    let vim_cursor_info = detect_cursor_info(&vim_emulator);
-
-    let test_lines = load_test_file();
-    let mut engine = VimCursorEngine::new(&test_lines, rows as usize, cols as usize);
-
-    for input in inputs {
-        engine.handle_input(input);
-    }
-
-    println!("Test basic movement:");
-    println!(
-        "  Vim cursor: row={}, col={}",
-        vim_cursor_info.row, vim_cursor_info.col
-    );
-    println!(
-        "  Engine cursor: row={}, col={}",
-        engine.cursor.row, engine.cursor.col
-    );
-
-    if vim_cursor_info.row != engine.cursor.row {
-        eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
-        eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-        panic!(
-            "Cursor row mismatch: vim={}, engine={}",
-            vim_cursor_info.row, engine.cursor.row
-        );
-    }
-
-    if vim_cursor_info.col != engine.cursor.col {
-        eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
-        eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-        panic!(
-            "Cursor column mismatch: vim={}, engine={}",
-            vim_cursor_info.col, engine.cursor.col
-        );
-    }
+    assert_vim_engine_match(&[b"5j", b"3l"]);
 }
