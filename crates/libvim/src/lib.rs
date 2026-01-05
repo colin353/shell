@@ -261,6 +261,22 @@ impl<'a> VimCursorEngine<'a> {
         }
     }
 
+    /// Ensure cursor is visible by adjusting scroll offset
+    fn ensure_cursor_visible(&mut self) {
+        // Vim reserves 1-2 rows for status line, so effective viewport is smaller
+        let effective_height = self.viewport_height.saturating_sub(2);
+
+        // If cursor is above the viewport, scroll up
+        if self.cursor.row < self.scroll_offset_row {
+            self.scroll_offset_row = self.cursor.row;
+        }
+        // If cursor is below the viewport, scroll down
+        let visible_bottom = self.scroll_offset_row + effective_height;
+        if self.cursor.row > visible_bottom {
+            self.scroll_offset_row = self.cursor.row.saturating_sub(effective_height);
+        }
+    }
+
     /// Update selection based on cursor movement in visual mode
     fn update_selection(&mut self) {
         match self.mode {
@@ -271,24 +287,61 @@ impl<'a> VimCursorEngine<'a> {
             }
             Mode::Visual => {
                 // Character-wise selection from anchor to cursor
-                // Clamp positions to actual line content (vim only highlights real characters)
-                let anchor = Position::new(
-                    self.selection_anchor.row,
-                    self.selection_anchor
-                        .col
-                        .min(self.last_col(self.selection_anchor.row)),
-                );
-                let cursor = Position::new(
-                    self.cursor.row,
-                    self.cursor.col.min(self.last_col(self.cursor.row)),
-                );
+                // Vim's visual mode highlights from anchor to the character BEFORE cursor
+                // when cursor > anchor. The cursor sits on/after the last selected char.
+                //
+                // Special case: when cursor is past end of line (from $), selection
+                // should extend to the last character of the line.
 
-                if (cursor.row, cursor.col) < (anchor.row, anchor.col) {
-                    self.selection_start = cursor;
+                let anchor_col_clamped = self
+                    .selection_anchor
+                    .col
+                    .min(self.last_col(self.selection_anchor.row));
+                let anchor = Position::new(self.selection_anchor.row, anchor_col_clamped);
+
+                let line_last_col = self.last_col(self.cursor.row);
+                let cursor_past_end = self.cursor.col > line_last_col;
+
+                if (self.cursor.row, self.cursor.col)
+                    < (self.selection_anchor.row, self.selection_anchor.col)
+                {
+                    // Cursor before anchor: cursor sits before the selection
+                    // Selection runs from (cursor + 1) to anchor
+                    let cursor_clamped = self.cursor.col.min(line_last_col);
+                    self.selection_start =
+                        Position::new(self.cursor.row, cursor_clamped.saturating_add(1));
                     self.selection_end = anchor;
-                } else {
+                } else if (self.cursor.row, self.cursor.col)
+                    > (self.selection_anchor.row, self.selection_anchor.col)
+                {
+                    // Cursor after anchor
                     self.selection_start = anchor;
-                    self.selection_end = cursor;
+
+                    if cursor_past_end {
+                        // Cursor is past end of line (e.g., from $)
+                        // Selection ends at last character of the line
+                        self.selection_end = Position::new(self.cursor.row, line_last_col);
+                    } else if self.cursor.row == self.selection_anchor.row {
+                        // Same line, cursor within line: selection ends one before cursor
+                        self.selection_end =
+                            Position::new(self.cursor.row, self.cursor.col.saturating_sub(1));
+                    } else {
+                        // Different lines, cursor within line
+                        if self.cursor.col == 0 {
+                            // Cursor at start of line: selection ends at end of previous line
+                            // Vim highlights the conceptual newline position (line_len, not len-1)
+                            let prev_row = self.cursor.row.saturating_sub(1);
+                            self.selection_end = Position::new(prev_row, self.line_len(prev_row));
+                        } else {
+                            // Selection ends one before cursor
+                            self.selection_end =
+                                Position::new(self.cursor.row, self.cursor.col.saturating_sub(1));
+                        }
+                    }
+                } else {
+                    // Cursor at anchor: single character selection
+                    self.selection_start = anchor;
+                    self.selection_end = anchor;
                 }
             }
             Mode::VisualLine => {
@@ -358,12 +411,14 @@ impl<'a> VimCursorEngine<'a> {
         let max_row = self.total_lines().saturating_sub(1);
         self.cursor.row = (self.cursor.row + count).min(max_row);
         self.clamp_cursor_col();
+        self.ensure_cursor_visible();
         self.update_selection();
     }
 
     fn motion_k(&mut self, count: usize) {
         self.cursor.row = self.cursor.row.saturating_sub(count);
         self.clamp_cursor_col();
+        self.ensure_cursor_visible();
         self.update_selection();
     }
 
@@ -493,6 +548,12 @@ impl<'a> VimCursorEngine<'a> {
                 // End of document
                 self.cursor.row = total - 1;
                 self.cursor.col = self.last_col(total - 1);
+                return;
+            }
+            // Empty line acts as a word boundary - stop at column 0
+            if self.line_len(row) == 0 {
+                self.cursor.row = row;
+                self.cursor.col = 0;
                 return;
             }
         }
@@ -633,6 +694,8 @@ impl<'a> VimCursorEngine<'a> {
         } else {
             self.cursor.row = 0;
         }
+        self.clamp_cursor_col();
+        self.ensure_cursor_visible();
         self.motion_caret(); // Go to first non-blank
         self.update_selection();
     }
@@ -644,6 +707,8 @@ impl<'a> VimCursorEngine<'a> {
         } else {
             self.cursor.row = self.total_lines().saturating_sub(1);
         }
+        self.clamp_cursor_col();
+        self.ensure_cursor_visible();
         self.motion_caret();
         self.update_selection();
     }
