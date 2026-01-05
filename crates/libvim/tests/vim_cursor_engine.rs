@@ -513,6 +513,22 @@ fn test_vim_movement_with_counts() {
 }
 
 #[test]
+fn test_vim_movement_with_paragraph_moves() {
+    assert_vim_engine_match(&[b"}}"]);
+}
+
+#[test]
+fn test_vim_movement_with_paragraph_moves_2() {
+    assert_vim_engine_match(&[b"{{"]);
+}
+
+#[test]
+fn test_vim_selection_inside() {
+    // vi( selects inside parentheses
+    assert_vim_engine_match(&[b"jfC", b"vi("]);
+}
+
+#[test]
 fn test_vim_movement_large_count() {
     // Large count that exceeds document bounds should clamp
     assert_vim_engine_match(&[b"999j"]);

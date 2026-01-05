@@ -129,7 +129,15 @@ impl<'a> VimCursorEngine<'a> {
 
     /// Check if byte starts a multi-byte sequence
     fn starts_multi_byte_sequence(&self, byte: u8) -> bool {
-        matches!(byte, b'g' | b'z' | b'f' | b'F' | b't' | b'T' | 0x1b)
+        // 'i' and 'a' start text object sequences in visual mode
+        if self.mode == Mode::Visual || self.mode == Mode::VisualLine {
+            matches!(
+                byte,
+                b'g' | b'z' | b'f' | b'F' | b't' | b'T' | b'i' | b'a' | 0x1b
+            )
+        } else {
+            matches!(byte, b'g' | b'z' | b'f' | b'F' | b't' | b'T' | 0x1b)
+        }
     }
 
     /// Try to complete a pending multi-byte sequence
@@ -157,6 +165,13 @@ impl<'a> VimCursorEngine<'a> {
             [0x1b, _] => Some(pending.clone()),
             [0x1b] => None, // Need more bytes
 
+            // Text objects: i( i) i[ i] i{ i} i< i> i" i' and same with 'a'
+            [b'i' | b'a', b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'<' | b'>' | b'"' | b'\''] => {
+                Some(pending.clone())
+            }
+            [b'i' | b'a', _] => Some(pending.clone()), // Complete on any second char
+            [b'i'] | [b'a'] => None,                   // Need one more byte
+
             _ => None,
         }
     }
@@ -177,7 +192,10 @@ impl<'a> VimCursorEngine<'a> {
             [0x1b, b'[', b'B'] => self.motion_j(count), // Down
             [0x1b, b'[', b'C'] => self.motion_l(count), // Right
             [0x1b, b'[', b'D'] => self.motion_h(count), // Left
-            _ => {}                                     // Unknown sequence, ignore
+            // Text objects
+            [b'i', ch] => self.text_object_inner(*ch),
+            [b'a', ch] => self.text_object_around(*ch),
+            _ => {} // Unknown sequence, ignore
         }
     }
 
@@ -226,6 +244,10 @@ impl<'a> VimCursorEngine<'a> {
 
             // Matching bracket
             b'%' => self.motion_percent(),
+
+            // Paragraph motions
+            b'}' => self.motion_paragraph_forward(count),
+            b'{' => self.motion_paragraph_backward(count),
 
             _ => {} // Unknown command, ignore
         }
@@ -968,5 +990,319 @@ impl<'a> VimCursorEngine<'a> {
         self.cursor.row = self.scroll_offset_row + visible_lines.saturating_sub(1);
         self.motion_caret();
         self.update_selection();
+    }
+
+    // ==================== Paragraph Motions ====================
+
+    fn motion_paragraph_forward(&mut self, count: usize) {
+        // } moves forward to the next blank line (or end of file)
+        let total = self.total_lines();
+        if total == 0 {
+            return;
+        }
+
+        for _ in 0..count {
+            let mut row = self.cursor.row;
+
+            // Skip any blank lines we're currently on
+            while row < total && self.is_blank_line(row) {
+                row += 1;
+            }
+
+            // Find the next blank line
+            while row < total && !self.is_blank_line(row) {
+                row += 1;
+            }
+
+            self.cursor.row = row.min(total.saturating_sub(1));
+        }
+
+        self.cursor.col = 0;
+        self.clamp_cursor_col();
+        self.ensure_cursor_visible();
+        self.update_selection();
+    }
+
+    fn motion_paragraph_backward(&mut self, count: usize) {
+        // { moves backward to the previous blank line (or beginning of file)
+        for _ in 0..count {
+            let mut row = self.cursor.row;
+
+            // If we're at the start, stay there
+            if row == 0 {
+                break;
+            }
+
+            // Move up at least one line
+            row = row.saturating_sub(1);
+
+            // Skip any blank lines we're currently on
+            while row > 0 && self.is_blank_line(row) {
+                row -= 1;
+            }
+
+            // Find the previous blank line
+            while row > 0 && !self.is_blank_line(row) {
+                row -= 1;
+            }
+
+            self.cursor.row = row;
+        }
+
+        self.cursor.col = 0;
+        self.clamp_cursor_col();
+        self.ensure_cursor_visible();
+        self.update_selection();
+    }
+
+    /// Check if a line is blank (empty or whitespace only)
+    fn is_blank_line(&self, row: usize) -> bool {
+        self.lines
+            .get(row)
+            .map(|l| l.trim().is_empty())
+            .unwrap_or(true)
+    }
+
+    // ==================== Text Objects ====================
+
+    fn text_object_inner(&mut self, ch: u8) {
+        // Only works in visual mode
+        if self.mode != Mode::Visual && self.mode != Mode::VisualLine {
+            return;
+        }
+
+        match ch {
+            b'(' | b')' => self.select_inner_bracket('(', ')'),
+            b'[' | b']' => self.select_inner_bracket('[', ']'),
+            b'{' | b'}' => self.select_inner_bracket('{', '}'),
+            b'<' | b'>' => self.select_inner_bracket('<', '>'),
+            b'"' => self.select_inner_quote('"'),
+            b'\'' => self.select_inner_quote('\''),
+            _ => {}
+        }
+    }
+
+    fn text_object_around(&mut self, ch: u8) {
+        // Only works in visual mode
+        if self.mode != Mode::Visual && self.mode != Mode::VisualLine {
+            return;
+        }
+
+        match ch {
+            b'(' | b')' => self.select_around_bracket('(', ')'),
+            b'[' | b']' => self.select_around_bracket('[', ']'),
+            b'{' | b'}' => self.select_around_bracket('{', '}'),
+            b'<' | b'>' => self.select_around_bracket('<', '>'),
+            b'"' => self.select_around_quote('"'),
+            b'\'' => self.select_around_quote('\''),
+            _ => {}
+        }
+    }
+
+    fn select_inner_bracket(&mut self, open: char, close: char) {
+        // Find the enclosing bracket pair and select contents inside
+        if let Some((start_row, start_col, end_row, end_col)) =
+            self.find_enclosing_brackets(open, close)
+        {
+            // Inner: select from after open bracket to before close bracket
+            let inner_start_col = start_col + 1;
+            let inner_end_col = if end_col > 0 { end_col - 1 } else { 0 };
+
+            // Handle case where brackets are on different lines
+            if start_row == end_row {
+                if inner_start_col <= inner_end_col {
+                    // In vim visual mode with vi(, the cursor lands on the last char of selection
+                    // and selection ends one before the cursor position
+                    self.selection_anchor = Position::new(start_row, inner_start_col);
+                    // Cursor goes to the last character of inner selection
+                    self.cursor = Position::new(end_row, inner_end_col);
+                    // Selection covers from inner_start to one before cursor (inner_end - 1)
+                    self.selection_start = Position::new(start_row, inner_start_col);
+                    self.selection_end = Position::new(end_row, inner_end_col.saturating_sub(1));
+                }
+            } else {
+                self.selection_anchor = Position::new(start_row, inner_start_col);
+                self.cursor = Position::new(end_row, inner_end_col);
+                self.selection_start = Position::new(start_row, inner_start_col);
+                self.selection_end = Position::new(end_row, inner_end_col.saturating_sub(1));
+            }
+        }
+    }
+
+    fn select_around_bracket(&mut self, open: char, close: char) {
+        // Find the enclosing bracket pair and select including brackets
+        if let Some((start_row, start_col, end_row, end_col)) =
+            self.find_enclosing_brackets(open, close)
+        {
+            self.selection_anchor = Position::new(start_row, start_col);
+            self.cursor = Position::new(end_row, end_col + 1);
+            self.update_selection();
+        }
+    }
+
+    fn find_enclosing_brackets(
+        &self,
+        open: char,
+        close: char,
+    ) -> Option<(usize, usize, usize, usize)> {
+        // First, find the opening bracket by searching backward
+        let mut depth = 0;
+        let mut start_row = self.cursor.row;
+        let mut start_col = self.cursor.col;
+        let mut found_open = false;
+
+        // Check if we're on the open bracket
+        if self.char_at(start_row, start_col) == Some(open) {
+            found_open = true;
+        } else {
+            // Search backward for opening bracket
+            loop {
+                if let Some(ch) = self.char_at(start_row, start_col) {
+                    if ch == close {
+                        depth += 1;
+                    } else if ch == open {
+                        if depth == 0 {
+                            found_open = true;
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                }
+
+                if start_col == 0 {
+                    if start_row == 0 {
+                        break;
+                    }
+                    start_row -= 1;
+                    start_col = self.line_len(start_row).saturating_sub(1);
+                } else {
+                    start_col -= 1;
+                }
+            }
+        }
+
+        if !found_open {
+            return None;
+        }
+
+        // Now find the closing bracket by searching forward from the open bracket
+        let mut end_row = start_row;
+        let mut end_col = start_col + 1;
+        depth = 1;
+
+        while end_row < self.total_lines() {
+            let line_len = self.line_len(end_row);
+            while end_col < line_len {
+                if let Some(ch) = self.char_at(end_row, end_col) {
+                    if ch == open {
+                        depth += 1;
+                    } else if ch == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((start_row, start_col, end_row, end_col));
+                        }
+                    }
+                }
+                end_col += 1;
+            }
+            end_row += 1;
+            end_col = 0;
+        }
+
+        None
+    }
+
+    fn select_inner_quote(&mut self, quote: char) {
+        // Find quotes on current line and select between them
+        if let Some(line) = self.lines.get(self.cursor.row) {
+            let chars: Vec<char> = line.chars().collect();
+            let col = self.cursor.col;
+
+            // Find quote boundaries
+            let mut start = None;
+            let mut end = None;
+
+            // Find the opening quote (before or at cursor)
+            for i in (0..=col.min(chars.len().saturating_sub(1))).rev() {
+                if chars[i] == quote {
+                    start = Some(i);
+                    break;
+                }
+            }
+
+            // If no quote before cursor, look for one after
+            if start.is_none() {
+                for i in col..chars.len() {
+                    if chars[i] == quote {
+                        start = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(s) = start {
+                // Find the closing quote (after start)
+                for i in (s + 1)..chars.len() {
+                    if chars[i] == quote {
+                        end = Some(i);
+                        break;
+                    }
+                }
+
+                if let Some(e) = end {
+                    // Inner: between quotes (not including quotes)
+                    self.selection_anchor = Position::new(self.cursor.row, s + 1);
+                    self.cursor = Position::new(self.cursor.row, e);
+                    self.update_selection();
+                }
+            }
+        }
+    }
+
+    fn select_around_quote(&mut self, quote: char) {
+        // Find quotes on current line and select including them
+        if let Some(line) = self.lines.get(self.cursor.row) {
+            let chars: Vec<char> = line.chars().collect();
+            let col = self.cursor.col;
+
+            // Find quote boundaries
+            let mut start = None;
+            let mut end = None;
+
+            // Find the opening quote (before or at cursor)
+            for i in (0..=col.min(chars.len().saturating_sub(1))).rev() {
+                if chars[i] == quote {
+                    start = Some(i);
+                    break;
+                }
+            }
+
+            // If no quote before cursor, look for one after
+            if start.is_none() {
+                for i in col..chars.len() {
+                    if chars[i] == quote {
+                        start = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(s) = start {
+                // Find the closing quote (after start)
+                for i in (s + 1)..chars.len() {
+                    if chars[i] == quote {
+                        end = Some(i);
+                        break;
+                    }
+                }
+
+                if let Some(e) = end {
+                    // Around: including quotes
+                    self.selection_anchor = Position::new(self.cursor.row, s);
+                    self.cursor = Position::new(self.cursor.row, e + 1);
+                    self.update_selection();
+                }
+            }
+        }
     }
 }
