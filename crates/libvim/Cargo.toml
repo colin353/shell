@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 emulator.path = "../emulator"
+
+[dev-dependencies]
+pty = { path = "../pty" }
+emulator = { path = "../emulator" }

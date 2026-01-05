@@ -6,16 +6,16 @@ pub struct Position {
 }
 
 pub struct VimCursorEngine<'a> {
-    lines: &'a [String],
-    viewport_height: usize,
-    viewport_width: usize,
-    scroll_offset_row: usize,
-    scroll_offset_col: usize,
+    pub lines: &'a [String],
+    pub viewport_height: usize,
+    pub viewport_width: usize,
+    pub scroll_offset_row: usize,
+    pub scroll_offset_col: usize,
 
-    cursor: Position,
+    pub cursor: Position,
 
-    selection_start: Position,
-    selection_end: Position,
+    pub selection_start: Position,
+    pub selection_end: Position,
 }
 
 impl<'a> VimCursorEngine<'a> {
@@ -32,7 +32,7 @@ impl<'a> VimCursorEngine<'a> {
         }
     }
 
-    pub fn handle_input(&mut self, input: &[u8]) {
+    pub fn handle_input(&mut self, _input: &[u8]) {
         // TODO: Handle input bytes to update cursor position and selection
     }
 }

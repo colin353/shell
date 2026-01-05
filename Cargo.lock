@@ -176,6 +176,7 @@ name = "libvim"
 version = "0.1.0"
 dependencies = [
  "emulator",
+ "pty",
 ]
 
 [[package]]
