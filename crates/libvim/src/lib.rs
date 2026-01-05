@@ -177,7 +177,7 @@ impl<'a> VimCursorEngine<'a> {
             [0x1b, b'[', b'B'] => self.motion_j(count), // Down
             [0x1b, b'[', b'C'] => self.motion_l(count), // Right
             [0x1b, b'[', b'D'] => self.motion_h(count), // Left
-            _ => {} // Unknown sequence, ignore
+            _ => {}                                     // Unknown sequence, ignore
         }
     }
 
@@ -274,7 +274,9 @@ impl<'a> VimCursorEngine<'a> {
                 // Clamp positions to actual line content (vim only highlights real characters)
                 let anchor = Position::new(
                     self.selection_anchor.row,
-                    self.selection_anchor.col.min(self.last_col(self.selection_anchor.row)),
+                    self.selection_anchor
+                        .col
+                        .min(self.last_col(self.selection_anchor.row)),
                 );
                 let cursor = Position::new(
                     self.cursor.row,
@@ -375,10 +377,7 @@ impl<'a> VimCursorEngine<'a> {
     fn motion_caret(&mut self) {
         // Go to first non-blank character
         if let Some(line) = self.lines.get(self.cursor.row) {
-            self.cursor.col = line
-                .chars()
-                .position(|c| !c.is_whitespace())
-                .unwrap_or(0);
+            self.cursor.col = line.chars().position(|c| !c.is_whitespace()).unwrap_or(0);
         }
         self.update_selection();
     }
@@ -888,7 +887,9 @@ impl<'a> VimCursorEngine<'a> {
 
     fn motion_m_screen(&mut self) {
         // M: go to middle of screen
-        let visible_lines = self.viewport_height.min(self.total_lines() - self.scroll_offset_row);
+        let visible_lines = self
+            .viewport_height
+            .min(self.total_lines() - self.scroll_offset_row);
         self.cursor.row = self.scroll_offset_row + visible_lines / 2;
         self.motion_caret();
         self.update_selection();
@@ -896,7 +897,9 @@ impl<'a> VimCursorEngine<'a> {
 
     fn motion_l_screen(&mut self) {
         // L: go to bottom of screen
-        let visible_lines = self.viewport_height.min(self.total_lines() - self.scroll_offset_row);
+        let visible_lines = self
+            .viewport_height
+            .min(self.total_lines() - self.scroll_offset_row);
         self.cursor.row = self.scroll_offset_row + visible_lines.saturating_sub(1);
         self.motion_caret();
         self.update_selection();
