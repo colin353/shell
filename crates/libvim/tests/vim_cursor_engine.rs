@@ -74,12 +74,12 @@ fn run_pty_test(command: &str, cols: u16, rows: u16, inputs: &[&[u8]]) -> Termin
 ///
 /// Returns CursorInfo with:
 /// - Cursor position (always present)
-/// - Selection boundaries if any cell has inverse attribute
+/// - Selection boundaries if any cell has inverse attribute or non-default background color
 fn detect_cursor_info(emulator: &TerminalEmulator) -> CursorInfo {
     let grid = emulator.grid();
     let (cursor_col, cursor_row) = (grid.cursor_x, grid.cursor_y);
 
-    // Find all cells with inverse attribute (indicates selection in vim)
+    // Find all cells with inverse attribute or background color (indicates selection in vim)
     let mut selection_cells = Vec::new();
 
     for y in 0..grid.rows {
@@ -87,7 +87,8 @@ fn detect_cursor_info(emulator: &TerminalEmulator) -> CursorInfo {
             if let Some(cell) =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| grid.get_cell(x, y))).ok()
             {
-                if cell.attrs.inverse {
+                // Vim indicates selection via inverse attribute OR background color
+                if cell.attrs.inverse || cell.attrs.bg_color.is_some() {
                     selection_cells.push((x, y));
                 }
             }
@@ -417,8 +418,9 @@ fn assert_vim_engine_match(inputs: &[&[u8]]) {
 
 #[test]
 fn test_vim_cursor_movement_and_selection() {
-    // Move down 4 lines, to end of line, then visual select to end
-    assert_vim_engine_match(&[b"jjjj", b"$", b"v$"]);
+    // Move down 4 lines, enter visual mode, then move to end of line
+    // This should select from col 0 to end of line
+    assert_vim_engine_match(&[b"jjjj", b"v$"]);
 }
 
 #[test]
