@@ -159,7 +159,9 @@ fn visualize_vim_grid(emulator: &TerminalEmulator, cursor_info: &CursorInfo) -> 
     let mut output = String::new();
 
     output.push_str("=== VIM EMULATOR GRID ===\n");
-    output.push_str("Cursor: \x1b[44m  \x1b[0m  Selection: \x1b[46m  \x1b[0m  Both: \x1b[42m  \x1b[0m\n");
+    output.push_str(
+        "Cursor: \x1b[44m  \x1b[0m  Selection: \x1b[46m  \x1b[0m  Both: \x1b[42m  \x1b[0m\n",
+    );
 
     for y in 0..std::cmp::min(grid.rows, 20) {
         output.push_str(&format!("{:2} ", y));
@@ -167,19 +169,28 @@ fn visualize_vim_grid(emulator: &TerminalEmulator, cursor_info: &CursorInfo) -> 
         for x in 0..std::cmp::min(grid.cols, 80) {
             let cell = grid.get_cell(x, y);
             let is_cursor = x == cursor_info.col && y == cursor_info.row;
-            let is_selected = if let (Some((s_r, s_c)), Some((e_r, e_c))) = 
-                (cursor_info.selection_start, cursor_info.selection_end) 
+            let is_selected = if let (Some((s_r, s_c)), Some((e_r, e_c))) =
+                (cursor_info.selection_start, cursor_info.selection_end)
             {
-                (y >= s_r && y <= e_r) && 
-                (if s_r == e_r { x >= s_c && x <= e_c } 
-                 else if y == s_r { x >= s_c } 
-                 else if y == e_r { x <= e_c } 
-                 else { true })
+                (y >= s_r && y <= e_r)
+                    && (if s_r == e_r {
+                        x >= s_c && x <= e_c
+                    } else if y == s_r {
+                        x >= s_c
+                    } else if y == e_r {
+                        x <= e_c
+                    } else {
+                        true
+                    })
             } else {
                 false
             };
 
-            let ch = if cell.character == ' ' { '·' } else { cell.character };
+            let ch = if cell.character == ' ' {
+                '·'
+            } else {
+                cell.character
+            };
 
             if is_cursor && is_selected {
                 output.push_str(&format!("\x1b[42m{}\x1b[0m", ch));
@@ -194,8 +205,13 @@ fn visualize_vim_grid(emulator: &TerminalEmulator, cursor_info: &CursorInfo) -> 
         output.push('\n');
     }
 
-    output.push_str(&format!("Cursor: ({},{})", cursor_info.row, cursor_info.col));
-    if let (Some((sr, sc)), Some((er, ec))) = (cursor_info.selection_start, cursor_info.selection_end) {
+    output.push_str(&format!(
+        "Cursor: ({},{})",
+        cursor_info.row, cursor_info.col
+    ));
+    if let (Some((sr, sc)), Some((er, ec))) =
+        (cursor_info.selection_start, cursor_info.selection_end)
+    {
         output.push_str(&format!(" | Selection: ({},{}) to ({},{})", sr, sc, er, ec));
     }
     output.push('\n');
@@ -208,13 +224,15 @@ fn visualize_engine_grid(lines: &[String], engine: &VimCursorEngine) -> String {
     let mut output = String::new();
 
     output.push_str("=== VIM CURSOR ENGINE GRID ===\n");
-    output.push_str("Cursor: \x1b[44m  \x1b[0m  Selection: \x1b[46m  \x1b[0m  Both: \x1b[42m  \x1b[0m\n");
+    output.push_str(
+        "Cursor: \x1b[44m  \x1b[0m  Selection: \x1b[46m  \x1b[0m  Both: \x1b[42m  \x1b[0m\n",
+    );
 
     for (y, line) in lines.iter().enumerate().take(20) {
         output.push_str(&format!("{:2} ", y));
 
         let is_cursor_row = y == engine.cursor.row;
-        let has_selection = engine.selection_start.row != engine.selection_end.row 
+        let has_selection = engine.selection_start.row != engine.selection_end.row
             || engine.selection_start.col != engine.selection_end.col;
 
         for (x, ch) in line.chars().enumerate().take(80) {
@@ -222,11 +240,16 @@ fn visualize_engine_grid(lines: &[String], engine: &VimCursorEngine) -> String {
             let is_selected = if has_selection {
                 let (s_r, s_c) = (engine.selection_start.row, engine.selection_start.col);
                 let (e_r, e_c) = (engine.selection_end.row, engine.selection_end.col);
-                (y >= s_r && y <= e_r) && 
-                (if s_r == e_r { x >= s_c && x <= e_c } 
-                 else if y == s_r { x >= s_c } 
-                 else if y == e_r { x <= e_c } 
-                 else { true })
+                (y >= s_r && y <= e_r)
+                    && (if s_r == e_r {
+                        x >= s_c && x <= e_c
+                    } else if y == s_r {
+                        x >= s_c
+                    } else if y == e_r {
+                        x <= e_c
+                    } else {
+                        true
+                    })
             } else {
                 false
             };
@@ -246,13 +269,20 @@ fn visualize_engine_grid(lines: &[String], engine: &VimCursorEngine) -> String {
         output.push('\n');
     }
 
-    output.push_str(&format!("Cursor: ({},{})", engine.cursor.row, engine.cursor.col));
-    if engine.selection_start.row != engine.selection_end.row 
+    output.push_str(&format!(
+        "Cursor: ({},{})",
+        engine.cursor.row, engine.cursor.col
+    ));
+    if engine.selection_start.row != engine.selection_end.row
         || engine.selection_start.col != engine.selection_end.col
     {
-        output.push_str(&format!(" | Selection: ({},{}) to ({},{})", 
-            engine.selection_start.row, engine.selection_start.col,
-            engine.selection_end.row, engine.selection_end.col));
+        output.push_str(&format!(
+            " | Selection: ({},{}) to ({},{})",
+            engine.selection_start.row,
+            engine.selection_start.col,
+            engine.selection_end.row,
+            engine.selection_end.col
+        ));
     }
     output.push('\n');
 
@@ -336,36 +366,48 @@ fn test_vim_cursor_movement_and_selection() {
     if vim_cursor_info.row != engine_cursor_info.row {
         eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
         eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-        panic!("Cursor row mismatch: vim={}, engine={}", vim_cursor_info.row, engine_cursor_info.row);
+        panic!(
+            "Cursor row mismatch: vim={}, engine={}",
+            vim_cursor_info.row, engine_cursor_info.row
+        );
     }
 
     if vim_cursor_info.col != engine_cursor_info.col {
         eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
         eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-        panic!("Cursor column mismatch: vim={}, engine={}", vim_cursor_info.col, engine_cursor_info.col);
+        panic!(
+            "Cursor column mismatch: vim={}, engine={}",
+            vim_cursor_info.col, engine_cursor_info.col
+        );
     }
 
     // Compare selection state
     if vim_cursor_info.has_selection != engine_cursor_info.has_selection {
         eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
         eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-        panic!("Selection state mismatch: vim has_selection={}, engine has_selection={}", 
-            vim_cursor_info.has_selection, engine_cursor_info.has_selection);
+        panic!(
+            "Selection state mismatch: vim has_selection={}, engine has_selection={}",
+            vim_cursor_info.has_selection, engine_cursor_info.has_selection
+        );
     }
 
     if vim_cursor_info.has_selection {
         if vim_cursor_info.selection_start != engine_cursor_info.selection_start {
             eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
             eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-            panic!("Selection start mismatch: vim={:?}, engine={:?}",
-                vim_cursor_info.selection_start, engine_cursor_info.selection_start);
+            panic!(
+                "Selection start mismatch: vim={:?}, engine={:?}",
+                vim_cursor_info.selection_start, engine_cursor_info.selection_start
+            );
         }
-        
+
         if vim_cursor_info.selection_end != engine_cursor_info.selection_end {
             eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
             eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-            panic!("Selection end mismatch: vim={:?}, engine={:?}",
-                vim_cursor_info.selection_end, engine_cursor_info.selection_end);
+            panic!(
+                "Selection end mismatch: vim={:?}, engine={:?}",
+                vim_cursor_info.selection_end, engine_cursor_info.selection_end
+            );
         }
     }
 }
@@ -422,12 +464,18 @@ fn test_vim_basic_cursor_movement() {
     if vim_cursor_info.row != engine.cursor.row {
         eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
         eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-        panic!("Cursor row mismatch: vim={}, engine={}", vim_cursor_info.row, engine.cursor.row);
+        panic!(
+            "Cursor row mismatch: vim={}, engine={}",
+            vim_cursor_info.row, engine.cursor.row
+        );
     }
 
     if vim_cursor_info.col != engine.cursor.col {
         eprintln!("\n{}", visualize_vim_grid(&vim_emulator, &vim_cursor_info));
         eprintln!("{}", visualize_engine_grid(&test_lines, &engine));
-        panic!("Cursor column mismatch: vim={}, engine={}", vim_cursor_info.col, engine.cursor.col);
+        panic!(
+            "Cursor column mismatch: vim={}, engine={}",
+            vim_cursor_info.col, engine.cursor.col
+        );
     }
 }
