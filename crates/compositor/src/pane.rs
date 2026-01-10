@@ -28,6 +28,18 @@ pub struct Pane {
     pub search_matches: Vec<SearchMatch>,
     /// Index of the currently selected match (if any)
     pub current_match_index: Option<usize>,
+    
+    // Vim cursor state for scrollback mode
+    /// Cursor position (row is relative to total lines: scrollback + grid)
+    pub vim_cursor: libvim::Position,
+    /// Vim mode (Normal, Visual, VisualLine)
+    pub vim_mode: libvim::Mode,
+    /// Selection anchor (where visual selection started)
+    pub vim_selection_anchor: libvim::Position,
+    /// Selection start (always <= end, for display)
+    pub vim_selection_start: libvim::Position,
+    /// Selection end (always >= start, for display)
+    pub vim_selection_end: libvim::Position,
 }
 
 impl Pane {
@@ -75,6 +87,24 @@ impl Pane {
         }
         self.scrollback_mode = true;
         self.scroll_offset = 0;
+        
+        // Initialize vim cursor at the terminal's current cursor position
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
+        
+        // Convert grid cursor position to absolute line number
+        // Grid cursor_y is relative to the grid, so add scrollback_len to get absolute position
+        let abs_row = scrollback_len + grid.cursor_y;
+        let col = grid.cursor_x;
+        
+        self.vim_cursor = libvim::Position::new(abs_row, col);
+        self.vim_mode = libvim::Mode::Normal;
+        self.vim_selection_anchor = self.vim_cursor;
+        self.vim_selection_start = self.vim_cursor;
+        self.vim_selection_end = self.vim_cursor;
+        
+        // Start with scroll at bottom (showing the grid, no scrollback)
+        self.scroll_offset = 0;
     }
 
     /// Exit scrollback mode
@@ -86,6 +116,148 @@ impl Pane {
         self.search_query.clear();
         self.search_matches.clear();
         self.current_match_index = None;
+        // Reset vim state
+        self.vim_mode = libvim::Mode::Normal;
+    }
+    
+    /// Get the total number of lines (scrollback + grid)
+    pub fn total_lines(&self) -> usize {
+        let grid = self.terminal_emulator.grid();
+        grid.scrollback_len() + grid.rows
+    }
+    
+    /// Get all lines (scrollback + grid) as strings for vim processing
+    fn get_all_lines(&self) -> Vec<String> {
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
+        let grid_rows = grid.rows;
+        let mut lines = Vec::with_capacity(scrollback_len + grid_rows);
+        
+        // Add scrollback lines (oldest first), trimming trailing whitespace
+        for i in 0..scrollback_len {
+            if let Some(row) = grid.get_scrollback_row(i) {
+                let line: String = row.iter().map(|c| c.character).collect();
+                lines.push(line.trim_end().to_string());
+            }
+        }
+        
+        // Add grid lines, trimming trailing whitespace
+        for y in 0..grid_rows {
+            if let Some(row) = grid.get_row(y) {
+                let line: String = row.iter().map(|c| c.character).collect();
+                lines.push(line.trim_end().to_string());
+            }
+        }
+        
+        lines
+    }
+    
+    /// Get the viewport height for vim
+    fn viewport_height(&self) -> usize {
+        self.terminal_emulator.grid().rows
+    }
+    
+    /// Get the viewport width for vim
+    fn viewport_width(&self) -> usize {
+        self.terminal_emulator.grid().cols
+    }
+    
+    /// Handle vim input in scrollback mode
+    /// Returns true if the input was handled, false if it should be passed to search mode
+    pub fn handle_vim_input(&mut self, input: &[u8]) -> bool {
+        // Get all lines for vim processing
+        let lines = self.get_all_lines();
+        let viewport_height = self.viewport_height();
+        let viewport_width = self.viewport_width();
+        
+        // Create vim engine with current state
+        let mut engine = libvim::VimCursorEngine::new(&lines, viewport_height, viewport_width);
+        
+        // Restore vim state
+        engine.cursor = self.vim_cursor;
+        engine.mode = self.vim_mode;
+        engine.selection_anchor = self.vim_selection_anchor;
+        engine.selection_start = self.vim_selection_start;
+        engine.selection_end = self.vim_selection_end;
+        
+        // Calculate scroll_offset_row from our scroll_offset
+        // Our scroll_offset is lines from bottom, vim's is lines from top
+        let scrollback_len = self.terminal_emulator.grid().scrollback_len();
+        // scroll_offset=0 means showing grid (bottom), so scroll_offset_row = scrollback_len
+        // scroll_offset=scrollback_len means showing from top
+        engine.scroll_offset_row = scrollback_len.saturating_sub(self.scroll_offset);
+        
+        // Process input
+        engine.handle_input(input);
+        
+        // Save vim state back
+        self.vim_cursor = engine.cursor;
+        self.vim_mode = engine.mode;
+        self.vim_selection_anchor = engine.selection_anchor;
+        self.vim_selection_start = engine.selection_start;
+        self.vim_selection_end = engine.selection_end;
+        
+        // Convert vim scroll_offset_row back to our scroll_offset
+        // vim scroll_offset_row is the first visible line from top
+        // we need to convert to lines from bottom
+        let new_scroll_row = engine.scroll_offset_row;
+        // The bottom of visible area is at new_scroll_row + viewport_height - 1
+        // If that's >= scrollback_len, we're showing some grid
+        // scroll_offset = how many scrollback lines are visible at top
+        if new_scroll_row + viewport_height <= scrollback_len {
+            // All visible lines are in scrollback
+            self.scroll_offset = scrollback_len - new_scroll_row;
+        } else if new_scroll_row >= scrollback_len {
+            // All visible lines are in grid
+            self.scroll_offset = 0;
+        } else {
+            // Mixed: some scrollback, some grid
+            self.scroll_offset = scrollback_len - new_scroll_row;
+        }
+        
+        // Clamp scroll_offset
+        self.scroll_offset = self.scroll_offset.min(scrollback_len);
+        
+        true
+    }
+    
+    /// Get vim cursor info for rendering (row, col, visible)
+    /// Row is relative to the visible viewport
+    pub fn get_vim_cursor_info(&self) -> Option<(usize, usize, bool)> {
+        if !self.scrollback_mode {
+            return None;
+        }
+        
+        let scrollback_len = self.terminal_emulator.grid().scrollback_len();
+        let viewport_height = self.viewport_height();
+        
+        // Calculate which line is at the top of the viewport
+        // scroll_offset = number of scrollback lines shown
+        // If scroll_offset > 0, first visible line is scrollback[scrollback_len - scroll_offset]
+        let first_visible_line = scrollback_len.saturating_sub(self.scroll_offset);
+        let last_visible_line = first_visible_line + viewport_height;
+        
+        // Check if cursor is visible
+        if self.vim_cursor.row >= first_visible_line && self.vim_cursor.row < last_visible_line {
+            let viewport_row = self.vim_cursor.row - first_visible_line;
+            Some((self.vim_cursor.col, viewport_row, true))
+        } else {
+            None
+        }
+    }
+    
+    /// Get vim selection info for rendering
+    /// Returns (start_row, start_col, end_row, end_col, mode) in absolute line coordinates
+    pub fn get_vim_selection_info(&self) -> Option<(libvim::Position, libvim::Position, libvim::Mode)> {
+        if !self.scrollback_mode || self.vim_mode == libvim::Mode::Normal {
+            return None;
+        }
+        Some((self.vim_selection_start, self.vim_selection_end, self.vim_mode))
+    }
+    
+    /// Get the current vim mode
+    pub fn get_vim_mode(&self) -> libvim::Mode {
+        self.vim_mode
     }
 
     /// Check if in scrollback mode
@@ -291,13 +463,25 @@ impl Pane {
         self.jump_to_current_match();
     }
 
-    /// Adjust scroll_offset to make the current match visible
+    /// Adjust scroll_offset to make the current match visible and move vim cursor to it
     fn jump_to_current_match(&mut self) {
         if let Some(idx) = self.current_match_index {
             if let Some(m) = self.search_matches.get(idx) {
                 let grid = self.terminal_emulator.grid();
                 let scrollback_len = grid.scrollback_len();
                 let visible_rows = grid.rows;
+                
+                // Convert line_index to absolute line number (for vim cursor)
+                let abs_line = if m.line_index < 0 {
+                    // Scrollback line: line_index = -1 means scrollback_len - 1
+                    (scrollback_len as isize + m.line_index) as usize
+                } else {
+                    // Grid line
+                    scrollback_len + m.line_index as usize
+                };
+                
+                // Move vim cursor to the match
+                self.vim_cursor = libvim::Position::new(abs_line, m.start_col);
 
                 // The display model (from composite_into):
                 // - scroll_offset = number of scrollback lines shown at the top of the screen

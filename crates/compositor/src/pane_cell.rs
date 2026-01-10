@@ -177,6 +177,66 @@ impl PaneCell {
             }
         }
     }
+    
+    /// Handle vim input on the focused pane (for scrollback mode navigation)
+    pub fn handle_vim_input(&mut self, input: &[u8]) -> bool {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => pane.handle_vim_input(input),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.handle_vim_input(input);
+                    }
+                }
+                false
+            }
+        }
+    }
+    
+    /// Get vim cursor info from the focused pane
+    pub fn get_vim_cursor_info(&self) -> Option<(usize, usize, bool)> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.get_vim_cursor_info(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_vim_cursor_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+    
+    /// Get vim selection info from the focused pane
+    pub fn get_vim_selection_info(&self) -> Option<(libvim::Position, libvim::Position, libvim::Mode)> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.get_vim_selection_info(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_vim_selection_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+    
+    /// Get vim mode from the focused pane
+    pub fn get_vim_mode(&self) -> libvim::Mode {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.get_vim_mode(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_vim_mode();
+                    }
+                }
+                libvim::Mode::Normal
+            }
+        }
+    }
 
     /// Enter search mode on the focused pane
     pub fn enter_search_mode(&mut self) {
@@ -477,6 +537,11 @@ impl PaneCell {
                     search_query: String::new(),
                     search_matches: Vec::new(),
                     current_match_index: None,
+                    vim_cursor: libvim::Position::default(),
+                    vim_mode: libvim::Mode::default(),
+                    vim_selection_anchor: libvim::Position::default(),
+                    vim_selection_start: libvim::Position::default(),
+                    vim_selection_end: libvim::Position::default(),
                 };
 
                 // Take ownership of the old pane
@@ -492,6 +557,11 @@ impl PaneCell {
                         search_query: String::new(),
                         search_matches: Vec::new(),
                         current_match_index: None,
+                        vim_cursor: libvim::Position::default(),
+                        vim_mode: libvim::Mode::default(),
+                        vim_selection_anchor: libvim::Position::default(),
+                        vim_selection_start: libvim::Position::default(),
+                        vim_selection_end: libvim::Position::default(),
                     }),
                 );
 
@@ -574,32 +644,66 @@ impl PaneCell {
                     }
                     None
                 };
+                
+                // Build a helper to check if a position is in vim visual selection
+                // Takes absolute line number (scrollback + grid)
+                let is_in_selection = |abs_line: usize, col: usize| -> bool {
+                    if !pane.scrollback_mode || pane.vim_mode == libvim::Mode::Normal {
+                        return false;
+                    }
+                    let start = pane.vim_selection_start;
+                    let end = pane.vim_selection_end;
+                    
+                    match pane.vim_mode {
+                        libvim::Mode::Visual => {
+                            // Character-wise selection
+                            if abs_line < start.row || abs_line > end.row {
+                                return false;
+                            }
+                            if abs_line == start.row && abs_line == end.row {
+                                // Same line: check column range
+                                col >= start.col && col <= end.col
+                            } else if abs_line == start.row {
+                                // First line: from start.col to end
+                                col >= start.col
+                            } else if abs_line == end.row {
+                                // Last line: from start to end.col
+                                col <= end.col
+                            } else {
+                                // Middle lines: entire line
+                                true
+                            }
+                        }
+                        libvim::Mode::VisualLine => {
+                            // Line-wise selection
+                            abs_line >= start.row && abs_line <= end.row
+                        }
+                        libvim::Mode::Normal => false,
+                    }
+                };
+                
+                // Get vim cursor position for block cursor rendering
+                let vim_cursor_viewport = pane.get_vim_cursor_info();
 
-                if pane.scrollback_mode && pane.scroll_offset > 0 {
-                    // In scrollback mode with active scrolling - composite scrollback + grid content
+                if pane.scrollback_mode {
+                    // In scrollback mode - composite with vim cursor and selection
                     for row in 0..self.height {
                         let dst_y = self.pos_y + row;
 
-                        // Calculate which line to display
-                        // scroll_offset = number of lines scrolled up from bottom
-                        // So if scroll_offset = 5, we show 5 lines from scrollback at the top
-                        let source_line = if row < pane.scroll_offset {
-                            // This row should show scrollback content
-                            // scroll_offset lines are shown from scrollback
-                            // row 0 shows scrollback[scrollback_len - scroll_offset]
-                            let scrollback_idx =
-                                scrollback_len.saturating_sub(pane.scroll_offset) + row;
-                            if scrollback_idx < scrollback_len {
-                                // Convert scrollback_idx to line_index format
-                                let line_index =
-                                    (scrollback_idx as isize) - (scrollback_len as isize);
-                                Some((true, scrollback_idx, line_index))
-                            } else {
-                                None
-                            }
+                        // Calculate which absolute line to display
+                        // scroll_offset = number of scrollback lines shown at top
+                        // first_visible = scrollback_len - scroll_offset
+                        let first_visible_line = scrollback_len.saturating_sub(pane.scroll_offset);
+                        let abs_line = first_visible_line + row;
+                        
+                        // Determine source of this line
+                        let source_line = if abs_line < scrollback_len {
+                            // Scrollback line
+                            let line_index = (abs_line as isize) - (scrollback_len as isize);
+                            Some((true, abs_line, line_index))
                         } else {
-                            // This row should show grid content
-                            let grid_row = row - pane.scroll_offset;
+                            // Grid line
+                            let grid_row = abs_line - scrollback_len;
                             if grid_row < grid.rows {
                                 Some((false, grid_row, grid_row as isize))
                             } else {
@@ -628,7 +732,7 @@ impl PaneCell {
                                             )
                                         };
 
-                                        // Apply search highlighting
+                                        // Apply search highlighting first (takes priority)
                                         if let Some(is_current) = is_match(line_index, col) {
                                             if is_current {
                                                 // Current match: bright magenta background, white text, bold
@@ -641,6 +745,17 @@ impl PaneCell {
                                                 cell.attrs.bg_color = Some(emulator::Color::Yellow);
                                                 cell.attrs.fg_color = Some(emulator::Color::Black);
                                             }
+                                        } else if is_in_selection(abs_line, col) {
+                                            // Visual selection: inverse video
+                                            cell.attrs.inverse = true;
+                                        }
+                                        
+                                        // Apply block cursor (vim cursor in scrollback mode)
+                                        if let Some((cursor_col, cursor_row, visible)) = vim_cursor_viewport {
+                                            if visible && row == cursor_row && col == cursor_col {
+                                                // Block cursor: inverse video
+                                                cell.attrs.inverse = !cell.attrs.inverse;
+                                            }
                                         }
 
                                         dest.grid_mut().set_cell(dst_x, dst_y, cell);
@@ -649,38 +764,8 @@ impl PaneCell {
                             }
                         }
                     }
-                } else if pane.search_mode && !pane.search_matches.is_empty() {
-                    // Search mode with scroll_offset = 0: blit with highlighting
-                    for row in 0..self.height.min(grid.rows) {
-                        let dst_y = self.pos_y + row;
-                        if let Some(cells) = grid.get_row(row) {
-                            for col in 0..self.width.min(cells.len()) {
-                                let dst_x = self.pos_x + col;
-                                let (dest_cols, dest_rows) = dest.dimensions();
-                                if dst_x < dest_cols && dst_y < dest_rows {
-                                    let mut cell = cells[col].clone();
-
-                                    // Apply search highlighting
-                                    if let Some(is_current) = is_match(row as isize, col) {
-                                        if is_current {
-                                            // Current match: bright magenta background, white text, bold
-                                            cell.attrs.bg_color = Some(emulator::Color::Magenta);
-                                            cell.attrs.fg_color = Some(emulator::Color::White);
-                                            cell.attrs.bold = true;
-                                        } else {
-                                            // Other matches: yellow background
-                                            cell.attrs.bg_color = Some(emulator::Color::Yellow);
-                                            cell.attrs.fg_color = Some(emulator::Color::Black);
-                                        }
-                                    }
-
-                                    dest.grid_mut().set_cell(dst_x, dst_y, cell);
-                                }
-                            }
-                        }
-                    }
                 } else {
-                    // Normal mode or scrollback mode at offset 0 without search - blit normally
+                    // Normal mode - blit normally
                     dest.blit_from(
                         &pane.terminal_emulator,
                         0,           // source x (from origin of pane's emulator)

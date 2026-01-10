@@ -220,12 +220,16 @@ impl Compositor {
 
     /// Handle input while in scrollback mode.
     ///
-    /// - Ctrl+u: Scroll up by half screen
-    /// - Ctrl+d: Scroll down by half screen
-    /// - g: Jump to top of scrollback
-    /// - G: Jump to bottom of scrollback
+    /// Uses libvim for vim-style navigation:
+    /// - h/j/k/l: Basic cursor movement
+    /// - w/b/e: Word motions
+    /// - 0/$: Line start/end
+    /// - gg/G: Document start/end
+    /// - Ctrl+u/d: Half-page scroll
+    /// - Ctrl+f/b: Full-page scroll
+    /// - v/V: Visual mode / Visual line mode
     /// - /: Enter search mode
-    /// - Escape/q: Exit scrollback mode (or exit search mode if in search)
+    /// - Escape/q: Exit scrollback mode (or visual mode first)
     fn handle_scrollback_input(&mut self, input: &[u8]) {
         // Check if we're in search mode
         if self.active_tab().root.is_in_search_mode() {
@@ -235,48 +239,33 @@ impl Compositor {
 
         if input.len() == 1 {
             match input[0] {
-                0x15 => {
-                    // Ctrl+u - scroll up by half screen
-                    let half_height = self.height.saturating_sub(STATUS_BAR_HEIGHT) / 2;
-                    self.active_tab_mut().root.scroll_up(half_height.max(1));
-                    self.render();
-                }
-                0x04 => {
-                    // Ctrl+d - scroll down by half screen
-                    let half_height = self.height.saturating_sub(STATUS_BAR_HEIGHT) / 2;
-                    self.active_tab_mut().root.scroll_down(half_height.max(1));
-                    self.render();
-                }
-                b'g' => {
-                    // g - jump to top of scrollback (oldest content)
-                    if let Some((_, scrollback_len)) = self.active_tab().root.get_scrollback_info()
-                    {
-                        self.active_tab_mut().root.scroll_up(scrollback_len);
-                        self.render();
-                    }
-                }
-                b'G' => {
-                    // G - jump to bottom of scrollback (most recent content)
-                    if let Some((scroll_offset, _)) = self.active_tab().root.get_scrollback_info() {
-                        self.active_tab_mut().root.scroll_down(scroll_offset);
-                        self.render();
-                    }
-                }
                 b'/' => {
                     // / - enter search mode
                     self.active_tab_mut().root.enter_search_mode();
                     self.render();
+                    return;
                 }
                 0x1b | b'q' => {
-                    // Escape or 'q' - exit scrollback mode
+                    // Escape or 'q' - exit scrollback mode (or exit visual mode first)
+                    // Check if in visual mode - if so, return to normal mode
+                    let vim_mode = self.active_tab().root.get_vim_mode();
+                    if vim_mode != libvim::Mode::Normal {
+                        // Send Escape to vim engine to exit visual mode
+                        self.active_tab_mut().root.handle_vim_input(&[0x1b]);
+                        self.render();
+                        return;
+                    }
                     self.active_tab_mut().root.exit_scrollback_mode();
                     self.render();
+                    return;
                 }
-                _ => {
-                    // Ignore other keys in scrollback mode
-                }
+                _ => {}
             }
         }
+        
+        // Delegate all other input to the vim engine
+        self.active_tab_mut().root.handle_vim_input(input);
+        self.render();
     }
 
     /// Handle input while in search mode.

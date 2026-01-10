@@ -153,8 +153,8 @@ fn test_scrollback_jump_to_top() -> Result<(), CompositorError> {
     compositor.handle_input(&[0x02]); // Ctrl+b
     compositor.handle_input(&[b'[']); // [
 
-    // Jump to top with 'g'
-    compositor.handle_input(b"g");
+    // Jump to top with 'gg' (vim-style)
+    compositor.handle_input(b"gg");
 
     // Render and get the state
     compositor.render_to_vec();

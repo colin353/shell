@@ -3,9 +3,10 @@
 //! A vim cursor movement emulator that tracks cursor position and selection state.
 
 /// Vim editing mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     /// Normal mode - default mode for navigation
+    #[default]
     Normal,
     /// Visual mode (character-wise selection with 'v')
     Visual,
@@ -23,7 +24,7 @@ struct InputState {
 }
 
 /// Cursor position in the document
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Position {
     pub row: usize,
     pub col: usize,
@@ -161,9 +162,9 @@ impl<'a> VimCursorEngine<'a> {
             [0x1b, b'[', _] => Some(pending.clone()),
             [0x1b, b'['] => None, // Need one more byte
             [0x1b, b'O', _] => Some(pending.clone()),
-            [0x1b, b'O'] => None,
-            [0x1b, _] => Some(pending.clone()),
-            [0x1b] => None, // Need more bytes
+            [0x1b, b'O'] => None, // Need one more byte
+            [0x1b, _] => Some(pending.clone()), // ESC + other char
+            [0x1b] => Some(pending.clone()), // Bare escape - treat as complete
 
             // Text objects: i( i) i[ i] i{ i} i< i> i" i' and same with 'a'
             [b'i' | b'a', b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'<' | b'>' | b'"' | b'\''] => {
@@ -192,6 +193,8 @@ impl<'a> VimCursorEngine<'a> {
             [0x1b, b'[', b'B'] => self.motion_j(count), // Down
             [0x1b, b'[', b'C'] => self.motion_l(count), // Right
             [0x1b, b'[', b'D'] => self.motion_h(count), // Left
+            // Bare Escape - return to normal mode
+            [0x1b] => self.enter_normal_mode(),
             // Text objects
             [b'i', ch] => self.text_object_inner(*ch),
             [b'a', ch] => self.text_object_around(*ch),
