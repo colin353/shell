@@ -701,6 +701,13 @@ fn test_vim_visual_mode_word() {
 }
 
 #[test]
+fn test_vim_cursor_moves() {
+    // Visual mode with word motion
+    assert_vim_engine_match(&[b"4j", b"fd", b"f "]);
+    assert_vim_engine_match(&[b"4j", b"V", b""]);
+}
+
+#[test]
 fn test_vim_visual_mode_multiple_words() {
     // Visual mode selecting multiple words
     assert_vim_engine_match(&[b"jj", b"v", b"3w"]);

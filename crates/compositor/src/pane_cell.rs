@@ -177,7 +177,7 @@ impl PaneCell {
             }
         }
     }
-    
+
     /// Handle vim input on the focused pane (for scrollback mode navigation)
     pub fn handle_vim_input(&mut self, input: &[u8]) -> bool {
         match &mut self.inner {
@@ -192,7 +192,7 @@ impl PaneCell {
             }
         }
     }
-    
+
     /// Get vim cursor info from the focused pane
     pub fn get_vim_cursor_info(&self) -> Option<(usize, usize, bool)> {
         match &self.inner {
@@ -207,9 +207,11 @@ impl PaneCell {
             }
         }
     }
-    
+
     /// Get vim selection info from the focused pane
-    pub fn get_vim_selection_info(&self) -> Option<(libvim::Position, libvim::Position, libvim::Mode)> {
+    pub fn get_vim_selection_info(
+        &self,
+    ) -> Option<(libvim::Position, libvim::Position, libvim::Mode)> {
         match &self.inner {
             PaneCellInner::Pane(pane) => pane.get_vim_selection_info(),
             PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
@@ -222,7 +224,7 @@ impl PaneCell {
             }
         }
     }
-    
+
     /// Get vim mode from the focused pane
     pub fn get_vim_mode(&self) -> libvim::Mode {
         match &self.inner {
@@ -537,11 +539,11 @@ impl PaneCell {
                     search_query: String::new(),
                     search_matches: Vec::new(),
                     current_match_index: None,
-                    vim_cursor: libvim::Position::default(),
-                    vim_mode: libvim::Mode::default(),
-                    vim_selection_anchor: libvim::Position::default(),
-                    vim_selection_start: libvim::Position::default(),
-                    vim_selection_end: libvim::Position::default(),
+                    vim_engine: libvim::VimCursorEngine::new_owned(
+                        Vec::new(),
+                        new_height,
+                        new_width,
+                    ),
                 };
 
                 // Take ownership of the old pane
@@ -557,11 +559,7 @@ impl PaneCell {
                         search_query: String::new(),
                         search_matches: Vec::new(),
                         current_match_index: None,
-                        vim_cursor: libvim::Position::default(),
-                        vim_mode: libvim::Mode::default(),
-                        vim_selection_anchor: libvim::Position::default(),
-                        vim_selection_start: libvim::Position::default(),
-                        vim_selection_end: libvim::Position::default(),
+                        vim_engine: libvim::VimCursorEngine::new_owned(Vec::new(), 1, 1),
                     }),
                 );
 
@@ -644,17 +642,17 @@ impl PaneCell {
                     }
                     None
                 };
-                
+
                 // Build a helper to check if a position is in vim visual selection
                 // Takes absolute line number (scrollback + grid)
                 let is_in_selection = |abs_line: usize, col: usize| -> bool {
-                    if !pane.scrollback_mode || pane.vim_mode == libvim::Mode::Normal {
+                    if !pane.scrollback_mode || pane.vim_engine.mode == libvim::Mode::Normal {
                         return false;
                     }
-                    let start = pane.vim_selection_start;
-                    let end = pane.vim_selection_end;
-                    
-                    match pane.vim_mode {
+                    let start = pane.vim_engine.selection_start;
+                    let end = pane.vim_engine.selection_end;
+
+                    match pane.vim_engine.mode {
                         libvim::Mode::Visual => {
                             // Character-wise selection
                             if abs_line < start.row || abs_line > end.row {
@@ -681,7 +679,7 @@ impl PaneCell {
                         libvim::Mode::Normal => false,
                     }
                 };
-                
+
                 // Get vim cursor position for block cursor rendering
                 let vim_cursor_viewport = pane.get_vim_cursor_info();
 
@@ -695,7 +693,7 @@ impl PaneCell {
                         // first_visible = scrollback_len - scroll_offset
                         let first_visible_line = scrollback_len.saturating_sub(pane.scroll_offset);
                         let abs_line = first_visible_line + row;
-                        
+
                         // Determine source of this line
                         let source_line = if abs_line < scrollback_len {
                             // Scrollback line
@@ -749,9 +747,11 @@ impl PaneCell {
                                             // Visual selection: inverse video
                                             cell.attrs.inverse = true;
                                         }
-                                        
+
                                         // Apply block cursor (vim cursor in scrollback mode)
-                                        if let Some((cursor_col, cursor_row, visible)) = vim_cursor_viewport {
+                                        if let Some((cursor_col, cursor_row, visible)) =
+                                            vim_cursor_viewport
+                                        {
                                             if visible && row == cursor_row && col == cursor_col {
                                                 // Block cursor: inverse video
                                                 cell.attrs.inverse = !cell.attrs.inverse;

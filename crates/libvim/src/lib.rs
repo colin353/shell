@@ -2,6 +2,8 @@
 //!
 //! A vim cursor movement emulator that tracks cursor position and selection state.
 
+use std::borrow::Cow;
+
 /// Vim editing mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -16,11 +18,11 @@ pub enum Mode {
 
 /// Parser state for handling multi-byte sequences and counts
 #[derive(Debug, Clone, Default)]
-struct InputState {
+pub struct InputState {
     /// Accumulated count prefix (e.g., "12" in "12j")
-    count: Option<usize>,
+    pub count: Option<usize>,
     /// Pending bytes for multi-byte commands (e.g., "g" waiting for "g")
-    pending: Vec<u8>,
+    pub pending: Vec<u8>,
 }
 
 /// Cursor position in the document
@@ -37,7 +39,7 @@ impl Position {
 }
 
 pub struct VimCursorEngine<'a> {
-    pub lines: &'a [String],
+    pub lines: Cow<'a, [String]>,
     pub viewport_height: usize,
     pub viewport_width: usize,
     pub scroll_offset_row: usize,
@@ -56,13 +58,13 @@ pub struct VimCursorEngine<'a> {
     pub mode: Mode,
 
     /// Input parser state
-    input_state: InputState,
+    pub input_state: InputState,
 }
 
 impl<'a> VimCursorEngine<'a> {
     pub fn new(lines: &'a [String], viewport_height: usize, viewport_width: usize) -> Self {
         VimCursorEngine {
-            lines,
+            lines: Cow::Borrowed(lines),
             viewport_height,
             viewport_width,
             scroll_offset_row: 0,
@@ -73,6 +75,42 @@ impl<'a> VimCursorEngine<'a> {
             selection_end: Position { row: 0, col: 0 },
             mode: Mode::Normal,
             input_state: InputState::default(),
+        }
+    }
+
+    /// Create a new VimCursorEngine that owns its lines data.
+    /// This is useful when you need to persist the engine across calls.
+    pub fn new_owned(
+        lines: Vec<String>,
+        viewport_height: usize,
+        viewport_width: usize,
+    ) -> VimCursorEngine<'static> {
+        VimCursorEngine {
+            lines: Cow::Owned(lines),
+            viewport_height,
+            viewport_width,
+            scroll_offset_row: 0,
+            scroll_offset_col: 0,
+            cursor: Position { row: 0, col: 0 },
+            selection_anchor: Position { row: 0, col: 0 },
+            selection_start: Position { row: 0, col: 0 },
+            selection_end: Position { row: 0, col: 0 },
+            mode: Mode::Normal,
+            input_state: InputState::default(),
+        }
+    }
+
+    /// Update the lines data. This is useful when the scrollback content changes.
+    pub fn set_lines(&mut self, lines: Vec<String>) {
+        self.lines = Cow::Owned(lines);
+        // Clamp cursor to valid range
+        let max_row = self.lines.len().saturating_sub(1);
+        if self.cursor.row > max_row {
+            self.cursor.row = max_row;
+        }
+        let line_len = self.line_len(self.cursor.row);
+        if self.cursor.col > line_len.saturating_sub(1) && line_len > 0 {
+            self.cursor.col = line_len.saturating_sub(1);
         }
     }
 

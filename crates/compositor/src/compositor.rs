@@ -262,7 +262,7 @@ impl Compositor {
                 _ => {}
             }
         }
-        
+
         // Delegate all other input to the vim engine
         self.active_tab_mut().root.handle_vim_input(input);
         self.render();
