@@ -162,9 +162,9 @@ impl<'a> VimCursorEngine<'a> {
             [0x1b, b'[', _] => Some(pending.clone()),
             [0x1b, b'['] => None, // Need one more byte
             [0x1b, b'O', _] => Some(pending.clone()),
-            [0x1b, b'O'] => None, // Need one more byte
+            [0x1b, b'O'] => None,               // Need one more byte
             [0x1b, _] => Some(pending.clone()), // ESC + other char
-            [0x1b] => Some(pending.clone()), // Bare escape - treat as complete
+            [0x1b] => Some(pending.clone()),    // Bare escape - treat as complete
 
             // Text objects: i( i) i[ i] i{ i} i< i> i" i' and same with 'a'
             [b'i' | b'a', b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'<' | b'>' | b'"' | b'\''] => {
