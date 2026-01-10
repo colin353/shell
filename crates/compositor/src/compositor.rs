@@ -228,6 +228,7 @@ impl Compositor {
     /// - Ctrl+u/d: Half-page scroll
     /// - Ctrl+f/b: Full-page scroll
     /// - v/V: Visual mode / Visual line mode
+    /// - y: Yank (copy) selected text to clipboard (in visual mode)
     /// - /: Enter search mode
     /// - Escape/q: Exit scrollback mode (or visual mode first)
     fn handle_scrollback_input(&mut self, input: &[u8]) {
@@ -244,6 +245,19 @@ impl Compositor {
                     self.active_tab_mut().root.enter_search_mode();
                     self.render();
                     return;
+                }
+                b'y' => {
+                    // y - yank selected text to clipboard (if in visual mode)
+                    let vim_mode = self.active_tab().root.get_vim_mode();
+                    if vim_mode != libvim::Mode::Normal {
+                        if let Some(text) = self.active_tab().root.get_selected_text() {
+                            let _ = copy_to_clipboard(&text);
+                        }
+                        // Exit visual mode after yanking
+                        self.active_tab_mut().root.handle_vim_input(&[0x1b]);
+                        self.render();
+                        return;
+                    }
                 }
                 0x1b | b'q' => {
                     // Escape or 'q' - exit scrollback mode (or exit visual mode first)
@@ -957,5 +971,64 @@ impl Compositor {
     /// Check if synchronized output mode is currently enabled.
     pub fn synchronized_output_enabled(&self) -> bool {
         self.synchronized_output
+    }
+}
+
+/// Copy text to the system clipboard.
+///
+/// On macOS, this uses `pbcopy`.
+/// On Linux, this tries `xclip` or `xsel`.
+/// On other platforms, this is a no-op.
+fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin.write_all(text.as_bytes())?;
+        }
+
+        child.wait()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::{Command, Stdio};
+
+        // Try xclip first, then xsel
+        let result = Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .spawn();
+
+        let mut child = match result {
+            Ok(child) => child,
+            Err(_) => {
+                // Fall back to xsel
+                Command::new("xsel")
+                    .args(["--clipboard", "--input"])
+                    .stdin(Stdio::piped())
+                    .spawn()?
+            }
+        };
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            use std::io::Write;
+            stdin.write_all(text.as_bytes())?;
+        }
+
+        child.wait()?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // No clipboard support on other platforms
+        let _ = text;
+        Ok(())
     }
 }

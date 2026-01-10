@@ -69,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_visibility() {
+    fn test_cursor_visibility() { // `Special comment 7 with backticks`
         let grid1 = TerminalGrid::new(80, 24);
         let mut grid2 = TerminalGrid::new(80, 24);
 

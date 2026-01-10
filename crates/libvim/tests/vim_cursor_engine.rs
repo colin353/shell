@@ -737,6 +737,11 @@ fn test_vim_visual_mode_escape() {
     assert_vim_engine_match(&[b"jj", b"v", b"lll", b"\x1b"]);
 }
 
+#[test]
+fn test_vim_select_inside() {
+    assert_vim_engine_match(&[b"72G", b"f7", b"vi`"]);
+}
+
 // ==================== Matching Bracket Tests ====================
 
 #[test]

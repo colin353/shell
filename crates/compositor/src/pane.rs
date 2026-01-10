@@ -546,4 +546,106 @@ impl Pane {
     pub fn current_match_index(&self) -> Option<usize> {
         self.current_match_index
     }
+
+    /// Get the currently selected text in visual mode.
+    /// Returns None if not in scrollback mode or not in visual mode.
+    pub fn get_selected_text(&self) -> Option<String> {
+        if !self.scrollback_mode {
+            return None;
+        }
+
+        let mode = self.vim_engine.mode;
+        if mode == libvim::Mode::Normal {
+            return None;
+        }
+
+        let start = self.vim_engine.selection_start;
+        let end = self.vim_engine.selection_end;
+
+        // Get all lines for extracting text
+        let lines = self.get_all_lines_for_selection();
+
+        let mut result = String::new();
+
+        match mode {
+            libvim::Mode::Visual => {
+                // Character-wise selection
+                if start.row == end.row {
+                    // Single line selection
+                    if let Some(line) = lines.get(start.row) {
+                        let start_col = start.col.min(line.len());
+                        let end_col = (end.col + 1).min(line.len());
+                        if start_col <= end_col {
+                            result.push_str(&line[start_col..end_col]);
+                        }
+                    }
+                } else {
+                    // Multi-line selection
+                    for row in start.row..=end.row {
+                        if let Some(line) = lines.get(row) {
+                            if row == start.row {
+                                // First line: from start_col to end
+                                let col = start.col.min(line.len());
+                                result.push_str(&line[col..]);
+                            } else if row == end.row {
+                                // Last line: from start to end_col (inclusive)
+                                let end_col = (end.col + 1).min(line.len());
+                                result.push_str(&line[..end_col]);
+                            } else {
+                                // Middle lines: entire line
+                                result.push_str(line);
+                            }
+                        }
+                        if row < end.row {
+                            result.push('\n');
+                        }
+                    }
+                }
+            }
+            libvim::Mode::VisualLine => {
+                // Line-wise selection: entire lines from start.row to end.row
+                for row in start.row..=end.row {
+                    if let Some(line) = lines.get(row) {
+                        result.push_str(line);
+                    }
+                    if row < end.row {
+                        result.push('\n');
+                    }
+                }
+            }
+            libvim::Mode::Normal => unreachable!(),
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
+    /// Get all lines for selection extraction (same as get_all_lines but accessible for selection)
+    fn get_all_lines_for_selection(&self) -> Vec<String> {
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
+        let grid_rows = grid.rows;
+        let mut lines = Vec::with_capacity(scrollback_len + grid_rows);
+
+        // Add scrollback lines (oldest first), trimming trailing whitespace
+        for i in 0..scrollback_len {
+            if let Some(row) = grid.get_scrollback_row(i) {
+                let line: String = row.iter().map(|c| c.character).collect();
+                lines.push(line.trim_end().to_string());
+            }
+        }
+
+        // Add grid lines, trimming trailing whitespace
+        for y in 0..grid_rows {
+            if let Some(row) = grid.get_row(y) {
+                let line: String = row.iter().map(|c| c.character).collect();
+                lines.push(line.trim_end().to_string());
+            }
+        }
+
+        lines
+    }
 }

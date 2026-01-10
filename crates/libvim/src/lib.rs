@@ -158,6 +158,12 @@ impl<'a> VimCursorEngine<'a> {
         // Check if this starts a multi-byte sequence
         if self.starts_multi_byte_sequence(byte) {
             self.input_state.pending.push(byte);
+            // Check if this single byte is already a complete sequence (e.g., bare escape)
+            if let Some(cmd) = self.try_complete_sequence() {
+                let count = self.input_state.count.take().unwrap_or(1);
+                self.execute_command(&cmd, count);
+                self.input_state.pending.clear();
+            }
             return;
         }
 
@@ -767,11 +773,16 @@ impl<'a> VimCursorEngine<'a> {
         // G goes to line N (1-indexed), default last line
         if count > 1 {
             self.cursor.row = (count - 1).min(self.total_lines().saturating_sub(1));
+            // When jumping to a specific line with a count, position it near the middle-upper part of screen
+            // Vim typically places the line around 55-60% down from the top
+            let effective_height = self.viewport_height.saturating_sub(2);
+            let target_screen_row = (effective_height * 3) / 5; // 60% down
+            self.scroll_offset_row = self.cursor.row.saturating_sub(target_screen_row);
         } else {
             self.cursor.row = self.total_lines().saturating_sub(1);
+            self.ensure_cursor_visible();
         }
         self.clamp_cursor_col();
-        self.ensure_cursor_visible();
         self.motion_caret();
         self.update_selection();
     }
@@ -1119,6 +1130,7 @@ impl<'a> VimCursorEngine<'a> {
             b'<' | b'>' => self.select_inner_bracket('<', '>'),
             b'"' => self.select_inner_quote('"'),
             b'\'' => self.select_inner_quote('\''),
+            b'`' => self.select_inner_quote('`'),
             _ => {}
         }
     }
@@ -1136,6 +1148,7 @@ impl<'a> VimCursorEngine<'a> {
             b'<' | b'>' => self.select_around_bracket('<', '>'),
             b'"' => self.select_around_quote('"'),
             b'\'' => self.select_around_quote('\''),
+            b'`' => self.select_around_quote('`'),
             _ => {}
         }
     }
@@ -1292,9 +1305,16 @@ impl<'a> VimCursorEngine<'a> {
 
                 if let Some(e) = end {
                     // Inner: between quotes (not including quotes)
-                    self.selection_anchor = Position::new(self.cursor.row, s + 1);
-                    self.cursor = Position::new(self.cursor.row, e);
-                    self.update_selection();
+                    // Set cursor to last character of content (e - 1)
+                    // Set selection from first character (s + 1) to one before cursor (e - 2)
+                    let inner_start = s + 1;
+                    let inner_end = if e > 0 { e - 1 } else { 0 };
+
+                    self.selection_anchor = Position::new(self.cursor.row, inner_start);
+                    self.cursor = Position::new(self.cursor.row, inner_end);
+                    self.selection_start = Position::new(self.cursor.row, inner_start);
+                    self.selection_end =
+                        Position::new(self.cursor.row, inner_end.saturating_sub(1));
                 }
             }
         }

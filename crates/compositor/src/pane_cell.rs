@@ -240,6 +240,21 @@ impl PaneCell {
         }
     }
 
+    /// Get the selected text from the focused pane (if in visual mode)
+    pub fn get_selected_text(&self) -> Option<String> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.get_selected_text(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_selected_text();
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Enter search mode on the focused pane
     pub fn enter_search_mode(&mut self) {
         match &mut self.inner {
