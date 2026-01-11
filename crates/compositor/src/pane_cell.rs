@@ -302,6 +302,53 @@ impl PaneCell {
         }
     }
 
+    /// Check if the focused pane's search input is focused
+    pub fn is_search_input_focused(&self) -> bool {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.is_search_input_focused(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.is_search_input_focused();
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Focus the search input in the focused pane
+    pub fn focus_search_input(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.focus_search_input();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.focus_search_input();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Unfocus the search input in the focused pane
+    pub fn unfocus_search_input(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.unfocus_search_input();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.unfocus_search_input();
+                    }
+                }
+            }
+        }
+    }
+
     /// Input a character to the search query
     pub fn search_input_char(&mut self, c: char) {
         match &mut self.inner {

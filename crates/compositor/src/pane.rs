@@ -130,6 +130,8 @@ pub struct Pane {
     pub scroll_offset: usize,
     /// Whether the pane is in search mode (sub-mode of scrollback)
     pub search_mode: bool,
+    /// Whether the search input is focused (receiving keyboard input)
+    pub search_input_focused: bool,
     /// Current search query
     pub search_query: String,
     /// All matches found for the current search
@@ -164,6 +166,7 @@ impl Pane {
             scrollback_mode: false,
             scroll_offset: 0,
             search_mode: false,
+            search_input_focused: false,
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_index: None,
@@ -347,6 +350,7 @@ impl Pane {
         self.scroll_offset = 0;
         // Also clear search state
         self.search_mode = false;
+        self.search_input_focused = false;
         self.search_query.clear();
         self.search_matches.clear();
         self.current_match_index = None;
@@ -527,6 +531,7 @@ impl Pane {
     pub fn enter_search_mode(&mut self) {
         if self.scrollback_mode {
             self.search_mode = true;
+            self.search_input_focused = true;
             self.search_query.clear();
             self.search_matches.clear();
             self.current_match_index = None;
@@ -536,6 +541,7 @@ impl Pane {
     /// Exit search mode (back to scrollback mode)
     pub fn exit_search_mode(&mut self) {
         self.search_mode = false;
+        self.search_input_focused = false;
         self.search_query.clear();
         self.search_matches.clear();
         self.current_match_index = None;
@@ -544,6 +550,21 @@ impl Pane {
     /// Check if in search mode
     pub fn is_in_search_mode(&self) -> bool {
         self.search_mode
+    }
+
+    /// Check if search input is focused
+    pub fn is_search_input_focused(&self) -> bool {
+        self.search_input_focused
+    }
+
+    /// Focus the search input
+    pub fn focus_search_input(&mut self) {
+        self.search_input_focused = true;
+    }
+
+    /// Unfocus the search input
+    pub fn unfocus_search_input(&mut self) {
+        self.search_input_focused = false;
     }
 
     /// Get the current search query

@@ -15,6 +15,6 @@ Some features to build:
  - [ ] Actually implement the shell part
  - [x] Synchronized output support in delta rendering
  - [x] Implement multi-screen support and a status bar
- - [ ] When in search mode, after pressing enter, freeze the search input, and let `n` and `p` advance the search position (rather than modifying the input).
+ - [x] When in search mode, after pressing enter, freeze the search input, and let `n` and `p` advance the search position (rather than modifying the input).
  - [x] Make URL search incremental (if one is found, stop searching, and only continue searching when seeking the next one)
- - [ ] If a program prints something but it doesn't end in a newline, print a % character with a white background, then emit a newline.
+ - [x] If a program prints something but it doesn't end in a newline, print a % character with a white background, then emit a newline.

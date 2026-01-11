@@ -311,6 +311,61 @@ impl Compositor {
             return;
         }
 
+        // Check if search input is focused
+        let input_focused = self.active_tab().root.is_search_input_focused();
+
+        // Handle unfocused state: n/p/j/k for navigation, / to re-focus, Escape to exit
+        if !input_focused {
+            if input.len() == 1 {
+                match input[0] {
+                    b'n' | b'j' => {
+                        // n/j - go DOWN toward terminal grid (more recent)
+                        self.active_tab_mut().root.prev_match();
+                        self.render();
+                        return;
+                    }
+                    b'p' | b'k' | b'N' => {
+                        // p/k/N (shift+n) - go UP into scrollback (older)
+                        self.active_tab_mut().root.next_match();
+                        self.render();
+                        return;
+                    }
+                    0x0e => {
+                        // Ctrl+N - go DOWN toward terminal grid (more recent)
+                        self.active_tab_mut().root.prev_match();
+                        self.render();
+                        return;
+                    }
+                    0x10 => {
+                        // Ctrl+P - go UP into scrollback (older)
+                        self.active_tab_mut().root.next_match();
+                        self.render();
+                        return;
+                    }
+                    b'/' => {
+                        // / - re-focus the search input
+                        self.active_tab_mut().root.focus_search_input();
+                        self.render();
+                        return;
+                    }
+                    0x1b | b'q' => {
+                        // Escape or q - exit search mode (back to scrollback mode)
+                        self.active_tab_mut().root.exit_search_mode();
+                        self.render();
+                        return;
+                    }
+                    _ => {
+                        // Ignore other keys when unfocused
+                        return;
+                    }
+                }
+            }
+            // Ignore multi-byte sequences when unfocused
+            return;
+        }
+
+        // Search input is focused - handle typing and search navigation
+
         // Check for escape sequences (CSI sequences starting with ESC [)
         if input.len() >= 3 && input[0] == 0x1b && input[1] == b'[' {
             // Check for up/down arrow keys for match navigation
@@ -343,13 +398,18 @@ impl Compositor {
                     self.active_tab_mut().root.exit_search_mode();
                     self.render();
                 }
-                0x0d | 0x10 | 0x15 => {
-                    // Enter or Ctrl+P or Ctrl+U - go to next match (older / up on screen)
+                0x0d => {
+                    // Enter - unfocus search input (stay in search mode for n/p navigation)
+                    self.active_tab_mut().root.unfocus_search_input();
+                    self.render();
+                }
+                0x10 => {
+                    // Ctrl+P - go UP into scrollback (older)
                     self.active_tab_mut().root.next_match();
                     self.render();
                 }
-                0x0e | 0x04 => {
-                    // Ctrl+N or Ctrl+D - go to previous match (more recent / down on screen)
+                0x0e => {
+                    // Ctrl+N - go DOWN toward terminal grid (more recent)
                     self.active_tab_mut().root.prev_match();
                     self.render();
                 }
