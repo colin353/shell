@@ -2,8 +2,6 @@ use crate::border::{get_border_char, BorderDirections};
 use crate::error::CompositorError;
 use crate::pane::Pane;
 use crate::types::{Direction, SplitDirection};
-use pty;
-use std::os::fd::AsRawFd;
 
 /// A cell in the pane tree, which can be a single pane or a split.
 pub struct PaneCell {
@@ -24,22 +22,23 @@ pub enum PaneCellInner {
 
 impl PaneCell {
     /// Handle keyboard input by routing it to the focused pane.
-    pub fn handle_input(&mut self, input: &[u8]) {
+    /// Returns `true` if a rerender is needed.
+    pub fn handle_input(&mut self, input: &[u8]) -> bool {
         match &mut self.inner {
-            PaneCellInner::Pane(pane) => {
-                pane.handle_input(input);
-            }
+            PaneCellInner::Pane(pane) => pane.handle_input(input),
             PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
                 for cell in cells {
                     if cell.focus {
-                        cell.handle_input(input);
+                        return cell.handle_input(input);
                     }
                 }
+                false
             }
         }
     }
 
     /// Collect PTY file descriptors for polling.
+    /// Only collects fds for panes that have active subprocesses.
     pub fn collect_poll_fds(
         &mut self,
         fds: &mut Vec<libc::pollfd>,
@@ -47,9 +46,10 @@ impl PaneCell {
     ) {
         match &mut self.inner {
             PaneCellInner::Pane(pane) => {
-                if let Some(ref pty) = pane.pty {
+                // Only poll if there's an active subprocess
+                if let Some(fd) = pane.subprocess_fd() {
                     fds.push(libc::pollfd {
-                        fd: pty.as_raw_fd(),
+                        fd,
                         events: libc::POLLIN,
                         revents: 0,
                     });
@@ -648,53 +648,18 @@ impl PaneCell {
 
                 // Create the existing pane cell with updated dimensions
                 pane.terminal_emulator.resize(old_width, old_height);
-                if let Some(ref pty) = pane.pty {
-                    let _ = pty.resize(old_width as u16, old_height as u16);
+                if let Some(ref proc) = pane.subprocess {
+                    let _ = proc.resize(old_width as u16, old_height as u16);
                 }
+                pane.shell.resize(old_width as u16, old_height as u16);
 
                 // Create a new pane with a new shell
-                let new_pane = Pane {
-                    terminal_emulator: emulator::TerminalEmulator::new(new_width, new_height),
-                    pty: Some(
-                        pty::PtyProcess::spawn("/bin/bash", new_width as u16, new_height as u16)
-                            .map_err(CompositorError::Pty)?,
-                    ),
-                    read_buffer: [0u8; 4096],
-                    scrollback_mode: false,
-                    scroll_offset: 0,
-                    search_mode: false,
-                    search_query: String::new(),
-                    search_matches: Vec::new(),
-                    current_match_index: None,
-                    url_mode: false,
-                    url_matches: Vec::new(),
-                    current_url_index: None,
-                    vim_engine: libvim::VimCursorEngine::new_owned(
-                        Vec::new(),
-                        new_height,
-                        new_width,
-                    ),
-                };
+                let new_pane = Pane::new(new_width, new_height);
 
-                // Take ownership of the old pane
-                let old_inner = std::mem::replace(
-                    &mut self.inner,
-                    PaneCellInner::Pane(Pane {
-                        terminal_emulator: emulator::TerminalEmulator::new(1, 1),
-                        pty: None,
-                        read_buffer: [0u8; 4096],
-                        scrollback_mode: false,
-                        scroll_offset: 0,
-                        search_mode: false,
-                        search_query: String::new(),
-                        search_matches: Vec::new(),
-                        current_match_index: None,
-                        url_mode: false,
-                        url_matches: Vec::new(),
-                        current_url_index: None,
-                        vim_engine: libvim::VimCursorEngine::new_owned(Vec::new(), 1, 1),
-                    }),
-                );
+                // Take ownership of the old pane - use a temporary placeholder
+                let placeholder_pane = Pane::new(1, 1);
+                let old_inner =
+                    std::mem::replace(&mut self.inner, PaneCellInner::Pane(placeholder_pane));
 
                 let old_pane = match old_inner {
                     PaneCellInner::Pane(p) => p,
@@ -1205,9 +1170,11 @@ impl PaneCell {
             PaneCellInner::Pane(pane) => {
                 // Resize the terminal emulator
                 pane.terminal_emulator.resize(width, height);
-                // Resize the PTY if present
-                if let Some(ref pty) = pane.pty {
-                    let _ = pty.resize(width as u16, height as u16);
+                // Resize the shell
+                pane.shell.resize(width as u16, height as u16);
+                // Resize the subprocess PTY if present
+                if let Some(ref proc) = pane.subprocess {
+                    let _ = proc.resize(width as u16, height as u16);
                 }
             }
             PaneCellInner::VSplit(cells) => {

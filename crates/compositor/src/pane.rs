@@ -110,7 +110,10 @@ pub struct UrlMatch {
 
 pub struct Pane {
     pub terminal_emulator: emulator::TerminalEmulator,
-    pub pty: Option<pty::PtyProcess>,
+    /// The embedded shell instance
+    pub shell: libshell::Shell,
+    /// Currently running subprocess (if any) - takes over PTY when active
+    pub subprocess: Option<pty::PtyProcess>,
     pub read_buffer: [u8; 4096],
     /// Whether the pane is in scrollback mode
     pub scrollback_mode: bool,
@@ -136,19 +139,109 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// Handle keyboard input by writing to the PTY.
-    pub fn handle_input(&mut self, input: &[u8]) {
-        if let Some(pty) = &mut self.pty {
-            let _ = pty.write(input);
+    /// Create a new pane with the given dimensions.
+    pub fn new(width: usize, height: usize) -> Self {
+        let (shell, initial_output) = libshell::Shell::new(width as u16, height as u16);
+        let mut terminal_emulator = emulator::TerminalEmulator::new(width, height);
+
+        // Process the initial prompt output
+        terminal_emulator.process(&initial_output);
+
+        Pane {
+            terminal_emulator,
+            shell,
+            subprocess: None,
+            read_buffer: [0u8; 4096],
+            scrollback_mode: false,
+            scroll_offset: 0,
+            search_mode: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match_index: None,
+            url_mode: false,
+            url_matches: Vec::new(),
+            current_url_index: None,
+            vim_engine: libvim::VimCursorEngine::new_owned(Vec::new(), height, width),
         }
     }
 
-    /// Read available data from the PTY and process it through the emulator.
+    /// Handle keyboard input.
+    ///
+    /// If a subprocess is running, input goes to it.
+    /// Otherwise, input goes to the shell.
+    ///
+    /// Returns `true` if the terminal content changed and a rerender is needed.
+    pub fn handle_input(&mut self, input: &[u8]) -> bool {
+        if let Some(ref mut proc) = self.subprocess {
+            // Subprocess is active - send input directly to it
+            let _ = proc.write(input);
+            // Subprocess output will trigger rerender via poll
+            false
+        } else {
+            // Shell is active - process input and handle actions
+            match self.shell.handle_input(input) {
+                libshell::ShellAction::None => false,
+                libshell::ShellAction::Output(data) => {
+                    self.terminal_emulator.process(&data);
+                    true // Content changed, need rerender
+                }
+                libshell::ShellAction::SpawnSubprocess {
+                    output,
+                    command,
+                    args,
+                    env: _,
+                    cwd,
+                } => {
+                    // First, write any pending output (e.g., the newline after the command)
+                    if !output.is_empty() {
+                        self.terminal_emulator.process(&output);
+                    }
+
+                    // Build the full command string
+                    let full_command = if args.is_empty() {
+                        command
+                    } else {
+                        format!("{} {}", command, args.join(" "))
+                    };
+
+                    // Spawn the subprocess
+                    let width = self.terminal_emulator.grid().cols as u16;
+                    let height = self.terminal_emulator.grid().rows as u16;
+
+                    // Change to the shell's cwd before spawning
+                    let _ = std::env::set_current_dir(&cwd);
+
+                    match pty::PtyProcess::spawn(&full_command, width, height) {
+                        Ok(proc) => {
+                            self.subprocess = Some(proc);
+                        }
+                        Err(e) => {
+                            // Failed to spawn - show error and prompt
+                            let error_msg = format!("spawn error: {}\r\n", e);
+                            self.terminal_emulator.process(error_msg.as_bytes());
+                            let prompt = self.shell.subprocess_exited(1);
+                            self.terminal_emulator.process(&prompt);
+                        }
+                    }
+                    true // Content changed (at least the newline), need rerender
+                }
+                libshell::ShellAction::Exit => {
+                    // Shell wants to exit - could close the pane
+                    // For now, just show a message
+                    self.terminal_emulator.process(b"[shell exited]\r\n");
+                    true // Content changed, need rerender
+                }
+            }
+        }
+    }
+
+    /// Read available data from the subprocess and process it through the emulator.
+    /// Also checks if the subprocess has exited and returns control to the shell.
     pub fn read_and_process(&mut self) {
-        if let Some(ref pty) = self.pty {
-            // Read all available data
+        if let Some(ref proc) = self.subprocess {
+            // Read all available data from subprocess
             loop {
-                match pty.read(&mut self.read_buffer) {
+                match proc.read(&mut self.read_buffer) {
                     Ok(Some(0)) => break, // EOF
                     Ok(Some(n)) => {
                         // Process through terminal emulator
@@ -157,7 +250,9 @@ impl Pane {
                         // Handle any responses from the terminal (e.g., cursor position queries)
                         let responses = self.terminal_emulator.drain_responses();
                         for response in responses {
-                            let _ = pty.write(&response);
+                            if let Some(ref proc) = self.subprocess {
+                                let _ = proc.write(&response);
+                            }
                         }
                     }
                     Ok(None) => break, // No more data available (EAGAIN)
@@ -165,11 +260,36 @@ impl Pane {
                 }
             }
         }
+
+        // Check if subprocess has exited
+        if let Some(ref proc) = self.subprocess {
+            if !proc.is_running() {
+                // Subprocess exited - we don't have access to exit code directly,
+                // so we assume 0 for now. The Drop impl will clean up the process.
+                drop(self.subprocess.take());
+
+                // Notify shell and show prompt
+                let output = self.shell.subprocess_exited(0);
+                self.terminal_emulator.process(&output);
+            }
+        }
     }
 
-    /// Check if the PTY process is still running.
+    /// Check if the pane is still active (shell hasn't exited).
     pub fn is_running(&self) -> bool {
-        self.pty.as_ref().map_or(false, |p| p.is_running())
+        // Pane is running if shell hasn't exited
+        !self.shell.should_exit()
+    }
+
+    /// Check if a subprocess is currently running.
+    pub fn has_subprocess(&self) -> bool {
+        self.subprocess.is_some()
+    }
+
+    /// Get the subprocess PTY file descriptor for polling (if any).
+    pub fn subprocess_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        self.subprocess.as_ref().map(|p| p.as_raw_fd())
     }
 
     /// Enter scrollback mode

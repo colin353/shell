@@ -1,7 +1,6 @@
 use crate::error::CompositorError;
 use crate::pane::Pane;
 use crate::pane_cell::{PaneCell, PaneCellInner};
-use pty;
 
 /// A tab containing a name and its own root pane tree
 pub struct Tab {
@@ -17,24 +16,7 @@ impl Tab {
         Ok(Self {
             name,
             root: PaneCell {
-                inner: PaneCellInner::Pane(Pane {
-                    terminal_emulator: emulator::TerminalEmulator::new(width, height),
-                    pty: Some(
-                        pty::PtyProcess::spawn("/bin/bash", width as u16, height as u16)
-                            .map_err(CompositorError::Pty)?,
-                    ),
-                    read_buffer: [0u8; 4096],
-                    scrollback_mode: false,
-                    scroll_offset: 0,
-                    search_mode: false,
-                    search_query: String::new(),
-                    search_matches: Vec::new(),
-                    current_match_index: None,
-                    url_mode: false,
-                    url_matches: Vec::new(),
-                    current_url_index: None,
-                    vim_engine: libvim::VimCursorEngine::new_owned(Vec::new(), height, width),
-                }),
+                inner: PaneCellInner::Pane(Pane::new(width, height)),
                 width,
                 height,
                 pos_x: 0,

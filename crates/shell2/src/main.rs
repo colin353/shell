@@ -63,6 +63,9 @@ fn main() {
         let _ = output.flush();
     }
 
+    // Initial render to display the shell prompt
+    compositor.render();
+
     // Main event loop
     let mut input_buf = [0u8; 1024];
 

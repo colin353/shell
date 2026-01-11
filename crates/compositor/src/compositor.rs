@@ -173,7 +173,9 @@ impl Compositor {
                     }
                     0x02 => {
                         // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
-                        self.active_tab_mut().root.handle_input(&[0x02]);
+                        if self.active_tab_mut().root.handle_input(&[0x02]) {
+                            self.render();
+                        }
                         return;
                     }
                     _ => {
@@ -222,7 +224,9 @@ impl Compositor {
                 _ => {}
             }
         }
-        self.active_tab_mut().root.handle_input(input);
+        if self.active_tab_mut().root.handle_input(input) {
+            self.render();
+        }
     }
 
     /// Handle input while in scrollback mode.
@@ -541,6 +545,9 @@ impl Compositor {
     ///
     /// Returns when all panes have exited or an error occurs.
     pub fn run(&mut self) -> Result<(), CompositorError> {
+        // Initial render to show the shell prompt
+        self.render();
+
         loop {
             // Collect all file descriptors to poll
             let mut poll_fds: Vec<libc::pollfd> = Vec::new();
@@ -696,15 +703,20 @@ impl Compositor {
     }
 
     /// Process all queued keyboard input.
-    fn process_keyboard_queue(&mut self) {
+    /// Returns `true` if any input caused terminal content to change.
+    fn process_keyboard_queue(&mut self) -> bool {
         let inputs: Vec<Vec<u8>> = {
             let mut queue = self.input_queue.lock().unwrap();
             queue.drain(..).collect()
         };
 
+        let mut needs_render = false;
         for input in inputs {
-            self.active_tab_mut().root.handle_input(&input);
+            if self.active_tab_mut().root.handle_input(&input) {
+                needs_render = true;
+            }
         }
+        needs_render
     }
 
     /// Render the compositor to the terminal.

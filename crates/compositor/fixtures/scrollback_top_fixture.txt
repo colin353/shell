@@ -1,9 +1,5 @@
-                                                                                
-The default interactive shell is now zsh.                                       
-To update your account to use zsh, please run `chsh -s /bin/zsh`.               
-For more details, please visit https://support.apple.com/kb/HT208050.           
-bash-3.2$ cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/lor
-em_ipsum.txt                                                                    
+compositor $ cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/
+lorem_ipsum.txt                                                                 
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor i
 ncididunt ut labore et dolore magna aliqua.                                     
 Line 2: Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi 
@@ -21,4 +17,8 @@ Line 7: Duis ac tellus et risus vulputate vehicula. Donec lobortis risus a elit.
 Line 8: Ut ullamcorper, ligula eu tempor congue, eros est euismod turpis, id tin
 cidunt sapien risus a quam.                                                     
 Line 9: Maecenas fermentum consequat mi. Donec fermentum. Pellentesque malesuada
- 0 bash                                                             SCROLL 0/98 
+ nulla a mi.                                                                    
+Line 10: Duis sapien sem, aliquet sed, vulputate eget, feugiat sit amet, eros. D
+uis sapien sem.                                                                 
+Line 11: SEARCHABLE_MARKER_ALPHA - This line contains a unique marker for search
+ 0 bash                                                             SCROLL 0/94 

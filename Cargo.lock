@@ -86,6 +86,7 @@ dependencies = [
  "chrono",
  "emulator",
  "libc",
+ "libshell",
  "libvim",
  "nix",
  "pty",

@@ -1,4 +1,4 @@
 #[derive(Default)]
 pub struct ShellHistory {
-    entries: Vec<String>,
+    pub entries: Vec<String>,
 }

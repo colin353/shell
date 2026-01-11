@@ -1,3 +1,4 @@
+ sit amet justo.                                                                
 Line 50: Donec enim diam vulputate ut pharetra sit amet aliquam id diam maecenas
  ultricies mi eget.                                                             
 Line 51: Mauris pellentesque pulvinar pellentesque habitant morbi tristique sene
@@ -20,5 +21,4 @@ Line 59: Et malesuada fames ac turpis egestas integer eget aliquet nibh praesent
  tristique magna sit amet.                                                      
 Line 60: BOTTOM_MARKER - This is the final line of the fixture and should be vis
 ible without scrolling.                                                         
-bash-3.2$                                                                       
  0 bash  / BOTTOM_MARKER                                                    1/1 

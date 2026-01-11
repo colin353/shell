@@ -1,24 +1,24 @@
-                                                                                
-The default interactive shell is now zsh.                                       
-To update your account to use zsh, please run `chsh -s /bin/zsh`.               
-For more details, please visit https://support.apple.com/kb/HT208050.           
-bash-3.2$ printf 'TOP_PANE_MARKER\n'                                            
+compositor $ printf 'TOP_PANE_MARKER\n'                                         
 TOP_PANE_MARKER                                                                 
-bash-3.2$                                                                       
+compositor $                                                                    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
                                                                                 
                                                                                 
                                                                                 
                                                                                 
 ────────────────────────────────────────────────────────────────────────────────
-                                                                                
-The default interactive shell is now zsh.                                       
-To update your account to use zsh, please run `chsh -s /bin/zsh`.               
-For more details, please visit https://support.apple.com/kb/HT208050.           
-bash-3.2$ printf 'BOTTOM_PANE_MARKER\n'                                         
+compositor $ printf 'BOTTOM_PANE_MARKER\n'                                      
 BOTTOM_PANE_MARKER                                                              
-bash-3.2$                                                                       
+compositor $                                                                    
                                                                                 
                                                                                 
                                                                                 
                                                                                 
- 0 bash                                                        2026-01-10 19:24 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ 0 bash                                                        2026-01-10 21:52 
