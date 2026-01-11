@@ -1,3 +1,5 @@
+http://google.com
+
 # Shell + multiplexer
 
 Some bugs:
@@ -12,4 +14,6 @@ Some features to build:
  - [x] Should render grid boundaries around the pane cells
  - [ ] Actually implement the shell part
  - [x] Synchronized output support in delta rendering
- - [ ] Implement multi-screen support and a status bar
+ - [x] Implement multi-screen support and a status bar
+ - [ ] When in search mode, after pressing enter, freeze the search input, and let `n` and `p` advance the search position (rather than modifying the input).
+ - [ ] Make URL search incremental (if one is found, stop searching, and only continue searching when seeking the next one)

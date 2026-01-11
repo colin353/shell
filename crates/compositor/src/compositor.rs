@@ -901,7 +901,7 @@ impl Compositor {
             url_attrs.fg_color = Some(emulator::Color::Black);
             url_attrs.bold = true;
 
-            if let Some((current_idx, total)) = self.tabs[self.active_tab].root.get_url_info() {
+            if let Some((current_idx, _total)) = self.tabs[self.active_tab].root.get_url_info() {
                 // Show URL mode label on the left after tabs
                 let url_label = " URL ";
                 for ch in url_label.chars() {
@@ -917,17 +917,9 @@ impl Compositor {
 
                 // Show current URL if selected (truncated if too long)
                 if let Some(url) = self.tabs[self.active_tab].root.get_current_url() {
-                    // Calculate available space for URL (leave room for count on right)
-                    let count_text = if total == 0 {
-                        " No URLs ".to_string()
-                    } else if total >= 100 {
-                        let current_display = current_idx.map(|i| i + 1).unwrap_or(0);
-                        format!(" {}/100+ ", current_display)
-                    } else {
-                        let current_display = current_idx.map(|i| i + 1).unwrap_or(0);
-                        format!(" {}/{} ", current_display, total)
-                    };
-                    let available = cols.saturating_sub(x_pos).saturating_sub(count_text.len());
+                    // Calculate available space for URL (leave room for hint on right)
+                    let hint_text = " j/k:nav Enter:open ";
+                    let available = cols.saturating_sub(x_pos).saturating_sub(hint_text.len());
 
                     let display_url = if url.len() > available && available > 3 {
                         format!("{}...", &url[..available.saturating_sub(3)])
@@ -936,7 +928,7 @@ impl Compositor {
                     };
 
                     for ch in display_url.chars() {
-                        if x_pos < cols.saturating_sub(count_text.len()) {
+                        if x_pos < cols.saturating_sub(hint_text.len()) {
                             self.global_emulator.grid_mut().set_cell(
                                 x_pos,
                                 status_bar_y,
@@ -946,16 +938,18 @@ impl Compositor {
                         }
                     }
 
-                    // Show URL count on the right
-                    let text_start_x = cols.saturating_sub(count_text.len());
-                    for (i, ch) in count_text.chars().enumerate() {
-                        let x = text_start_x + i;
-                        if x < cols {
-                            self.global_emulator.grid_mut().set_cell(
-                                x,
-                                status_bar_y,
-                                emulator::Cell::new(ch, url_attrs.clone()),
-                            );
+                    // Show hint text on the right (only if we have a URL selected)
+                    if current_idx.is_some() {
+                        let text_start_x = cols.saturating_sub(hint_text.len());
+                        for (i, ch) in hint_text.chars().enumerate() {
+                            let x = text_start_x + i;
+                            if x < cols {
+                                self.global_emulator.grid_mut().set_cell(
+                                    x,
+                                    status_bar_y,
+                                    emulator::Cell::new(ch, url_attrs.clone()),
+                                );
+                            }
                         }
                     }
                 } else {

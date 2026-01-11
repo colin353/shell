@@ -108,6 +108,15 @@ pub struct UrlMatch {
     pub url: String,
 }
 
+/// Direction for incremental URL search
+#[derive(Clone, Copy, PartialEq)]
+enum SearchDirection {
+    /// Search toward older content (up/back in history)
+    Up,
+    /// Search toward newer content (down/forward in history)  
+    Down,
+}
+
 pub struct Pane {
     pub terminal_emulator: emulator::TerminalEmulator,
     /// The embedded shell instance
@@ -875,10 +884,20 @@ impl Pane {
     }
 
     /// Enter URL mode (must be in scrollback mode first)
+    /// Uses incremental search - only finds the first URL from the current cursor position
     pub fn enter_url_mode(&mut self) {
         if self.scrollback_mode {
             self.url_mode = true;
-            self.find_urls();
+            self.url_matches.clear();
+            self.current_url_index = None;
+
+            // Find the first URL starting from the current cursor position, searching upward (older)
+            // This is typically what users want - find a URL they just saw
+            if let Some(url_match) = self.find_url_from_cursor(SearchDirection::Up) {
+                self.url_matches.push(url_match);
+                self.current_url_index = Some(0);
+                self.jump_to_current_url();
+            }
         }
     }
 
@@ -894,128 +913,263 @@ impl Pane {
         self.url_mode
     }
 
-    /// Find all URLs in the terminal content
-    fn find_urls(&mut self) {
-        self.url_matches.clear();
-        self.current_url_index = None;
+    /// Convert absolute line number (vim cursor style) to line_index (UrlMatch style)
+    /// Vim cursor: 0..scrollback_len are scrollback, scrollback_len..scrollback_len+grid_rows are grid
+    /// line_index: negative for scrollback (-scrollback_len..-1), non-negative for grid (0..grid_rows)
+    fn abs_line_to_line_index(&self, abs_line: usize) -> isize {
+        let scrollback_len = self.terminal_emulator.grid().scrollback_len();
+        if abs_line < scrollback_len {
+            // Scrollback line: abs_line 0 -> -(scrollback_len), abs_line scrollback_len-1 -> -1
+            (abs_line as isize) - (scrollback_len as isize)
+        } else {
+            // Grid line
+            (abs_line - scrollback_len) as isize
+        }
+    }
 
-        const MAX_URLS: usize = 100;
+    /// Convert line_index (UrlMatch style) to absolute line number (vim cursor style)
+    fn line_index_to_abs_line(&self, line_index: isize) -> usize {
+        let scrollback_len = self.terminal_emulator.grid().scrollback_len();
+        if line_index < 0 {
+            // Scrollback line
+            (scrollback_len as isize + line_index) as usize
+        } else {
+            // Grid line
+            scrollback_len + line_index as usize
+        }
+    }
+
+    /// Find a URL starting from the current cursor position in the given direction.
+    /// Returns the first URL found, or None if no URL is found.
+    fn find_url_from_cursor(&self, direction: SearchDirection) -> Option<UrlMatch> {
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
+        let total_lines = scrollback_len + grid.rows;
+
+        // Get cursor position (absolute line number and column)
+        let cursor_abs_line = self.vim_engine.cursor.row;
+        let cursor_col = self.vim_engine.cursor.col;
+
+        match direction {
+            SearchDirection::Up => {
+                // Search from cursor position going up (toward older content)
+                // First, search the current line from cursor position backward
+                if let Some(url_match) = self.find_url_in_line_before(cursor_abs_line, cursor_col) {
+                    return Some(url_match);
+                }
+
+                // Then search previous lines (going up)
+                if cursor_abs_line > 0 {
+                    for abs_line in (0..cursor_abs_line).rev() {
+                        if let Some(url_match) = self.find_last_url_in_line(abs_line) {
+                            return Some(url_match);
+                        }
+                    }
+                }
+            }
+            SearchDirection::Down => {
+                // Search from cursor position going down (toward newer content)
+                // First, search the current line from cursor position forward
+                if let Some(url_match) = self.find_url_in_line_after(cursor_abs_line, cursor_col) {
+                    return Some(url_match);
+                }
+
+                // Then search subsequent lines (going down)
+                for abs_line in (cursor_abs_line + 1)..total_lines {
+                    if let Some(url_match) = self.find_first_url_in_line(abs_line) {
+                        return Some(url_match);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find a URL continuing from the current URL position in the given direction.
+    /// Used for next_url/prev_url navigation.
+    fn find_next_url_from_current(&self, direction: SearchDirection) -> Option<UrlMatch> {
+        let current_url = self.url_matches.first()?;
+        let current_abs_line = self.line_index_to_abs_line(current_url.line_index);
 
         let grid = self.terminal_emulator.grid();
         let scrollback_len = grid.scrollback_len();
+        let total_lines = scrollback_len + grid.rows;
 
-        // Search from bottom to top (most recent first) so we find the most relevant URLs
-        // when hitting the MAX_URLS limit
+        match direction {
+            SearchDirection::Up => {
+                // Search for the next URL going up (toward older content)
+                // First check current line for a URL before the current one
+                if let Some(url_match) =
+                    self.find_url_in_line_before(current_abs_line, current_url.start_col)
+                {
+                    return Some(url_match);
+                }
 
-        // First, search current grid from bottom to top
-        'grid: for y in (0..grid.rows).rev() {
-            if let Some(row) = grid.get_row(y) {
-                let line_text: String = row.iter().map(|c| c.character).collect();
-
-                // Find all URLs in this line
-                for mat in URL_REGEX.find_iter(&line_text) {
-                    // Apply post-processing (bracket balancing and trailing delimiter trimming)
-                    let raw_url = mat.as_str();
-                    let processed_url = post_process_url(raw_url);
-
-                    // Skip empty URLs after processing
-                    if processed_url.is_empty() {
-                        continue;
+                // Then search previous lines
+                if current_abs_line > 0 {
+                    for abs_line in (0..current_abs_line).rev() {
+                        if let Some(url_match) = self.find_last_url_in_line(abs_line) {
+                            return Some(url_match);
+                        }
                     }
+                }
+            }
+            SearchDirection::Down => {
+                // Search for the next URL going down (toward newer content)
+                // First check current line for a URL after the current one
+                if let Some(url_match) =
+                    self.find_url_in_line_after(current_abs_line, current_url.end_col)
+                {
+                    return Some(url_match);
+                }
 
-                    // Calculate the actual end column after post-processing
-                    let processed_end_col = mat.start() + processed_url.len();
-
-                    self.url_matches.push(UrlMatch {
-                        line_index: y as isize,
-                        start_col: mat.start(),
-                        end_col: processed_end_col,
-                        url: processed_url.to_string(),
-                    });
-                    if self.url_matches.len() >= MAX_URLS {
-                        break 'grid;
+                // Then search subsequent lines
+                for abs_line in (current_abs_line + 1)..total_lines {
+                    if let Some(url_match) = self.find_first_url_in_line(abs_line) {
+                        return Some(url_match);
                     }
                 }
             }
         }
 
-        // Then search scrollback from newest to oldest (only if we haven't hit the limit)
-        if self.url_matches.len() < MAX_URLS {
-            'scrollback: for i in (0..scrollback_len).rev() {
-                if let Some(row) = grid.get_scrollback_row(i) {
-                    let line_text: String = row.iter().map(|c| c.character).collect();
+        None
+    }
 
-                    // Find all URLs in this line
-                    for mat in URL_REGEX.find_iter(&line_text) {
-                        // Apply post-processing (bracket balancing and trailing delimiter trimming)
-                        let raw_url = mat.as_str();
-                        let processed_url = post_process_url(raw_url);
+    /// Get the line text for an absolute line number
+    fn get_line_text(&self, abs_line: usize) -> Option<String> {
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
 
-                        // Skip empty URLs after processing
-                        if processed_url.is_empty() {
-                            continue;
-                        }
+        if abs_line < scrollback_len {
+            grid.get_scrollback_row(abs_line)
+                .map(|row| row.iter().map(|c| c.character).collect())
+        } else {
+            let grid_row = abs_line - scrollback_len;
+            grid.get_row(grid_row)
+                .map(|row| row.iter().map(|c| c.character).collect())
+        }
+    }
 
-                        // Calculate the actual end column after post-processing
-                        let processed_end_col = mat.start() + processed_url.len();
+    /// Find the first URL in a line
+    fn find_first_url_in_line(&self, abs_line: usize) -> Option<UrlMatch> {
+        let line_text = self.get_line_text(abs_line)?;
+        let line_index = self.abs_line_to_line_index(abs_line);
 
-                        // Convert scrollback index to our line_index format:
-                        // scrollback line 0 (oldest) -> -(scrollback_len)
-                        // scrollback line (scrollback_len - 1) (newest) -> -1
-                        let line_index = (i as isize) - (scrollback_len as isize);
-                        self.url_matches.push(UrlMatch {
-                            line_index,
-                            start_col: mat.start(),
-                            end_col: processed_end_col,
-                            url: processed_url.to_string(),
-                        });
-                        if self.url_matches.len() >= MAX_URLS {
-                            break 'scrollback;
-                        }
-                    }
-                }
+        for mat in URL_REGEX.find_iter(&line_text) {
+            let processed_url = post_process_url(mat.as_str());
+            if processed_url.is_empty() {
+                continue;
+            }
+            let processed_end_col = mat.start() + processed_url.len();
+            return Some(UrlMatch {
+                line_index,
+                start_col: mat.start(),
+                end_col: processed_end_col,
+                url: processed_url.to_string(),
+            });
+        }
+
+        None
+    }
+
+    /// Find the last URL in a line
+    fn find_last_url_in_line(&self, abs_line: usize) -> Option<UrlMatch> {
+        let line_text = self.get_line_text(abs_line)?;
+        let line_index = self.abs_line_to_line_index(abs_line);
+
+        let mut last_match: Option<UrlMatch> = None;
+        for mat in URL_REGEX.find_iter(&line_text) {
+            let processed_url = post_process_url(mat.as_str());
+            if processed_url.is_empty() {
+                continue;
+            }
+            let processed_end_col = mat.start() + processed_url.len();
+            last_match = Some(UrlMatch {
+                line_index,
+                start_col: mat.start(),
+                end_col: processed_end_col,
+                url: processed_url.to_string(),
+            });
+        }
+
+        last_match
+    }
+
+    /// Find a URL in a line that starts before the given column
+    fn find_url_in_line_before(&self, abs_line: usize, before_col: usize) -> Option<UrlMatch> {
+        let line_text = self.get_line_text(abs_line)?;
+        let line_index = self.abs_line_to_line_index(abs_line);
+
+        let mut last_match: Option<UrlMatch> = None;
+        for mat in URL_REGEX.find_iter(&line_text) {
+            let processed_url = post_process_url(mat.as_str());
+            if processed_url.is_empty() {
+                continue;
+            }
+            // Only consider URLs that start before the given column
+            if mat.start() >= before_col {
+                break;
+            }
+            let processed_end_col = mat.start() + processed_url.len();
+            last_match = Some(UrlMatch {
+                line_index,
+                start_col: mat.start(),
+                end_col: processed_end_col,
+                url: processed_url.to_string(),
+            });
+        }
+
+        last_match
+    }
+
+    /// Find a URL in a line that starts at or after the given column
+    fn find_url_in_line_after(&self, abs_line: usize, after_col: usize) -> Option<UrlMatch> {
+        let line_text = self.get_line_text(abs_line)?;
+        let line_index = self.abs_line_to_line_index(abs_line);
+
+        for mat in URL_REGEX.find_iter(&line_text) {
+            let processed_url = post_process_url(mat.as_str());
+            if processed_url.is_empty() {
+                continue;
+            }
+            // Only consider URLs that start at or after the given column
+            if mat.start() >= after_col {
+                let processed_end_col = mat.start() + processed_url.len();
+                return Some(UrlMatch {
+                    line_index,
+                    start_col: mat.start(),
+                    end_col: processed_end_col,
+                    url: processed_url.to_string(),
+                });
             }
         }
 
-        // Initially select the first URL (which is now the most recent/bottom-most)
-        if !self.url_matches.is_empty() {
-            self.current_url_index = Some(0);
-            self.jump_to_current_url();
-        }
+        None
     }
 
     /// Jump to the next URL (toward bottom/more recent, j key)
+    /// Uses incremental search - only searches when needed
     pub fn next_url(&mut self) {
-        if self.url_matches.is_empty() {
-            return;
+        if let Some(url_match) = self.find_next_url_from_current(SearchDirection::Down) {
+            self.url_matches.clear();
+            self.url_matches.push(url_match);
+            self.current_url_index = Some(0);
+            self.jump_to_current_url();
         }
-        match self.current_url_index {
-            Some(idx) if idx < self.url_matches.len() - 1 => {
-                self.current_url_index = Some(idx + 1);
-            }
-            _ => {
-                // Wrap to start
-                self.current_url_index = Some(0);
-            }
-        }
-        self.jump_to_current_url();
+        // If no next URL found, stay at current position (no wrapping for incremental search)
     }
 
     /// Jump to the previous URL (toward top/older, k key)
+    /// Uses incremental search - only searches when needed
     pub fn prev_url(&mut self) {
-        if self.url_matches.is_empty() {
-            return;
+        if let Some(url_match) = self.find_next_url_from_current(SearchDirection::Up) {
+            self.url_matches.clear();
+            self.url_matches.push(url_match);
+            self.current_url_index = Some(0);
+            self.jump_to_current_url();
         }
-        match self.current_url_index {
-            Some(idx) if idx > 0 => {
-                self.current_url_index = Some(idx - 1);
-            }
-            _ => {
-                // Wrap to end
-                self.current_url_index = Some(self.url_matches.len() - 1);
-            }
-        }
-        self.jump_to_current_url();
+        // If no previous URL found, stay at current position (no wrapping for incremental search)
     }
 
     /// Adjust scroll_offset to make the current URL visible
