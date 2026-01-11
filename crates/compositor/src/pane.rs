@@ -386,9 +386,8 @@ impl Pane {
     /// Handle vim input in scrollback mode
     /// Returns true if the input was handled, false if it should be passed to search mode
     pub fn handle_vim_input(&mut self, input: &[u8]) -> bool {
-        // Update lines in case scrollback has changed
-        let lines = self.get_all_lines();
-        self.vim_engine.set_lines(lines);
+        // Note: Lines are captured once when entering scrollback mode (in enter_scrollback_mode)
+        // and are not updated on each keystroke since scrollback is frozen in this mode.
 
         // Update viewport dimensions in case of resize
         self.vim_engine.viewport_height = self.viewport_height();
