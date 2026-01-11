@@ -273,6 +273,15 @@ impl Pane {
         // Check if subprocess has exited
         if let Some(ref proc) = self.subprocess {
             if !proc.is_running() {
+                // Check if cursor is not at the start of a line (partial line output)
+                // If so, emit a partial line indicator before the prompt
+                let cursor_x = self.terminal_emulator.cursor_position().0;
+                if cursor_x != 0 {
+                    // Emit '%' with inverted colors, then reset, then newline
+                    // \x1b[7m = inverse video, \x1b[0m = reset, \r\n = newline
+                    self.terminal_emulator.process(b"\x1b[7m%\x1b[0m\r\n");
+                }
+
                 // Subprocess exited - we don't have access to exit code directly,
                 // so we assume 0 for now. The Drop impl will clean up the process.
                 drop(self.subprocess.take());
