@@ -164,6 +164,13 @@ impl Compositor {
                         self.render();
                         return;
                     }
+                    b'u' => {
+                        // Ctrl+b u - enter URL mode (automatically enters scrollback mode first)
+                        self.active_tab_mut().root.enter_scrollback_mode();
+                        self.active_tab_mut().root.enter_url_mode();
+                        self.render();
+                        return;
+                    }
                     0x02 => {
                         // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
                         self.active_tab_mut().root.handle_input(&[0x02]);
@@ -238,11 +245,23 @@ impl Compositor {
             return;
         }
 
+        // Check if we're in URL mode
+        if self.active_tab().root.is_in_url_mode() {
+            self.handle_url_input(input);
+            return;
+        }
+
         if input.len() == 1 {
             match input[0] {
                 b'/' => {
                     // / - enter search mode
                     self.active_tab_mut().root.enter_search_mode();
+                    self.render();
+                    return;
+                }
+                b'u' => {
+                    // u - enter URL mode
+                    self.active_tab_mut().root.enter_url_mode();
                     self.render();
                     return;
                 }
@@ -379,6 +398,62 @@ impl Compositor {
         }
     }
 
+    /// Handle input while in URL mode.
+    ///
+    /// Navigation keys:
+    /// - j: Next URL (toward bottom/more recent)
+    /// - k: Previous URL (toward top/older)
+    /// - Enter: Open the selected URL in default browser
+    /// - y: Yank (copy) the selected URL to clipboard
+    /// - Escape/q: Exit URL mode (back to scrollback mode)
+    fn handle_url_input(&mut self, input: &[u8]) {
+        if input.is_empty() {
+            return;
+        }
+
+        if input.len() == 1 {
+            match input[0] {
+                0x1b | b'q' => {
+                    // Escape or 'q' - exit URL mode (back to scrollback mode)
+                    self.active_tab_mut().root.exit_url_mode();
+                    self.render();
+                }
+                b'j' => {
+                    // j - next URL (toward bottom/more recent)
+                    self.active_tab_mut().root.next_url();
+                    self.render();
+                }
+                b'k' => {
+                    // k - previous URL (toward top/older)
+                    self.active_tab_mut().root.prev_url();
+                    self.render();
+                }
+                0x0d => {
+                    // Enter - open the selected URL in default browser
+                    if let Some(url) = self.active_tab().root.get_current_url() {
+                        let _ = open_url(&url);
+                    }
+                    // Exit URL mode after opening
+                    self.active_tab_mut().root.exit_url_mode();
+                    self.active_tab_mut().root.exit_scrollback_mode();
+                    self.render();
+                }
+                b'y' => {
+                    // y - yank (copy) the selected URL to clipboard
+                    if let Some(url) = self.active_tab().root.get_current_url() {
+                        let _ = copy_to_clipboard(&url);
+                    }
+                    // Exit URL mode after yanking
+                    self.active_tab_mut().root.exit_url_mode();
+                    self.active_tab_mut().root.exit_scrollback_mode();
+                    self.render();
+                }
+                _ => {
+                    // Ignore other keys
+                }
+            }
+        }
+    }
     /// Get a reference to the currently active tab
     #[allow(dead_code)]
     pub fn active_tab(&self) -> &Tab {
@@ -806,6 +881,90 @@ impl Compositor {
             return;
         }
 
+        // Check if we're in URL mode (sub-mode of scrollback)
+        if self.tabs[self.active_tab].root.is_in_url_mode() {
+            // Create attributes for URL indicator
+            let mut url_attrs = emulator::CellAttributes::default();
+            url_attrs.bg_color = Some(emulator::Color::Cyan);
+            url_attrs.fg_color = Some(emulator::Color::Black);
+            url_attrs.bold = true;
+
+            if let Some((current_idx, total)) = self.tabs[self.active_tab].root.get_url_info() {
+                // Show URL mode label on the left after tabs
+                let url_label = " URL ";
+                for ch in url_label.chars() {
+                    if x_pos < cols {
+                        self.global_emulator.grid_mut().set_cell(
+                            x_pos,
+                            status_bar_y,
+                            emulator::Cell::new(ch, url_attrs.clone()),
+                        );
+                        x_pos += 1;
+                    }
+                }
+
+                // Show current URL if selected (truncated if too long)
+                if let Some(url) = self.tabs[self.active_tab].root.get_current_url() {
+                    // Calculate available space for URL (leave room for count on right)
+                    let count_text = if total == 0 {
+                        " No URLs ".to_string()
+                    } else if total >= 100 {
+                        let current_display = current_idx.map(|i| i + 1).unwrap_or(0);
+                        format!(" {}/100+ ", current_display)
+                    } else {
+                        let current_display = current_idx.map(|i| i + 1).unwrap_or(0);
+                        format!(" {}/{} ", current_display, total)
+                    };
+                    let available = cols.saturating_sub(x_pos).saturating_sub(count_text.len());
+
+                    let display_url = if url.len() > available && available > 3 {
+                        format!("{}...", &url[..available.saturating_sub(3)])
+                    } else {
+                        url.clone()
+                    };
+
+                    for ch in display_url.chars() {
+                        if x_pos < cols.saturating_sub(count_text.len()) {
+                            self.global_emulator.grid_mut().set_cell(
+                                x_pos,
+                                status_bar_y,
+                                emulator::Cell::new(ch, url_attrs.clone()),
+                            );
+                            x_pos += 1;
+                        }
+                    }
+
+                    // Show URL count on the right
+                    let text_start_x = cols.saturating_sub(count_text.len());
+                    for (i, ch) in count_text.chars().enumerate() {
+                        let x = text_start_x + i;
+                        if x < cols {
+                            self.global_emulator.grid_mut().set_cell(
+                                x,
+                                status_bar_y,
+                                emulator::Cell::new(ch, url_attrs.clone()),
+                            );
+                        }
+                    }
+                } else {
+                    // No URL selected
+                    let no_url_text = " No URLs found ";
+                    for ch in no_url_text.chars() {
+                        if x_pos < cols {
+                            self.global_emulator.grid_mut().set_cell(
+                                x_pos,
+                                status_bar_y,
+                                emulator::Cell::new(ch, url_attrs.clone()),
+                            );
+                            x_pos += 1;
+                        }
+                    }
+                }
+                return;
+            }
+            return;
+        }
+
         // Check if we're in scrollback mode and render scroll indicator instead of date/time
         let right_text = if self.tabs[self.active_tab].root.is_in_scrollback_mode() {
             // Create attributes for scrollback indicator
@@ -1029,6 +1188,34 @@ fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
     {
         // No clipboard support on other platforms
         let _ = text;
+        Ok(())
+    }
+}
+
+/// Open a URL in the default browser.
+///
+/// On macOS, this uses `open`.
+/// On Linux, this uses `xdg-open`.
+/// On other platforms, this is a no-op.
+fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        Command::new("open").arg(url).spawn()?.wait()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        Command::new("xdg-open").arg(url).spawn()?.wait()?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // No URL open support on other platforms
+        let _ = url;
         Ok(())
     }
 }

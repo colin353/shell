@@ -400,6 +400,118 @@ impl PaneCell {
         }
     }
 
+    /// Enter URL mode on the focused pane
+    pub fn enter_url_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.enter_url_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.enter_url_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exit URL mode on the focused pane
+    pub fn exit_url_mode(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.exit_url_mode();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.exit_url_mode();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if the focused pane is in URL mode
+    pub fn is_in_url_mode(&self) -> bool {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.is_in_url_mode(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.is_in_url_mode();
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Jump to next URL
+    pub fn next_url(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.next_url();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.next_url();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Jump to previous URL
+    pub fn prev_url(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.prev_url();
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.prev_url();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get URL info from the focused pane (current index, total count)
+    pub fn get_url_info(&self) -> Option<(Option<usize>, usize)> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                let (current, total) = pane.url_match_info();
+                Some((current, total))
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_url_info();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Get the currently selected URL from the focused pane
+    pub fn get_current_url(&self) -> Option<String> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.get_current_url().map(|s| s.to_string()),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_current_url();
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Move focus in the specified direction.
     ///
     /// Returns true if focus was successfully moved, false otherwise.
@@ -554,6 +666,9 @@ impl PaneCell {
                     search_query: String::new(),
                     search_matches: Vec::new(),
                     current_match_index: None,
+                    url_mode: false,
+                    url_matches: Vec::new(),
+                    current_url_index: None,
                     vim_engine: libvim::VimCursorEngine::new_owned(
                         Vec::new(),
                         new_height,
@@ -574,6 +689,9 @@ impl PaneCell {
                         search_query: String::new(),
                         search_matches: Vec::new(),
                         current_match_index: None,
+                        url_mode: false,
+                        url_matches: Vec::new(),
+                        current_url_index: None,
                         vim_engine: libvim::VimCursorEngine::new_owned(Vec::new(), 1, 1),
                     }),
                 );
@@ -652,6 +770,20 @@ impl PaneCell {
                     for (i, m) in pane.search_matches.iter().enumerate() {
                         if m.line_index == line_index && col >= m.start_col && col < m.end_col {
                             let is_current = Some(i) == pane.current_match_index;
+                            return Some(is_current);
+                        }
+                    }
+                    None
+                };
+
+                // Build a helper to check if a position matches a URL
+                let is_url_match = |line_index: isize, col: usize| -> Option<bool> {
+                    if !pane.url_mode || pane.url_matches.is_empty() {
+                        return None;
+                    }
+                    for (i, m) in pane.url_matches.iter().enumerate() {
+                        if m.line_index == line_index && col >= m.start_col && col < m.end_col {
+                            let is_current = Some(i) == pane.current_url_index;
                             return Some(is_current);
                         }
                     }
@@ -757,6 +889,21 @@ impl PaneCell {
                                                 // Other matches: yellow background
                                                 cell.attrs.bg_color = Some(emulator::Color::Yellow);
                                                 cell.attrs.fg_color = Some(emulator::Color::Black);
+                                            }
+                                        } else if let Some(is_current) =
+                                            is_url_match(line_index, col)
+                                        {
+                                            // URL highlighting
+                                            if is_current {
+                                                // Current URL: cyan background, black text, bold, underline
+                                                cell.attrs.bg_color = Some(emulator::Color::Cyan);
+                                                cell.attrs.fg_color = Some(emulator::Color::Black);
+                                                cell.attrs.bold = true;
+                                                cell.attrs.underline = true;
+                                            } else {
+                                                // Other URLs: blue text, underline
+                                                cell.attrs.fg_color = Some(emulator::Color::Blue);
+                                                cell.attrs.underline = true;
                                             }
                                         } else if is_in_selection(abs_line, col) {
                                             // Visual selection: inverse video

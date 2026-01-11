@@ -1,4 +1,86 @@
 use pty;
+use regex::Regex;
+use std::sync::LazyLock;
+
+/// Regex pattern for matching URLs (based on Alacritty's approach)
+/// Matches common URL schemes followed by valid URL characters
+static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    // Supported schemes: ipfs, ipns, magnet, mailto, gemini, gopher, https, http, news, file, git, ssh, ftp
+    // Excluded characters: C0/C1 control chars, angle brackets, quotes, whitespace, braces, caret, backtick, backslash
+    Regex::new(concat!(
+        r"(?i)(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)",
+        r#"[^\x00-\x1f\x7f-\x9f<>"\s{}\^`\\]+"#
+    )).unwrap()
+});
+
+/// Post-process a URL match to handle bracket balancing and trailing delimiter trimming.
+/// This follows Alacritty's approach for better URL extraction.
+fn post_process_url(url: &str) -> &str {
+    let mut result = url;
+
+    // Stage 1: Bracket balancing
+    // Track opening/closing brackets and truncate if a closer has no matching opener
+    result = balance_brackets(result);
+
+    // Stage 2: Trim trailing delimiters that are likely sentence punctuation
+    result = trim_trailing_delimiters(result);
+
+    result
+}
+
+/// Balance brackets in a URL, truncating if a closing bracket has no matching opener.
+fn balance_brackets(url: &str) -> &str {
+    let bytes = url.as_bytes();
+    let mut paren_depth: i32 = 0; // ()
+    let mut bracket_depth: i32 = 0; // []
+
+    let mut last_valid_end = 0;
+
+    for (i, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' => paren_depth += 1,
+            b')' => {
+                paren_depth -= 1;
+                if paren_depth < 0 {
+                    // Unmatched closing paren - truncate here
+                    return &url[..last_valid_end];
+                }
+            }
+            b'[' => bracket_depth += 1,
+            b']' => {
+                bracket_depth -= 1;
+                if bracket_depth < 0 {
+                    // Unmatched closing bracket - truncate here
+                    return &url[..last_valid_end];
+                }
+            }
+            _ => {}
+        }
+        last_valid_end = i + 1;
+    }
+
+    url
+}
+
+/// Trim trailing punctuation that's likely sentence delimiters, not part of the URL.
+fn trim_trailing_delimiters(url: &str) -> &str {
+    let trailing_delimiters = ['.', ',', ':', ';', '?', '!', '(', '[', '\''];
+
+    let mut result = url;
+    while !result.is_empty() {
+        if let Some(last_char) = result.chars().last() {
+            if trailing_delimiters.contains(&last_char) {
+                result = &result[..result.len() - last_char.len_utf8()];
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    result
+}
 
 /// A match found during search, storing the line index and column range
 #[derive(Clone, Debug, PartialEq)]
@@ -10,6 +92,20 @@ pub struct SearchMatch {
     pub start_col: usize,
     /// Ending column of the match (exclusive)
     pub end_col: usize,
+}
+
+/// A URL match found in the terminal, storing the line index, column range, and the URL text
+#[derive(Clone, Debug, PartialEq)]
+pub struct UrlMatch {
+    /// Line index (negative values are scrollback lines, counting from -1 as most recent scrollback)
+    /// 0 and positive values are grid lines
+    pub line_index: isize,
+    /// Starting column of the match
+    pub start_col: usize,
+    /// Ending column of the match (exclusive)
+    pub end_col: usize,
+    /// The actual URL text
+    pub url: String,
 }
 
 pub struct Pane {
@@ -28,6 +124,12 @@ pub struct Pane {
     pub search_matches: Vec<SearchMatch>,
     /// Index of the currently selected match (if any)
     pub current_match_index: Option<usize>,
+    /// Whether the pane is in URL mode (sub-mode of scrollback)
+    pub url_mode: bool,
+    /// All URLs found in the terminal content
+    pub url_matches: Vec<UrlMatch>,
+    /// Index of the currently selected URL (if any)
+    pub current_url_index: Option<usize>,
 
     /// Vim cursor engine for scrollback navigation (persisted across inputs)
     pub vim_engine: libvim::VimCursorEngine<'static>,
@@ -110,6 +212,10 @@ impl Pane {
         self.search_query.clear();
         self.search_matches.clear();
         self.current_match_index = None;
+        // Also clear URL mode state
+        self.url_mode = false;
+        self.url_matches.clear();
+        self.current_url_index = None;
         // Reset vim state
         self.vim_engine.mode = libvim::Mode::Normal;
         self.vim_engine.input_state = libvim::InputState::default();
@@ -647,5 +753,367 @@ impl Pane {
         }
 
         lines
+    }
+
+    /// Enter URL mode (must be in scrollback mode first)
+    pub fn enter_url_mode(&mut self) {
+        if self.scrollback_mode {
+            self.url_mode = true;
+            self.find_urls();
+        }
+    }
+
+    /// Exit URL mode (back to scrollback mode)
+    pub fn exit_url_mode(&mut self) {
+        self.url_mode = false;
+        self.url_matches.clear();
+        self.current_url_index = None;
+    }
+
+    /// Check if in URL mode
+    pub fn is_in_url_mode(&self) -> bool {
+        self.url_mode
+    }
+
+    /// Find all URLs in the terminal content
+    fn find_urls(&mut self) {
+        self.url_matches.clear();
+        self.current_url_index = None;
+
+        const MAX_URLS: usize = 100;
+
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
+
+        // Search from bottom to top (most recent first) so we find the most relevant URLs
+        // when hitting the MAX_URLS limit
+
+        // First, search current grid from bottom to top
+        'grid: for y in (0..grid.rows).rev() {
+            if let Some(row) = grid.get_row(y) {
+                let line_text: String = row.iter().map(|c| c.character).collect();
+
+                // Find all URLs in this line
+                for mat in URL_REGEX.find_iter(&line_text) {
+                    // Apply post-processing (bracket balancing and trailing delimiter trimming)
+                    let raw_url = mat.as_str();
+                    let processed_url = post_process_url(raw_url);
+
+                    // Skip empty URLs after processing
+                    if processed_url.is_empty() {
+                        continue;
+                    }
+
+                    // Calculate the actual end column after post-processing
+                    let processed_end_col = mat.start() + processed_url.len();
+
+                    self.url_matches.push(UrlMatch {
+                        line_index: y as isize,
+                        start_col: mat.start(),
+                        end_col: processed_end_col,
+                        url: processed_url.to_string(),
+                    });
+                    if self.url_matches.len() >= MAX_URLS {
+                        break 'grid;
+                    }
+                }
+            }
+        }
+
+        // Then search scrollback from newest to oldest (only if we haven't hit the limit)
+        if self.url_matches.len() < MAX_URLS {
+            'scrollback: for i in (0..scrollback_len).rev() {
+                if let Some(row) = grid.get_scrollback_row(i) {
+                    let line_text: String = row.iter().map(|c| c.character).collect();
+
+                    // Find all URLs in this line
+                    for mat in URL_REGEX.find_iter(&line_text) {
+                        // Apply post-processing (bracket balancing and trailing delimiter trimming)
+                        let raw_url = mat.as_str();
+                        let processed_url = post_process_url(raw_url);
+
+                        // Skip empty URLs after processing
+                        if processed_url.is_empty() {
+                            continue;
+                        }
+
+                        // Calculate the actual end column after post-processing
+                        let processed_end_col = mat.start() + processed_url.len();
+
+                        // Convert scrollback index to our line_index format:
+                        // scrollback line 0 (oldest) -> -(scrollback_len)
+                        // scrollback line (scrollback_len - 1) (newest) -> -1
+                        let line_index = (i as isize) - (scrollback_len as isize);
+                        self.url_matches.push(UrlMatch {
+                            line_index,
+                            start_col: mat.start(),
+                            end_col: processed_end_col,
+                            url: processed_url.to_string(),
+                        });
+                        if self.url_matches.len() >= MAX_URLS {
+                            break 'scrollback;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Initially select the first URL (which is now the most recent/bottom-most)
+        if !self.url_matches.is_empty() {
+            self.current_url_index = Some(0);
+            self.jump_to_current_url();
+        }
+    }
+
+    /// Jump to the next URL (toward bottom/more recent, j key)
+    pub fn next_url(&mut self) {
+        if self.url_matches.is_empty() {
+            return;
+        }
+        match self.current_url_index {
+            Some(idx) if idx < self.url_matches.len() - 1 => {
+                self.current_url_index = Some(idx + 1);
+            }
+            _ => {
+                // Wrap to start
+                self.current_url_index = Some(0);
+            }
+        }
+        self.jump_to_current_url();
+    }
+
+    /// Jump to the previous URL (toward top/older, k key)
+    pub fn prev_url(&mut self) {
+        if self.url_matches.is_empty() {
+            return;
+        }
+        match self.current_url_index {
+            Some(idx) if idx > 0 => {
+                self.current_url_index = Some(idx - 1);
+            }
+            _ => {
+                // Wrap to end
+                self.current_url_index = Some(self.url_matches.len() - 1);
+            }
+        }
+        self.jump_to_current_url();
+    }
+
+    /// Adjust scroll_offset to make the current URL visible
+    fn jump_to_current_url(&mut self) {
+        if let Some(idx) = self.current_url_index {
+            if let Some(m) = self.url_matches.get(idx) {
+                let grid = self.terminal_emulator.grid();
+                let scrollback_len = grid.scrollback_len();
+                let visible_rows = grid.rows;
+
+                if m.line_index < 0 {
+                    // This is a scrollback line
+                    let lines_back = (-m.line_index) as usize;
+                    let min_offset = lines_back;
+                    let max_offset = (visible_rows + lines_back).saturating_sub(1);
+                    let ideal_offset = lines_back + visible_rows / 2;
+
+                    self.scroll_offset = ideal_offset
+                        .max(min_offset)
+                        .min(max_offset)
+                        .min(scrollback_len);
+                } else {
+                    // This is a grid line
+                    let grid_line = m.line_index as usize;
+
+                    if grid_line < visible_rows {
+                        let max_offset = visible_rows - grid_line - 1;
+                        if self.scroll_offset > max_offset {
+                            self.scroll_offset = max_offset;
+                        }
+                    } else {
+                        self.scroll_offset = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get the currently selected URL
+    pub fn get_current_url(&self) -> Option<&str> {
+        self.current_url_index
+            .and_then(|idx| self.url_matches.get(idx))
+            .map(|m| m.url.as_str())
+    }
+
+    /// Get URL info for status bar (current index, total count)
+    pub fn url_match_info(&self) -> (Option<usize>, usize) {
+        (self.current_url_index, self.url_matches.len())
+    }
+
+    /// Get URL matches for highlighting
+    pub fn get_url_matches(&self) -> &[UrlMatch] {
+        &self.url_matches
+    }
+
+    /// Get the current URL index
+    pub fn current_url_index(&self) -> Option<usize> {
+        self.current_url_index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_url_regex_basic() {
+        // Basic HTTP/HTTPS URLs
+        assert!(URL_REGEX.is_match("https://example.com"));
+        assert!(URL_REGEX.is_match("http://example.com"));
+        assert!(URL_REGEX.is_match("https://example.com/path?query=value"));
+    }
+
+    #[test]
+    fn test_url_regex_schemes() {
+        // Various supported schemes
+        assert!(URL_REGEX.is_match("mailto:user@example.com"));
+        assert!(URL_REGEX.is_match("ftp://ftp.example.com/file.txt"));
+        assert!(URL_REGEX.is_match("ssh://user@host"));
+        assert!(URL_REGEX.is_match("git://github.com/user/repo.git"));
+        assert!(URL_REGEX.is_match("file:///home/user/doc.txt"));
+    }
+
+    #[test]
+    fn test_url_regex_case_insensitive() {
+        // Case insensitivity
+        assert!(URL_REGEX.is_match("HTTPS://EXAMPLE.COM"));
+        assert!(URL_REGEX.is_match("Http://Example.Com"));
+    }
+
+    #[test]
+    fn test_url_regex_invalid() {
+        // Invalid URLs (missing scheme or malformed)
+        assert!(!URL_REGEX.is_match("example.com")); // No scheme
+        assert!(!URL_REGEX.is_match("http://")); // Empty body
+        assert!(!URL_REGEX.is_match("not a url"));
+    }
+
+    #[test]
+    fn test_bracket_balancing_matched_parens() {
+        // Matched parentheses should be preserved
+        assert_eq!(
+            balance_brackets("http://example.com/page_(1)"),
+            "http://example.com/page_(1)"
+        );
+        assert_eq!(
+            balance_brackets("http://example.com/wiki/Thing_(concept)"),
+            "http://example.com/wiki/Thing_(concept)"
+        );
+    }
+
+    #[test]
+    fn test_bracket_balancing_unmatched_parens() {
+        // Unmatched closing paren should truncate
+        assert_eq!(
+            balance_brackets("http://example.com)"),
+            "http://example.com"
+        );
+        assert_eq!(
+            balance_brackets("http://example.com/page)more"),
+            "http://example.com/page"
+        );
+    }
+
+    #[test]
+    fn test_bracket_balancing_unmatched_brackets() {
+        // Unmatched closing bracket should truncate
+        assert_eq!(
+            balance_brackets("http://example.com]"),
+            "http://example.com"
+        );
+        assert_eq!(
+            balance_brackets("http://example.com/path]rest"),
+            "http://example.com/path"
+        );
+    }
+
+    #[test]
+    fn test_bracket_balancing_nested() {
+        // Nested brackets should work
+        assert_eq!(
+            balance_brackets("http://example.com/f(g(x))"),
+            "http://example.com/f(g(x))"
+        );
+    }
+
+    #[test]
+    fn test_trailing_delimiter_trimming() {
+        // Trailing punctuation should be trimmed
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com."),
+            "http://example.com"
+        );
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com,"),
+            "http://example.com"
+        );
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com;"),
+            "http://example.com"
+        );
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com:"),
+            "http://example.com"
+        );
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com?"),
+            "http://example.com"
+        );
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com!"),
+            "http://example.com"
+        );
+    }
+
+    #[test]
+    fn test_trailing_delimiter_preserves_query() {
+        // Query strings with ? should not be stripped if not trailing
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com/path?query=1"),
+            "http://example.com/path?query=1"
+        );
+    }
+
+    #[test]
+    fn test_trailing_delimiter_multiple() {
+        // Multiple trailing delimiters
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com.."),
+            "http://example.com"
+        );
+        assert_eq!(
+            trim_trailing_delimiters("http://example.com.,"),
+            "http://example.com"
+        );
+    }
+
+    #[test]
+    fn test_post_process_url_combined() {
+        // Combined bracket balancing and trailing trimming
+        assert_eq!(
+            post_process_url("http://example.com)."),
+            "http://example.com"
+        );
+        assert_eq!(
+            post_process_url("http://example.com/page_(1)."),
+            "http://example.com/page_(1)"
+        );
+    }
+
+    #[test]
+    fn test_post_process_url_embedded_in_parens() {
+        // URL embedded in parentheses - simulates "(see http://example.com)"
+        // The regex would match "http://example.com)" and post-processing fixes it
+        assert_eq!(
+            post_process_url("http://example.com)"),
+            "http://example.com"
+        );
     }
 }
