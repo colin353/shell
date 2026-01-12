@@ -16,11 +16,12 @@
 //! full terminal capabilities.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-mod history;
+pub mod history;
 
-use history::ShellHistory;
+pub use history::{BackupConfig, CommandSource, EntryId, HistoryEntry, SearchResult, ShellHistory};
 
 /// Error type for shell operations
 #[derive(Debug)]
@@ -79,6 +80,8 @@ pub enum ShellAction {
         env: Vec<(String, String)>,
         /// Working directory for the subprocess
         cwd: std::path::PathBuf,
+        /// History entry ID for tracking this command's exit status
+        history_id: Option<EntryId>,
     },
 
     /// Shell wants to exit.
@@ -86,17 +89,96 @@ pub enum ShellAction {
 }
 
 /// Shared shell state that can be accessed across threads
-struct ShellCore {
+pub struct ShellCore {
     env: RwLock<HashMap<String, String>>,
     history: ShellHistory,
 }
 
 impl ShellCore {
-    fn new() -> Self {
-        ShellCore {
-            env: RwLock::new(HashMap::new()),
-            history: ShellHistory::default(),
+    /// Create a new ShellCore with default history path (~/.myshell_history.log)
+    pub fn new() -> Result<Self, std::io::Error> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let history_path = PathBuf::from(&home).join(".myshell_history.log");
+        Self::with_history_path(history_path)
+    }
+
+    /// Create a new ShellCore with a custom history path
+    pub fn with_history_path(history_path: PathBuf) -> Result<Self, std::io::Error> {
+        let is_new_history = !history_path.exists();
+        let history = ShellHistory::new(&history_path)?;
+
+        // If this is a brand new history, try to import from zsh/bash
+        if is_new_history {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            let home_path = PathBuf::from(&home);
+
+            // Try to import zsh history
+            let zsh_history = home_path.join(".zsh_history");
+            if zsh_history.exists() {
+                match history.import_zsh_history(&zsh_history) {
+                    Ok(count) => {
+                        if count > 0 {
+                            eprintln!("Imported {} entries from .zsh_history", count);
+                        }
+                    }
+                    Err(e) => eprintln!("Warning: failed to import .zsh_history: {}", e),
+                }
+            }
+
+            // Try to import bash history
+            let bash_history = home_path.join(".bash_history");
+            if bash_history.exists() {
+                match history.import_bash_history(&bash_history) {
+                    Ok(count) => {
+                        if count > 0 {
+                            eprintln!("Imported {} entries from .bash_history", count);
+                        }
+                    }
+                    Err(e) => eprintln!("Warning: failed to import .bash_history: {}", e),
+                }
+            }
         }
+
+        Ok(ShellCore {
+            env: RwLock::new(HashMap::new()),
+            history,
+        })
+    }
+
+    /// Get a reference to the shell history
+    pub fn history(&self) -> &ShellHistory {
+        &self.history
+    }
+
+    /// Record a command execution
+    pub fn record_command(
+        &self,
+        command: String,
+        source: CommandSource,
+        cwd: Option<String>,
+    ) -> Result<EntryId, std::io::Error> {
+        self.history.record_command_with_cwd(command, source, cwd)
+    }
+
+    /// Record the exit status of a command
+    pub fn record_exit(
+        &self,
+        id: &EntryId,
+        exit_code: i32,
+        duration_ms: u64,
+    ) -> Result<(), std::io::Error> {
+        self.history.record_exit(id, exit_code, duration_ms)
+    }
+
+    /// Mark a command as killed (Ctrl+C)
+    pub fn mark_killed(&self, id: &EntryId) -> Result<(), std::io::Error> {
+        self.history.mark_killed(id)
+    }
+}
+
+impl Default for ShellCore {
+    fn default() -> Self {
+        Self::new().expect("Failed to create default ShellCore")
     }
 }
 
@@ -117,7 +199,8 @@ impl ShellCore {
 /// # Example
 ///
 /// ```ignore
-/// let mut shell = Shell::new(80, 24);
+/// let core = Arc::new(ShellCore::new().unwrap());
+/// let mut shell = Shell::with_core(Arc::clone(&core), 80, 24);
 /// let mut subprocess: Option<PtyProcess> = None;
 ///
 /// loop {
@@ -148,6 +231,8 @@ pub struct Shell {
     rows: u16,
     /// Current input line being edited
     input_buffer: String,
+    /// Saved input buffer when navigating history
+    saved_input: Option<String>,
     /// Cursor position within input_buffer
     cursor_pos: usize,
     /// Current working directory
@@ -156,29 +241,85 @@ pub struct Shell {
     should_exit: bool,
     /// Pending action from command execution (checked after input processing)
     pending_action: Option<ShellAction>,
+    /// Current position in history navigation (0 = current input, 1 = last command, etc.)
+    history_position: usize,
+    /// Cached history entries for navigation (refreshed on each new prompt)
+    history_cache: Vec<String>,
+    /// Escape sequence buffer for parsing multi-byte sequences
+    escape_buffer: Vec<u8>,
+    /// Whether we're currently parsing an escape sequence
+    in_escape_sequence: bool,
+    /// Currently running command's history ID (for tracking exit status)
+    current_command_id: Option<EntryId>,
+    /// Start time of currently running command
+    command_start_time: Option<std::time::Instant>,
 }
 
 impl Shell {
     /// Create a new shell instance with the given terminal dimensions.
+    /// Creates its own ShellCore instance.
     ///
     /// Returns the shell and initial output (the prompt) that should be
     /// written to the terminal.
     pub fn new(cols: u16, rows: u16) -> (Self, Vec<u8>) {
+        let core = Arc::new(ShellCore::new().expect("Failed to create ShellCore"));
+        Self::with_core(core, cols, rows)
+    }
+
+    /// Create a new shell instance with a shared ShellCore.
+    /// Use this to share history and environment across multiple shell panes.
+    ///
+    /// Returns the shell and initial output (the prompt) that should be
+    /// written to the terminal.
+    pub fn with_core(core: Arc<ShellCore>, cols: u16, rows: u16) -> (Self, Vec<u8>) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
 
+        // Build initial history cache
+        let history_cache: Vec<String> = core
+            .history()
+            .recent(1000)
+            .into_iter()
+            .map(|e| e.command)
+            .collect();
+
         let shell = Shell {
-            core: Arc::new(ShellCore::new()),
+            core,
             cols,
             rows,
             input_buffer: String::new(),
+            saved_input: None,
             cursor_pos: 0,
             cwd,
             should_exit: false,
             pending_action: None,
+            history_position: 0,
+            history_cache,
+            escape_buffer: Vec::new(),
+            in_escape_sequence: false,
+            current_command_id: None,
+            command_start_time: None,
         };
 
         let prompt = shell.get_prompt();
         (shell, prompt.into_bytes())
+    }
+
+    /// Get a reference to the shared ShellCore
+    pub fn core(&self) -> &Arc<ShellCore> {
+        &self.core
+    }
+
+    /// Refresh the history cache (call this after executing a command)
+    fn refresh_history_cache(&mut self) {
+        self.history_cache = self
+            .core
+            .history()
+            .recent(1000)
+            .into_iter()
+            .map(|e| e.command)
+            .collect();
+        self.history_position = 0;
+        self.saved_input = None;
     }
 
     /// Process input from the terminal and return the action to take.
@@ -209,6 +350,7 @@ impl Shell {
                         args,
                         env,
                         cwd,
+                        history_id,
                     } => {
                         return ShellAction::SpawnSubprocess {
                             output,
@@ -216,6 +358,7 @@ impl Shell {
                             args,
                             env,
                             cwd,
+                            history_id,
                         };
                     }
                     other => return other,
@@ -241,6 +384,22 @@ impl Shell {
     ///
     /// Returns output to write to the terminal (typically a newline + prompt).
     pub fn subprocess_exited(&mut self, exit_code: i32) -> Vec<u8> {
+        // Record the exit status in history
+        if let Some(id) = self.current_command_id.take() {
+            let duration_ms = self
+                .command_start_time
+                .take()
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+
+            if let Err(e) = self.core.record_exit(&id, exit_code, duration_ms) {
+                eprintln!("Warning: failed to record exit status: {}", e);
+            }
+        }
+
+        // Refresh history cache for arrow key navigation
+        self.refresh_history_cache();
+
         let mut output = Vec::new();
 
         // Optionally show exit code for non-zero exits
@@ -249,6 +408,26 @@ impl Shell {
         }
 
         // Show prompt
+        output.extend(self.get_prompt().as_bytes());
+        output
+    }
+
+    /// Notify the shell that a subprocess was killed (e.g., by Ctrl+C).
+    ///
+    /// Similar to `subprocess_exited` but marks the command as killed.
+    pub fn subprocess_killed(&mut self) -> Vec<u8> {
+        // Record as killed in history
+        if let Some(id) = self.current_command_id.take() {
+            if let Err(e) = self.core.mark_killed(&id) {
+                eprintln!("Warning: failed to mark command as killed: {}", e);
+            }
+        }
+        self.command_start_time = None;
+
+        // Refresh history cache for arrow key navigation
+        self.refresh_history_cache();
+
+        let mut output = Vec::new();
         output.extend(self.get_prompt().as_bytes());
         output
     }
@@ -272,6 +451,20 @@ impl Shell {
     // --- Private implementation ---
 
     fn process_input_byte(&mut self, byte: u8) -> Option<Vec<u8>> {
+        // Handle escape sequences
+        if self.in_escape_sequence {
+            self.escape_buffer.push(byte);
+            return self.try_parse_escape_sequence();
+        }
+
+        if byte == 0x1b {
+            // ESC - start of escape sequence
+            self.in_escape_sequence = true;
+            self.escape_buffer.clear();
+            self.escape_buffer.push(byte);
+            return None;
+        }
+
         match byte {
             // Enter - execute command
             b'\r' | b'\n' => {
@@ -358,18 +551,185 @@ impl Shell {
         format!("{} $ ", dir_name)
     }
 
+    /// Try to parse a complete escape sequence from the buffer.
+    /// Returns Some(output) if sequence is complete, None if need more bytes.
+    fn try_parse_escape_sequence(&mut self) -> Option<Vec<u8>> {
+        // Escape sequences we handle:
+        // ESC [ A  - Up arrow
+        // ESC [ B  - Down arrow
+        // ESC [ C  - Right arrow
+        // ESC [ D  - Left arrow
+        // ESC [ H  - Home
+        // ESC [ F  - End
+
+        if self.escape_buffer.len() < 2 {
+            return None;
+        }
+
+        // Check for CSI sequence (ESC [)
+        if self.escape_buffer[1] != b'[' {
+            // Not a CSI sequence we understand, abort
+            self.in_escape_sequence = false;
+            self.escape_buffer.clear();
+            return None;
+        }
+
+        if self.escape_buffer.len() < 3 {
+            return None;
+        }
+
+        let result = match self.escape_buffer[2] {
+            b'A' => self.history_up(),   // Up arrow
+            b'B' => self.history_down(), // Down arrow
+            b'C' => self.cursor_right(), // Right arrow
+            b'D' => self.cursor_left(),  // Left arrow
+            b'H' => self.cursor_home(),  // Home
+            b'F' => self.cursor_end(),   // End
+            b'0'..=b'9' => {
+                // Could be an extended sequence like ESC [ 1 ~, need more bytes
+                // For now, just wait for more or timeout
+                if self.escape_buffer.len() < 4 {
+                    return None;
+                }
+                // Ignore unknown extended sequences
+                None
+            }
+            _ => None, // Unknown sequence
+        };
+
+        self.in_escape_sequence = false;
+        self.escape_buffer.clear();
+        result
+    }
+
+    /// Navigate to previous command in history (Up arrow)
+    fn history_up(&mut self) -> Option<Vec<u8>> {
+        if self.history_cache.is_empty() {
+            return None;
+        }
+
+        // Save current input if we're just starting to navigate
+        if self.history_position == 0 {
+            self.saved_input = Some(self.input_buffer.clone());
+        }
+
+        // Move to previous command (history_cache is most-recent-first)
+        if self.history_position < self.history_cache.len() {
+            self.history_position += 1;
+            let cmd = self.history_cache[self.history_position - 1].clone();
+            return Some(self.replace_input_line(&cmd));
+        }
+
+        None
+    }
+
+    /// Navigate to next command in history (Down arrow)
+    fn history_down(&mut self) -> Option<Vec<u8>> {
+        if self.history_position == 0 {
+            return None;
+        }
+
+        self.history_position -= 1;
+
+        if self.history_position == 0 {
+            // Restore saved input
+            let saved = self.saved_input.take().unwrap_or_default();
+            return Some(self.replace_input_line(&saved));
+        }
+
+        let cmd = self.history_cache[self.history_position - 1].clone();
+        Some(self.replace_input_line(&cmd))
+    }
+
+    /// Replace the current input line with new content
+    fn replace_input_line(&mut self, new_content: &str) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        // Move cursor to start of input
+        if self.cursor_pos > 0 {
+            output.extend(format!("\x1b[{}D", self.cursor_pos).as_bytes());
+        }
+
+        // Clear from cursor to end of line
+        output.extend(b"\x1b[K");
+
+        // Write new content
+        output.extend(new_content.as_bytes());
+
+        // Update state
+        self.input_buffer = new_content.to_string();
+        self.cursor_pos = self.input_buffer.len();
+
+        output
+    }
+
+    /// Move cursor right
+    fn cursor_right(&mut self) -> Option<Vec<u8>> {
+        if self.cursor_pos < self.input_buffer.len() {
+            self.cursor_pos += 1;
+            Some(b"\x1b[C".to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// Move cursor left
+    fn cursor_left(&mut self) -> Option<Vec<u8>> {
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+            Some(b"\x1b[D".to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// Move cursor to start of line
+    fn cursor_home(&mut self) -> Option<Vec<u8>> {
+        if self.cursor_pos > 0 {
+            let output = format!("\x1b[{}D", self.cursor_pos).into_bytes();
+            self.cursor_pos = 0;
+            Some(output)
+        } else {
+            None
+        }
+    }
+
+    /// Move cursor to end of line
+    fn cursor_end(&mut self) -> Option<Vec<u8>> {
+        let remaining = self.input_buffer.len() - self.cursor_pos;
+        if remaining > 0 {
+            let output = format!("\x1b[{}C", remaining).into_bytes();
+            self.cursor_pos = self.input_buffer.len();
+            Some(output)
+        } else {
+            None
+        }
+    }
+
     /// Execute the current command and return output bytes.
     /// May set `pending_action` for subprocess spawning.
     fn execute_current_command(&mut self) -> Vec<u8> {
         let command = std::mem::take(&mut self.input_buffer);
         self.cursor_pos = 0;
+        self.history_position = 0;
+        self.saved_input = None;
 
         if command.is_empty() {
             return self.get_prompt().into_bytes();
         }
 
-        // Add to history
-        // self.core.history.entries.push(command.clone());
+        // Record command in history (crash-safe, synced to disk)
+        let history_id = match self.core.record_command(
+            command.clone(),
+            CommandSource::Human,
+            Some(self.cwd.to_string_lossy().to_string()),
+        ) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                eprintln!("Warning: failed to record command in history: {}", e);
+                None
+            }
+        };
 
         // Parse command
         let parts: Vec<&str> = command.split_whitespace().collect();
@@ -392,27 +752,81 @@ impl Shell {
                     self.cwd.join(target)
                 };
 
-                if target_path.is_dir() {
+                let exit_code = if target_path.is_dir() {
                     self.cwd = target_path.canonicalize().unwrap_or(target_path);
+                    0
                 } else {
                     output.extend(format!("cd: no such directory: {}\r\n", target).as_bytes());
+                    1
+                };
+
+                // Record exit for builtin
+                if let Some(id) = history_id {
+                    let _ = self.core.record_exit(&id, exit_code, 0);
                 }
+
+                // Refresh history after command
+                self.refresh_history_cache();
                 output.extend(self.get_prompt().as_bytes());
             }
             "pwd" => {
                 output.extend(format!("{}\r\n", self.cwd.display()).as_bytes());
+
+                // Record exit for builtin
+                if let Some(id) = history_id {
+                    let _ = self.core.record_exit(&id, 0, 0);
+                }
+
+                self.refresh_history_cache();
                 output.extend(self.get_prompt().as_bytes());
             }
             "echo" => {
                 output.extend(format!("{}\r\n", parts[1..].join(" ")).as_bytes());
+
+                // Record exit for builtin
+                if let Some(id) = history_id {
+                    let _ = self.core.record_exit(&id, 0, 0);
+                }
+
+                self.refresh_history_cache();
+                output.extend(self.get_prompt().as_bytes());
+            }
+            "history" => {
+                // Show recent history
+                let limit = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(20);
+
+                let entries = self.core.history().recent(limit);
+                for (i, entry) in entries.iter().rev().enumerate() {
+                    output.extend(format!("{:5}  {}\r\n", i + 1, entry.command).as_bytes());
+                }
+
+                // Record exit for builtin
+                if let Some(id) = history_id {
+                    let _ = self.core.record_exit(&id, 0, 0);
+                }
+
+                self.refresh_history_cache();
                 output.extend(self.get_prompt().as_bytes());
             }
             "exit" => {
                 output.extend(b"Goodbye!\r\n");
+
+                // Record exit for builtin
+                if let Some(id) = history_id {
+                    let _ = self.core.record_exit(&id, 0, 0);
+                }
+
                 self.should_exit = true;
             }
             _ => {
                 // External command - request subprocess spawn
+                // Store the history ID so we can record exit status later
+                self.current_command_id = history_id.clone();
+                self.command_start_time = Some(std::time::Instant::now());
+
                 // Output will be combined with this action in handle_input
                 self.pending_action = Some(ShellAction::SpawnSubprocess {
                     output: vec![], // Will be filled in by handle_input
@@ -420,6 +834,7 @@ impl Shell {
                     args: parts[1..].iter().map(|s| s.to_string()).collect(),
                     env: vec![],
                     cwd: self.cwd.clone(),
+                    history_id,
                 });
                 // Don't show prompt - subprocess will take over
             }

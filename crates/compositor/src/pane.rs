@@ -203,6 +203,7 @@ impl Pane {
                     args,
                     env: _,
                     cwd,
+                    history_id: _,
                 } => {
                     // First, write any pending output (e.g., the newline after the command)
                     if !output.is_empty() {
