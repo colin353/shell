@@ -466,6 +466,39 @@ impl Shell {
         &self.cwd
     }
 
+    /// Check if the input buffer is empty (no pending input).
+    ///
+    /// This is used to determine whether CTRL+C should clear input or
+    /// trigger a pane close action.
+    pub fn is_input_empty(&self) -> bool {
+        self.input_buffer.is_empty() && !self.history_search_mode
+    }
+
+    /// Handle CTRL+C when the shell is active (no subprocess).
+    ///
+    /// If there is input, clears it and shows a new prompt.
+    /// Returns the output to write to the terminal, or None if input was already empty.
+    pub fn handle_ctrl_c(&mut self) -> Option<Vec<u8>> {
+        // If in history search mode, exit it first
+        if self.history_search_mode {
+            let output = self.exit_history_search();
+            return Some(output);
+        }
+
+        if self.input_buffer.is_empty() {
+            // Input is already empty - caller should handle this case
+            // (e.g., close the pane)
+            None
+        } else {
+            // Clear input and show new prompt
+            self.input_buffer.clear();
+            self.cursor_pos = 0;
+            let mut output = b"^C\r\n".to_vec();
+            output.extend(self.get_prompt().as_bytes());
+            Some(output)
+        }
+    }
+
     // --- Private implementation ---
 
     fn process_input_byte(&mut self, byte: u8) -> Option<Vec<u8>> {
@@ -1228,31 +1261,33 @@ impl Shell {
                 output.extend(b"  ");
             }
 
+            // Add exit status indicator if available (before the command)
+            if let Some(exit_code) = result.entry.exit_code {
+                if exit_code == 0 {
+                    // Green checkmark for success
+                    if is_selected {
+                        output.extend("\x1b[32m✓\x1b[30m ".as_bytes()); // Green checkmark, back to black fg
+                    } else {
+                        output.extend("\x1b[32m✓\x1b[0m ".as_bytes()); // Green checkmark, reset
+                    }
+                } else {
+                    // Red X with exit code for failure
+                    if is_selected {
+                        output.extend(format!("\x1b[31m✗\x1b[30m ").as_bytes());
+                    } else {
+                        output.extend(format!("\x1b[31m✗\x1b[0m ").as_bytes());
+                    }
+                }
+            } else {
+                output.extend(b"  "); // Padding when no exit code
+            }
+
             // Render the command with match highlighting
             output.extend(self.render_highlighted_command(
                 &result.entry.command,
                 &result.match_indices,
                 is_selected,
             ));
-
-            // Add exit status indicator if available
-            if let Some(exit_code) = result.entry.exit_code {
-                if exit_code == 0 {
-                    // Green checkmark for success
-                    if is_selected {
-                        output.extend(" \x1b[32m✓\x1b[30m".as_bytes()); // Green checkmark, back to black fg
-                    } else {
-                        output.extend(" \x1b[32m✓\x1b[0m".as_bytes()); // Green checkmark, reset
-                    }
-                } else {
-                    // Red X with exit code for failure
-                    if is_selected {
-                        output.extend(format!(" \x1b[31m✗ {}\x1b[30m", exit_code).as_bytes());
-                    } else {
-                        output.extend(format!(" \x1b[31m✗ {}\x1b[0m", exit_code).as_bytes());
-                    }
-                }
-            }
 
             // Reset colors and clear to end of line
             output.extend(b"\x1b[0m\x1b[K\r\n");

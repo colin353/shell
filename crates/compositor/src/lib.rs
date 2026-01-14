@@ -23,7 +23,7 @@ pub mod types;
 
 pub use compositor::Compositor;
 pub use error::CompositorError;
-pub use pane::{Pane, SearchMatch, UrlMatch};
+pub use pane::{CtrlCResult, Pane, SearchMatch, UrlMatch};
 pub use pane_cell::{PaneCell, PaneCellInner};
 pub use tab::Tab;
 pub use types::{CompositorEvent, Direction, SplitDirection};

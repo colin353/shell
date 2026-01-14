@@ -92,13 +92,11 @@ fn main() {
             Ok(n) => {
                 let input = &input_buf[..n];
 
-                // Check for Ctrl+C to exit (for now, as a safety measure)
-                if input.len() == 1 && input[0] == 0x03 {
+                // Send input to the compositor
+                // handle_input returns true if we should exit
+                if compositor.handle_input(input) {
                     break;
                 }
-
-                // Send input to the compositor
-                compositor.handle_input(input);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // No input available, continue

@@ -1,6 +1,6 @@
 use crate::border::{get_border_char, BorderDirections};
 use crate::error::CompositorError;
-use crate::pane::Pane;
+use crate::pane::{CtrlCResult, Pane};
 use crate::types::{Direction, SplitDirection};
 
 /// A cell in the pane tree, which can be a single pane or a split.
@@ -82,6 +82,212 @@ impl PaneCell {
     /// Get a reference to the inner content.
     pub fn inner(&self) -> &PaneCellInner {
         &self.inner
+    }
+
+    /// Handle CTRL+C on the focused pane.
+    ///
+    /// Returns the result of the CTRL+C action. The caller should handle
+    /// `CtrlCResult::ClosePane` by calling `close_focused_pane`.
+    pub fn handle_ctrl_c(&mut self) -> CtrlCResult {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => pane.handle_ctrl_c(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.handle_ctrl_c();
+                    }
+                }
+                // No focused cell found, shouldn't happen but treat as close
+                CtrlCResult::ClosePane
+            }
+        }
+    }
+
+    /// Handle CTRL+D on the focused pane (same as CTRL+C but sends EOF instead of SIGINT).
+    pub fn handle_ctrl_d(&mut self) -> CtrlCResult {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => pane.handle_ctrl_d(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.handle_ctrl_d();
+                    }
+                }
+                CtrlCResult::ClosePane
+            }
+        }
+    }
+
+    /// Close the focused pane, returning true if there are still panes remaining.
+    ///
+    /// If this cell is a single pane with focus, returns false (caller should remove this cell).
+    /// If this cell is a split, removes the focused child and restructures if needed.
+    /// Returns true if the cell still has content after closing, false if the entire cell should be removed.
+    pub fn close_focused_pane(&mut self) -> bool {
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {
+                // This is a leaf pane with focus - it needs to be removed by the parent
+                false
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                // Find the focused cell
+                let focused_idx = cells.iter().position(|c| c.focus);
+
+                if let Some(idx) = focused_idx {
+                    // Check if the focused child is a leaf or a split
+                    let is_leaf = matches!(cells[idx].inner, PaneCellInner::Pane(_));
+
+                    if is_leaf {
+                        // Remove the focused pane
+                        cells.remove(idx);
+
+                        if cells.is_empty() {
+                            // No more children - this cell should be removed
+                            return false;
+                        }
+
+                        if cells.len() == 1 {
+                            // Only one child left - collapse the split
+                            let remaining = cells.remove(0);
+                            self.inner = remaining.inner;
+                            self.focus = true;
+                            // Set focus on the first pane in the remaining structure
+                            self.set_focus_first();
+                            // Recalculate dimensions
+                            self.recalculate_layout();
+                        } else {
+                            // Multiple children remain - give focus to the next pane
+                            let new_focus_idx = if idx >= cells.len() {
+                                cells.len() - 1
+                            } else {
+                                idx
+                            };
+                            cells[new_focus_idx].focus = true;
+                            cells[new_focus_idx].set_focus_first();
+                            // Recalculate dimensions
+                            self.recalculate_layout();
+                        }
+                        true
+                    } else {
+                        // Focused cell is a split - recursively close
+                        if !cells[idx].close_focused_pane() {
+                            // Child wants to be removed
+                            cells.remove(idx);
+
+                            if cells.is_empty() {
+                                return false;
+                            }
+
+                            if cells.len() == 1 {
+                                // Only one child left - collapse the split
+                                let remaining = cells.remove(0);
+                                self.inner = remaining.inner;
+                                self.focus = true;
+                                self.set_focus_first();
+                                self.recalculate_layout();
+                            } else {
+                                let new_focus_idx = if idx >= cells.len() {
+                                    cells.len() - 1
+                                } else {
+                                    idx
+                                };
+                                cells[new_focus_idx].focus = true;
+                                cells[new_focus_idx].set_focus_first();
+                                self.recalculate_layout();
+                            }
+                        }
+                        true
+                    }
+                } else {
+                    // No focused cell found
+                    true
+                }
+            }
+        }
+    }
+
+    /// Count the total number of panes in this cell tree.
+    pub fn pane_count(&self) -> usize {
+        match &self.inner {
+            PaneCellInner::Pane(_) => 1,
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                cells.iter().map(|c| c.pane_count()).sum()
+            }
+        }
+    }
+
+    /// Recalculate layout after a pane is closed.
+    fn recalculate_layout(&mut self) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                // Resize the terminal emulator to match the cell dimensions
+                pane.terminal_emulator.resize(self.width, self.height);
+                pane.shell.resize(self.width as u16, self.height as u16);
+                if let Some(ref proc) = pane.subprocess {
+                    let _ = proc.resize(self.width as u16, self.height as u16);
+                }
+            }
+            PaneCellInner::VSplit(cells) => {
+                // Vertical split - divide width evenly, accounting for borders
+                let num_cells = cells.len();
+                if num_cells == 0 {
+                    return;
+                }
+
+                // Total borders needed = num_cells - 1
+                let total_border_width = num_cells.saturating_sub(1);
+                let available_width = self.width.saturating_sub(total_border_width);
+                let base_width = available_width / num_cells;
+                let mut extra = available_width % num_cells;
+
+                let mut current_x = self.pos_x;
+                for cell in cells.iter_mut() {
+                    let cell_width = base_width
+                        + if extra > 0 {
+                            extra -= 1;
+                            1
+                        } else {
+                            0
+                        };
+                    cell.pos_x = current_x;
+                    cell.pos_y = self.pos_y;
+                    cell.width = cell_width;
+                    cell.height = self.height;
+                    cell.recalculate_layout();
+                    current_x += cell_width + 1; // +1 for border
+                }
+            }
+            PaneCellInner::HSplit(cells) => {
+                // Horizontal split - divide height evenly, accounting for borders
+                let num_cells = cells.len();
+                if num_cells == 0 {
+                    return;
+                }
+
+                // Total borders needed = num_cells - 1
+                let total_border_height = num_cells.saturating_sub(1);
+                let available_height = self.height.saturating_sub(total_border_height);
+                let base_height = available_height / num_cells;
+                let mut extra = available_height % num_cells;
+
+                let mut current_y = self.pos_y;
+                for cell in cells.iter_mut() {
+                    let cell_height = base_height
+                        + if extra > 0 {
+                            extra -= 1;
+                            1
+                        } else {
+                            0
+                        };
+                    cell.pos_x = self.pos_x;
+                    cell.pos_y = current_y;
+                    cell.width = self.width;
+                    cell.height = cell_height;
+                    cell.recalculate_layout();
+                    current_y += cell_height + 1; // +1 for border
+                }
+            }
+        }
     }
 
     /// Enter scrollback mode on the focused pane

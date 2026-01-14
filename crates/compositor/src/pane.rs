@@ -2,6 +2,17 @@ use pty;
 use regex::Regex;
 use std::sync::LazyLock;
 
+/// Result of handling CTRL+C on a pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtrlCResult {
+    /// Sent SIGINT to a running subprocess
+    KilledSubprocess,
+    /// Cleared the shell input buffer
+    ClearedInput,
+    /// Input was already empty, caller should close this pane
+    ClosePane,
+}
+
 /// Regex pattern for matching URLs (based on Alacritty's approach)
 /// Matches common URL schemes followed by valid URL characters
 static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -337,6 +348,47 @@ impl Pane {
     /// Check if a subprocess is currently running.
     pub fn has_subprocess(&self) -> bool {
         self.subprocess.is_some()
+    }
+
+    /// Handle CTRL+C with cascading logic.
+    ///
+    /// Returns a `CtrlCResult` indicating what action was taken:
+    /// - `KilledSubprocess`: Sent SIGINT to the running subprocess
+    /// - `ClearedInput`: Cleared the shell input buffer
+    /// - `ClosePane`: Input was already empty, caller should close this pane
+    pub fn handle_ctrl_c(&mut self) -> CtrlCResult {
+        self.handle_interrupt_key(true)
+    }
+
+    /// Handle CTRL+D with cascading logic (same as CTRL+C but sends EOF instead of SIGINT).
+    pub fn handle_ctrl_d(&mut self) -> CtrlCResult {
+        self.handle_interrupt_key(false)
+    }
+
+    /// Handle an interrupt key (CTRL+C or CTRL+D) with cascading logic.
+    ///
+    /// If `send_sigint` is true, sends SIGINT to subprocess (CTRL+C behavior).
+    /// If false, sends EOF (0x04) to subprocess (CTRL+D behavior).
+    fn handle_interrupt_key(&mut self, send_sigint: bool) -> CtrlCResult {
+        if let Some(ref proc) = self.subprocess {
+            if send_sigint {
+                // CTRL+C - send SIGINT
+                let _ = proc.signal(nix::sys::signal::Signal::SIGINT);
+            } else {
+                // CTRL+D - send EOF (the actual byte 0x04)
+                let _ = proc.write(&[0x04]);
+            }
+            CtrlCResult::KilledSubprocess
+        } else {
+            // Shell is active - try to clear input
+            if let Some(output) = self.shell.handle_ctrl_c() {
+                self.terminal_emulator.process(&output);
+                CtrlCResult::ClearedInput
+            } else {
+                // Input was already empty - signal to close the pane
+                CtrlCResult::ClosePane
+            }
+        }
     }
 
     /// Get the subprocess PTY file descriptor for polling (if any).

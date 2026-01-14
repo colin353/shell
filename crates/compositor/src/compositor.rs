@@ -1,5 +1,5 @@
 use crate::error::CompositorError;
-use crate::pane::Pane;
+use crate::pane::{CtrlCResult, Pane};
 use crate::pane_cell::PaneCell;
 use crate::tab::Tab;
 use crate::types::{Direction, SplitDirection};
@@ -155,11 +155,13 @@ impl Compositor {
     /// - Ctrl+b c : Create new tab
     /// - Ctrl+b 1-9 : Switch to tab 1-9
     /// - Ctrl+b [ : Enter scrollback mode
-    pub fn handle_input(&mut self, input: &[u8]) {
+    ///
+    /// Returns `true` if the compositor should exit, `false` otherwise.
+    pub fn handle_input(&mut self, input: &[u8]) -> bool {
         // Check if we're in scrollback mode
         if self.active_tab().root.is_in_scrollback_mode() {
             self.handle_scrollback_input(input);
-            return;
+            return false;
         }
 
         // Handle prefix mode commands
@@ -170,67 +172,79 @@ impl Compositor {
                     b'"' => {
                         // Ctrl+b " - horizontal split (top/bottom)
                         let _ = self.split_focused_pane(SplitDirection::Horizontal);
-                        return;
+                        self.render();
+                        return false;
                     }
                     b'%' => {
                         // Ctrl+b % - vertical split (left/right)
                         let _ = self.split_focused_pane(SplitDirection::Vertical);
-                        return;
+                        self.render();
+                        return false;
                     }
                     b'c' => {
                         // Ctrl+b c - create new tab
                         let _ = self.create_tab();
-                        return;
+                        return false;
                     }
                     b'n' => {
                         // Ctrl+b n - next tab
                         self.next_tab();
-                        return;
+                        return false;
                     }
                     b'p' => {
                         // Ctrl+b p - previous tab
                         self.prev_tab();
-                        return;
+                        return false;
                     }
                     b'0'..=b'9' => {
                         // Ctrl+b 0-9 - switch to tab 0-9
                         let tab_index = (input[0] - b'0') as usize;
                         self.switch_to_tab(tab_index);
-                        return;
+                        return false;
                     }
                     b'[' => {
                         // Ctrl+b [ - enter scrollback mode
                         self.active_tab_mut().root.enter_scrollback_mode();
                         self.render();
-                        return;
+                        return false;
                     }
                     b'u' => {
                         // Ctrl+b u - enter URL mode (automatically enters scrollback mode first)
                         self.active_tab_mut().root.enter_scrollback_mode();
                         self.active_tab_mut().root.enter_url_mode();
                         self.render();
-                        return;
+                        return false;
                     }
                     0x02 => {
                         // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
                         if self.active_tab_mut().root.handle_input(&[0x02]) {
                             self.render();
                         }
-                        return;
+                        return false;
                     }
                     _ => {
                         // Unknown command, ignore
-                        return;
+                        return false;
                     }
                 }
             }
-            return;
+            return false;
         }
 
         // Check for prefix key (Ctrl+b = 0x02)
         if input.len() == 1 && input[0] == 0x02 {
             self.prefix_mode = true;
-            return;
+            return false;
+        }
+
+        // Check for CTRL+C (0x03) - cascading close behavior with SIGINT
+        if input.len() == 1 && input[0] == 0x03 {
+            return self.handle_ctrl_c();
+        }
+
+        // Check for CTRL+D (0x04) - cascading close behavior with EOF
+        if input.len() == 1 && input[0] == 0x04 {
+            return self.handle_ctrl_d();
         }
 
         // Check for focus movement shortcuts (Ctrl+h/j/k/l)
@@ -241,25 +255,25 @@ impl Compositor {
                     // Ctrl+h - move focus left
                     self.move_focus(Direction::Left);
                     self.render();
-                    return;
+                    return false;
                 }
                 0x0a => {
                     // Ctrl+j - move focus down
                     self.move_focus(Direction::Down);
                     self.render();
-                    return;
+                    return false;
                 }
                 0x0b => {
                     // Ctrl+k - move focus up
                     self.move_focus(Direction::Up);
                     self.render();
-                    return;
+                    return false;
                 }
                 0x0c => {
                     // Ctrl+l - move focus right
                     self.move_focus(Direction::Right);
                     self.render();
-                    return;
+                    return false;
                 }
                 _ => {}
             }
@@ -267,6 +281,7 @@ impl Compositor {
         if self.active_tab_mut().root.handle_input(input) {
             self.render();
         }
+        false
     }
 
     /// Handle input while in scrollback mode.
@@ -633,6 +648,66 @@ impl Compositor {
     /// - Right (l): Move to the pane on the right
     pub fn move_focus(&mut self, direction: Direction) {
         self.active_tab_mut().root.move_focus(direction);
+    }
+
+    /// Handle CTRL+C with cascading behavior.
+    ///
+    /// The behavior depends on the current state:
+    /// 1. If a subprocess is running → send SIGINT to it
+    /// 2. If the shell has input → clear the input  
+    /// 3. If input is already empty → close the focused pane
+    /// 4. If there are no other panes → return true to signal the entire app should exit
+    ///
+    /// Returns `true` if the entire compositor should exit, `false` otherwise.
+    pub fn handle_ctrl_c(&mut self) -> bool {
+        self.handle_interrupt_key(true)
+    }
+
+    /// Handle CTRL+D with cascading behavior (same as CTRL+C but sends EOF instead of SIGINT).
+    pub fn handle_ctrl_d(&mut self) -> bool {
+        self.handle_interrupt_key(false)
+    }
+
+    /// Handle an interrupt key (CTRL+C or CTRL+D) with cascading behavior.
+    fn handle_interrupt_key(&mut self, is_ctrl_c: bool) -> bool {
+        let result = if is_ctrl_c {
+            self.active_tab_mut().root.handle_ctrl_c()
+        } else {
+            self.active_tab_mut().root.handle_ctrl_d()
+        };
+
+        match result {
+            CtrlCResult::KilledSubprocess | CtrlCResult::ClearedInput => {
+                // Just re-render, don't close anything
+                self.render();
+                false
+            }
+            CtrlCResult::ClosePane => {
+                // Try to close the focused pane
+                let pane_count = self.active_tab().root.pane_count();
+
+                if pane_count <= 1 {
+                    // This is the last pane in this tab
+                    if self.tabs.len() <= 1 {
+                        // This is the last tab - exit the entire compositor
+                        return true;
+                    } else {
+                        // Close this tab and switch to another
+                        self.tabs.remove(self.active_tab);
+                        if self.active_tab >= self.tabs.len() {
+                            self.active_tab = self.tabs.len() - 1;
+                        }
+                        self.render();
+                        false
+                    }
+                } else {
+                    // Close just the focused pane
+                    self.active_tab_mut().root.close_focused_pane();
+                    self.render();
+                    false
+                }
+            }
+        }
     }
 
     /// Run the event loop. This blocks and handles all events.
