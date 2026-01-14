@@ -694,6 +694,7 @@ impl Shell {
     }
 
     /// Navigate to previous command in history (Up arrow)
+    /// Skips duplicate commands to show only distinct entries
     fn history_up(&mut self) -> Option<Vec<u8>> {
         if self.history_cache.is_empty() {
             return None;
@@ -704,32 +705,54 @@ impl Shell {
             self.saved_input = Some(self.input_buffer.clone());
         }
 
-        // Move to previous command (history_cache is most-recent-first)
-        if self.history_position < self.history_cache.len() {
-            self.history_position += 1;
-            let cmd = self.history_cache[self.history_position - 1].clone();
-            return Some(self.replace_input_line(&cmd));
+        // Get the current command we're showing (or the input buffer if at position 0)
+        let current_cmd = if self.history_position == 0 {
+            self.saved_input.clone().unwrap_or_default()
+        } else {
+            self.history_cache[self.history_position - 1].clone()
+        };
+
+        // Find the next different command (history_cache is most-recent-first)
+        let mut new_position = self.history_position + 1;
+        while new_position <= self.history_cache.len() {
+            let cmd = &self.history_cache[new_position - 1];
+            if cmd != &current_cmd {
+                let cmd = cmd.clone();
+                self.history_position = new_position;
+                return Some(self.replace_input_line(&cmd));
+            }
+            new_position += 1;
         }
 
         None
     }
 
     /// Navigate to next command in history (Down arrow)
+    /// Skips duplicate commands to show only distinct entries
     fn history_down(&mut self) -> Option<Vec<u8>> {
         if self.history_position == 0 {
             return None;
         }
 
-        self.history_position -= 1;
+        // Get the current command we're showing
+        let current_cmd = self.history_cache[self.history_position - 1].clone();
 
-        if self.history_position == 0 {
-            // Restore saved input
-            let saved = self.saved_input.take().unwrap_or_default();
-            return Some(self.replace_input_line(&saved));
+        // Find the next different command going toward more recent
+        let mut new_position = self.history_position - 1;
+        while new_position > 0 {
+            let cmd = &self.history_cache[new_position - 1];
+            if cmd != &current_cmd {
+                let cmd = cmd.clone();
+                self.history_position = new_position;
+                return Some(self.replace_input_line(&cmd));
+            }
+            new_position -= 1;
         }
 
-        let cmd = self.history_cache[self.history_position - 1].clone();
-        Some(self.replace_input_line(&cmd))
+        // If we get here, restore the saved input
+        self.history_position = 0;
+        let saved = self.saved_input.take().unwrap_or_default();
+        Some(self.replace_input_line(&saved))
     }
 
     /// Replace the current input line with new content
