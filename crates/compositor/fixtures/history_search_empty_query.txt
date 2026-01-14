@@ -12,13 +12,13 @@
   :q                                                                            
   vim --clean                                                                   
   vim crates/libvim/fixtures/test_code.rs                                       
-  git status                                                                    
-  git commit -m 'Initial commit'                                                
-  git push origin main                                                          
-  cargo build --release                                                         
-  cargo test                                                                    
-> git log --oneline                                                             
+  git status ✓                                                                  
+  git commit -m 'Initial commit' ✓                                              
+  git push origin main ✗ 1                                                      
+  cargo build --release ✓                                                       
+  cargo test ✓                                                                  
+> git log --oneline ✓                                                           
 (reverse-i-search)`' [1/20]                                                     
 compositor $                                                                    
                                                                                 
- 0 shell                                                       2026-01-13 16:06 
+ 0 shell                                                       2026-01-13 16:16 

@@ -546,6 +546,16 @@ impl Shell {
                 output.extend(self.input_buffer.as_bytes());
                 Some(output)
             }
+            // Ctrl+A - move to beginning of line
+            0x01 => self.cursor_home(),
+            // Ctrl+E - move to end of line
+            0x05 => self.cursor_end(),
+            // Ctrl+W - delete word before cursor
+            0x17 => self.delete_word_backward(),
+            // Ctrl+K - kill to end of line
+            0x0b => self.kill_to_end(),
+            // Ctrl+U - kill to beginning of line
+            0x15 => self.kill_to_beginning(),
             // Regular printable character
             0x20..=0x7e => {
                 self.input_buffer.insert(self.cursor_pos, byte as char);
@@ -591,12 +601,18 @@ impl Shell {
             return None;
         }
 
-        // Check for CSI sequence (ESC [)
+        // Check for Alt+key sequences (ESC followed by a letter)
         if self.escape_buffer[1] != b'[' {
-            // Not a CSI sequence we understand, abort
+            // Alt+key sequence (ESC followed by a letter)
+            let result = match self.escape_buffer[1] {
+                b'f' | b'F' => self.forward_word(),        // Alt+F - forward word
+                b'b' | b'B' => self.backward_word(),       // Alt+B - backward word
+                b'd' | b'D' => self.delete_word_forward(), // Alt+D - delete word forward
+                _ => None,
+            };
             self.in_escape_sequence = false;
             self.escape_buffer.clear();
-            return None;
+            return result;
         }
 
         if self.escape_buffer.len() < 3 {
@@ -731,6 +747,165 @@ impl Shell {
         }
     }
 
+    /// Move cursor forward one word (Alt+F)
+    fn forward_word(&mut self) -> Option<Vec<u8>> {
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        if self.cursor_pos >= chars.len() {
+            return None;
+        }
+
+        let mut new_pos = self.cursor_pos;
+        // Skip current word characters
+        while new_pos < chars.len() && !chars[new_pos].is_whitespace() {
+            new_pos += 1;
+        }
+        // Skip whitespace
+        while new_pos < chars.len() && chars[new_pos].is_whitespace() {
+            new_pos += 1;
+        }
+
+        if new_pos > self.cursor_pos {
+            let move_right = new_pos - self.cursor_pos;
+            self.cursor_pos = new_pos;
+            Some(format!("\x1b[{}C", move_right).into_bytes())
+        } else {
+            None
+        }
+    }
+
+    /// Move cursor backward one word (Alt+B)
+    fn backward_word(&mut self) -> Option<Vec<u8>> {
+        if self.cursor_pos == 0 {
+            return None;
+        }
+
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut new_pos = self.cursor_pos;
+
+        // Skip whitespace before cursor
+        while new_pos > 0 && chars[new_pos - 1].is_whitespace() {
+            new_pos -= 1;
+        }
+        // Skip word characters
+        while new_pos > 0 && !chars[new_pos - 1].is_whitespace() {
+            new_pos -= 1;
+        }
+
+        if new_pos < self.cursor_pos {
+            let move_left = self.cursor_pos - new_pos;
+            self.cursor_pos = new_pos;
+            Some(format!("\x1b[{}D", move_left).into_bytes())
+        } else {
+            None
+        }
+    }
+
+    /// Delete word before cursor (Ctrl+W)
+    fn delete_word_backward(&mut self) -> Option<Vec<u8>> {
+        if self.cursor_pos == 0 {
+            return None;
+        }
+
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut new_pos = self.cursor_pos;
+
+        // Skip whitespace before cursor
+        while new_pos > 0 && chars[new_pos - 1].is_whitespace() {
+            new_pos -= 1;
+        }
+        // Skip word characters
+        while new_pos > 0 && !chars[new_pos - 1].is_whitespace() {
+            new_pos -= 1;
+        }
+
+        if new_pos < self.cursor_pos {
+            let deleted_len = self.cursor_pos - new_pos;
+            self.input_buffer.drain(new_pos..self.cursor_pos);
+            self.cursor_pos = new_pos;
+
+            // Move cursor left, then reprint rest of line and clear
+            let mut output = format!("\x1b[{}D", deleted_len).into_bytes();
+            let rest = &self.input_buffer[self.cursor_pos..];
+            output.extend(rest.as_bytes());
+            output.extend(b"\x1b[K"); // Clear to end of line
+                                      // Move cursor back to position
+            if !rest.is_empty() {
+                output.extend(format!("\x1b[{}D", rest.len()).as_bytes());
+            }
+            Some(output)
+        } else {
+            None
+        }
+    }
+
+    /// Delete word after cursor (Alt+D)
+    fn delete_word_forward(&mut self) -> Option<Vec<u8>> {
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        if self.cursor_pos >= chars.len() {
+            return None;
+        }
+
+        let start = self.cursor_pos;
+        let mut end = self.cursor_pos;
+
+        // Skip word characters
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+        // Skip whitespace
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+
+        if end > start {
+            self.input_buffer.drain(start..end);
+
+            // Reprint rest of line from cursor and clear
+            let rest = &self.input_buffer[self.cursor_pos..];
+            let mut output = Vec::new();
+            output.extend(rest.as_bytes());
+            output.extend(b"\x1b[K"); // Clear to end of line
+                                      // Move cursor back to position
+            if !rest.is_empty() {
+                output.extend(format!("\x1b[{}D", rest.len()).as_bytes());
+            }
+            Some(output)
+        } else {
+            None
+        }
+    }
+
+    /// Kill (delete) from cursor to end of line (Ctrl+K)
+    fn kill_to_end(&mut self) -> Option<Vec<u8>> {
+        if self.cursor_pos < self.input_buffer.len() {
+            self.input_buffer.truncate(self.cursor_pos);
+            Some(b"\x1b[K".to_vec()) // Clear to end of line
+        } else {
+            None
+        }
+    }
+
+    /// Kill (delete) from cursor to beginning of line (Ctrl+U)
+    fn kill_to_beginning(&mut self) -> Option<Vec<u8>> {
+        if self.cursor_pos > 0 {
+            let deleted_len = self.cursor_pos;
+            self.input_buffer.drain(0..self.cursor_pos);
+            self.cursor_pos = 0;
+
+            // Move to start, reprint line, clear rest
+            let mut output = format!("\x1b[{}D", deleted_len).into_bytes();
+            output.extend(self.input_buffer.as_bytes());
+            output.extend(b"\x1b[K"); // Clear to end of line
+                                      // Move cursor back to start
+            if !self.input_buffer.is_empty() {
+                output.extend(format!("\x1b[{}D", self.input_buffer.len()).as_bytes());
+            }
+            Some(output)
+        } else {
+            None
+        }
+    }
+
     // --- CTRL+R History Search Implementation ---
 
     /// Number of search results to display
@@ -825,6 +1000,53 @@ impl Shell {
                 }
                 Some(self.render_search_ui())
             }
+            // Ctrl+A - move to beginning of search query
+            0x01 => {
+                self.cursor_pos = 0;
+                Some(self.render_search_ui())
+            }
+            // Ctrl+E - move to end of search query
+            0x05 => {
+                self.cursor_pos = self.input_buffer.len();
+                Some(self.render_search_ui())
+            }
+            // Ctrl+W - delete word before cursor in search query
+            0x17 => {
+                if self.cursor_pos > 0 {
+                    // Find start of previous word
+                    let mut new_pos = self.cursor_pos;
+                    // Skip trailing spaces
+                    while new_pos > 0 && self.input_buffer.chars().nth(new_pos - 1) == Some(' ') {
+                        new_pos -= 1;
+                    }
+                    // Skip word characters
+                    while new_pos > 0 && self.input_buffer.chars().nth(new_pos - 1) != Some(' ') {
+                        new_pos -= 1;
+                    }
+                    // Remove the text
+                    self.input_buffer.drain(new_pos..self.cursor_pos);
+                    self.cursor_pos = new_pos;
+                    self.update_history_search();
+                }
+                Some(self.render_search_ui())
+            }
+            // Ctrl+U - kill to beginning of line
+            0x15 => {
+                if self.cursor_pos > 0 {
+                    self.input_buffer.drain(0..self.cursor_pos);
+                    self.cursor_pos = 0;
+                    self.update_history_search();
+                }
+                Some(self.render_search_ui())
+            }
+            // Ctrl+K - kill to end of line
+            0x0b => {
+                if self.cursor_pos < self.input_buffer.len() {
+                    self.input_buffer.truncate(self.cursor_pos);
+                    self.update_history_search();
+                }
+                Some(self.render_search_ui())
+            }
             // Backspace - remove character from search query
             0x7f | 0x08 => {
                 if self.cursor_pos > 0 {
@@ -858,12 +1080,63 @@ impl Shell {
             return Some(self.exit_history_search());
         }
 
-        // Check for CSI sequence (ESC [)
+        // Check for Alt+key sequences in search mode (ESC followed by a letter)
         if self.escape_buffer[1] != b'[' {
-            // Plain ESC - exit search
+            let result = match self.escape_buffer[1] {
+                b'f' | b'F' => {
+                    // Alt+F - forward word in search query
+                    let chars: Vec<char> = self.input_buffer.chars().collect();
+                    let mut new_pos = self.cursor_pos;
+                    // Skip current word
+                    while new_pos < chars.len() && chars[new_pos] != ' ' {
+                        new_pos += 1;
+                    }
+                    // Skip spaces
+                    while new_pos < chars.len() && chars[new_pos] == ' ' {
+                        new_pos += 1;
+                    }
+                    self.cursor_pos = new_pos;
+                    Some(self.render_search_ui())
+                }
+                b'b' | b'B' => {
+                    // Alt+B - backward word in search query
+                    let chars: Vec<char> = self.input_buffer.chars().collect();
+                    let mut new_pos = self.cursor_pos;
+                    // Skip spaces
+                    while new_pos > 0 && chars.get(new_pos.saturating_sub(1)) == Some(&' ') {
+                        new_pos -= 1;
+                    }
+                    // Skip word
+                    while new_pos > 0 && chars.get(new_pos.saturating_sub(1)) != Some(&' ') {
+                        new_pos -= 1;
+                    }
+                    self.cursor_pos = new_pos;
+                    Some(self.render_search_ui())
+                }
+                b'd' | b'D' => {
+                    // Alt+D - delete word forward in search query
+                    let chars: Vec<char> = self.input_buffer.chars().collect();
+                    let start = self.cursor_pos;
+                    let mut end = self.cursor_pos;
+                    // Skip current word
+                    while end < chars.len() && chars[end] != ' ' {
+                        end += 1;
+                    }
+                    // Skip spaces
+                    while end < chars.len() && chars[end] == ' ' {
+                        end += 1;
+                    }
+                    if end > start {
+                        self.input_buffer.drain(start..end);
+                        self.update_history_search();
+                    }
+                    Some(self.render_search_ui())
+                }
+                _ => Some(self.exit_history_search()), // Plain ESC or unknown - exit search
+            };
             self.in_escape_sequence = false;
             self.escape_buffer.clear();
-            return Some(self.exit_history_search());
+            return result;
         }
 
         if self.escape_buffer.len() < 3 {
@@ -961,6 +1234,25 @@ impl Shell {
                 &result.match_indices,
                 is_selected,
             ));
+
+            // Add exit status indicator if available
+            if let Some(exit_code) = result.entry.exit_code {
+                if exit_code == 0 {
+                    // Green checkmark for success
+                    if is_selected {
+                        output.extend(" \x1b[32m✓\x1b[30m".as_bytes()); // Green checkmark, back to black fg
+                    } else {
+                        output.extend(" \x1b[32m✓\x1b[0m".as_bytes()); // Green checkmark, reset
+                    }
+                } else {
+                    // Red X with exit code for failure
+                    if is_selected {
+                        output.extend(format!(" \x1b[31m✗ {}\x1b[30m", exit_code).as_bytes());
+                    } else {
+                        output.extend(format!(" \x1b[31m✗ {}\x1b[0m", exit_code).as_bytes());
+                    }
+                }
+            }
 
             // Reset colors and clear to end of line
             output.extend(b"\x1b[0m\x1b[K\r\n");
