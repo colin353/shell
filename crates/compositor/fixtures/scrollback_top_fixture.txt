@@ -1,4 +1,4 @@
-compositor $ cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/
+compositor ➜ cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/
 lorem_ipsum.txt                                                                 
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor i
 ncididunt ut labore et dolore magna aliqua.                                     

@@ -1,7 +1,7 @@
-compositor $ printf 'LEFT_PANE_MARKER\n│compositor $ printf 'RIGHT_PANE_MARKER\n
+compositor ➜ printf 'LEFT_PANE_MARKER\n│compositor ➜ printf 'RIGHT_PANE_MARKER\n
 '                                      │'                                       
 LEFT_PANE_MARKER                       │RIGHT_PANE_MARKER                       
-compositor $                           │compositor $                            
+compositor ➜                           │compositor ➜                            
                                        │                                        
                                        │                                        
                                        │                                        
@@ -21,4 +21,4 @@ compositor $                           │compositor $
                                        │                                        
                                        │                                        
                                        │                                        
- 0 bash                                                        2026-01-13 16:50 
+ 0 bash                                                        2026-01-13 18:10 

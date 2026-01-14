@@ -210,6 +210,20 @@ impl PtyProcess {
         }
     }
 
+    /// Check if the child process has exited and return its exit code.
+    /// Returns `Some(exit_code)` if the process has exited, `None` if still running.
+    /// The exit code is the actual exit status for normal exits, or 128+signal for signal termination.
+    pub fn try_wait(&self) -> Option<i32> {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, code)) => Some(code),
+            Ok(WaitStatus::Signaled(_, signal, _)) => Some(128 + signal as i32),
+            Ok(WaitStatus::StillAlive) => None,
+            Ok(_) => Some(1),  // Other status, assume error
+            Err(_) => Some(1), // Error checking, assume error
+        }
+    }
+
     /// Resize the PTY
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         let winsize = Winsize {

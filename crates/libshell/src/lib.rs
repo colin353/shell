@@ -420,9 +420,10 @@ impl Shell {
 
         let mut output = Vec::new();
 
-        // Optionally show exit code for non-zero exits
+        // Show exit code with white text on red background for non-zero exits
         if exit_code != 0 {
-            output.extend(format!("[exit: {}]\r\n", exit_code).as_bytes());
+            // \x1b[41m = red background, \x1b[97m = bright white text, \x1b[0m = reset
+            output.extend(format!("\x1b[41m\x1b[97m exit {} \x1b[0m\r\n", exit_code).as_bytes());
         }
 
         // Show prompt
@@ -446,6 +447,9 @@ impl Shell {
         self.refresh_history_cache();
 
         let mut output = Vec::new();
+        // Show CTRL+C indicator with white text on red background
+        // \x1b[41m = red background, \x1b[97m = bright white text, \x1b[0m = reset
+        output.extend(b"\x1b[41m\x1b[97m CTRL+C \x1b[0m\r\n");
         output.extend(self.get_prompt().as_bytes());
         output
     }
@@ -610,13 +614,26 @@ impl Shell {
         }
     }
 
-    fn get_prompt(&self) -> String {
-        let dir_name = self
-            .cwd
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/".to_string());
-        format!("{} $ ", dir_name)
+    /// Check if the input buffer is empty.
+    pub fn input_is_empty(&self) -> bool {
+        self.input_buffer.is_empty()
+    }
+
+    /// Get the current prompt string.
+    pub fn get_prompt(&self) -> String {
+        let home_dir = std::env::var("HOME").ok().map(PathBuf::from);
+        let dir_name = if self.cwd.as_os_str() == "/" {
+            "/".to_string()
+        } else if home_dir.as_ref() == Some(&self.cwd) {
+            "~".to_string()
+        } else {
+            self.cwd
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".to_string())
+        };
+        // Green arrow: \x1b[32m sets green color, \x1b[0m resets
+        format!("{} \x1b[32m➜\x1b[0m ", dir_name)
     }
 
     /// Try to parse a complete escape sequence from the buffer.
@@ -1333,14 +1350,15 @@ impl Shell {
         // We need to track original indices for match highlighting
         let chars: Vec<char> = command.chars().collect();
 
-        // Account for 2 chars for selection indicator "  " or "> "
-        let max_display_width = (self.cols as usize).saturating_sub(5); // 2 for indicator, 3 for "..."
+        // Account for: 2 chars for selection indicator "  " or "> ", 2 chars for status "✓ " or "✗ ", 2 chars for ".."
+        let max_display_width = (self.cols as usize).saturating_sub(6); // 2 + 2 + 2
         let mut display_width = 0;
+        let needs_truncation = chars.len() > max_display_width;
 
         for (i, &ch) in chars.iter().enumerate() {
-            // Check if we've exceeded the display width
-            if display_width >= max_display_width {
-                output.extend(b"...");
+            // Check if we need to truncate - leave room for ".."
+            if needs_truncation && display_width >= max_display_width {
+                output.extend(b"..");
                 break;
             }
 

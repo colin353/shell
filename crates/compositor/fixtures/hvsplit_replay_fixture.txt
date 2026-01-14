@@ -1,4 +1,4 @@
-compositor $                                                                    
+compositor ➜                                                                    
                                                                                 
                                                                                 
                                                                                 
@@ -10,7 +10,7 @@ compositor $
                                                                                 
                                                                                 
 ───────────────────────────────────────┬────────────────────────────────────────
-compositor $                           │compositor $                            
+compositor ➜                           │compositor ➜                            
                                        │                                        
                                        │                                        
                                        │                                        
@@ -21,4 +21,4 @@ compositor $                           │compositor $
                                        │                                        
                                        │                                        
                                        │                                        
- 0 bash                                                        2026-01-13 16:50 
+ 0 bash                                                        2026-01-13 18:10 

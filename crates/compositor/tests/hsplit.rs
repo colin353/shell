@@ -674,3 +674,78 @@ fn test_history_search_escape() -> Result<(), CompositorError> {
 
     Ok(())
 }
+
+#[test]
+fn test_nonzero_exit_code_display() -> Result<(), CompositorError> {
+    // Create a compositor
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Wait for shell to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Run a command that will exit with code 1 (false always returns 1)
+    compositor.handle_input(b"false\n");
+
+    // Wait for the command to execute
+    wait_for_output(&mut compositor, 500);
+
+    // Render to update the display
+    compositor.render_to_vec();
+
+    // Get the text lines and verify the exit code message appears
+    let lines = compositor.get_text_lines();
+    let all_text: String = lines.join("\n");
+
+    assert!(
+        all_text.contains("exit 1"),
+        "Expected 'exit 1' to appear after command with non-zero exit code. Got:\n{}",
+        all_text
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_ctrl_c_display() -> Result<(), CompositorError> {
+    // Create a compositor
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Wait for shell to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Run a command that will sleep for a while (sleep 10)
+    compositor.handle_input(b"sleep 10\n");
+
+    // Wait for the command to start
+    wait_for_output(&mut compositor, 200);
+
+    // Send CTRL+C to interrupt the command
+    compositor.handle_input(&[0x03]); // CTRL+C
+
+    // Wait for the command to be killed
+    wait_for_output(&mut compositor, 500);
+
+    // Render to update the display
+    compositor.render_to_vec();
+
+    // Get the text lines and verify CTRL+C message appears (not exit 130)
+    let lines = compositor.get_text_lines();
+    let all_text: String = lines.join("\n");
+
+    assert!(
+        all_text.contains("CTRL+C"),
+        "Expected 'CTRL+C' to appear after killing command with CTRL+C. Got:\n{}",
+        all_text
+    );
+
+    // Make sure it doesn't show "exit 130"
+    assert!(
+        !all_text.contains("exit 130"),
+        "Should not show 'exit 130' when killed by CTRL+C. Got:\n{}",
+        all_text
+    );
+
+    Ok(())
+}

@@ -19,6 +19,6 @@
   ✓ cargo test                                                                  
 > ✓ git log --oneline                                                           
 (reverse-i-search)`' [1/20]                                                     
-compositor $                                                                    
+compositor ➜                                                                    
                                                                                 
- 0 shell                                                       2026-01-13 16:50 
+ 0 shell                                                       2026-01-13 18:10 

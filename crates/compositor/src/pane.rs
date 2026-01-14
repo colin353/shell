@@ -134,6 +134,8 @@ pub struct Pane {
     pub shell: libshell::Shell,
     /// Currently running subprocess (if any) - takes over PTY when active
     pub subprocess: Option<pty::PtyProcess>,
+    /// Whether we sent SIGINT to the subprocess (to display CTRL+C instead of exit code)
+    pub sent_sigint: bool,
     pub read_buffer: [u8; 4096],
     /// Whether the pane is in scrollback mode
     pub scrollback_mode: bool,
@@ -173,6 +175,7 @@ impl Pane {
             terminal_emulator,
             shell,
             subprocess: None,
+            sent_sigint: false,
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -204,6 +207,7 @@ impl Pane {
             terminal_emulator,
             shell,
             subprocess: None,
+            sent_sigint: false,
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -318,7 +322,7 @@ impl Pane {
 
         // Check if subprocess has exited
         if let Some(ref proc) = self.subprocess {
-            if !proc.is_running() {
+            if let Some(exit_code) = proc.try_wait() {
                 // Check if cursor is not at the start of a line (partial line output)
                 // If so, emit a partial line indicator before the prompt
                 let cursor_x = self.terminal_emulator.cursor_position().0;
@@ -328,12 +332,18 @@ impl Pane {
                     self.terminal_emulator.process(b"\x1b[7m%\x1b[0m\r\n");
                 }
 
-                // Subprocess exited - we don't have access to exit code directly,
-                // so we assume 0 for now. The Drop impl will clean up the process.
+                // Subprocess exited - clean up
                 drop(self.subprocess.take());
 
-                // Notify shell and show prompt
-                let output = self.shell.subprocess_exited(0);
+                // Check if we sent SIGINT (CTRL+C) - if so, use subprocess_killed
+                // Exit code 130 = 128 + 2 (SIGINT)
+                let output = if self.sent_sigint && exit_code == 130 {
+                    self.sent_sigint = false;
+                    self.shell.subprocess_killed()
+                } else {
+                    self.sent_sigint = false;
+                    self.shell.subprocess_exited(exit_code)
+                };
                 self.terminal_emulator.process(&output);
             }
         }
@@ -354,39 +364,44 @@ impl Pane {
     ///
     /// Returns a `CtrlCResult` indicating what action was taken:
     /// - `KilledSubprocess`: Sent SIGINT to the running subprocess
-    /// - `ClearedInput`: Cleared the shell input buffer
-    /// - `ClosePane`: Input was already empty, caller should close this pane
+    /// - `ClearedInput`: Cleared the shell input buffer (or showed ^C on empty line)
     pub fn handle_ctrl_c(&mut self) -> CtrlCResult {
-        self.handle_interrupt_key(true)
-    }
-
-    /// Handle CTRL+D with cascading logic (same as CTRL+C but sends EOF instead of SIGINT).
-    pub fn handle_ctrl_d(&mut self) -> CtrlCResult {
-        self.handle_interrupt_key(false)
-    }
-
-    /// Handle an interrupt key (CTRL+C or CTRL+D) with cascading logic.
-    ///
-    /// If `send_sigint` is true, sends SIGINT to subprocess (CTRL+C behavior).
-    /// If false, sends EOF (0x04) to subprocess (CTRL+D behavior).
-    fn handle_interrupt_key(&mut self, send_sigint: bool) -> CtrlCResult {
         if let Some(ref proc) = self.subprocess {
-            if send_sigint {
-                // CTRL+C - send SIGINT
-                let _ = proc.signal(nix::sys::signal::Signal::SIGINT);
-            } else {
-                // CTRL+D - send EOF (the actual byte 0x04)
-                let _ = proc.write(&[0x04]);
-            }
+            // CTRL+C - send SIGINT to subprocess
+            let _ = proc.signal(nix::sys::signal::Signal::SIGINT);
+            self.sent_sigint = true;
             CtrlCResult::KilledSubprocess
         } else {
-            // Shell is active - try to clear input
+            // Shell is active - clear input or show ^C
             if let Some(output) = self.shell.handle_ctrl_c() {
                 self.terminal_emulator.process(&output);
-                CtrlCResult::ClearedInput
             } else {
-                // Input was already empty - signal to close the pane
+                // Input was already empty - just show ^C and new prompt
+                let prompt = self.shell.get_prompt();
+                let output = format!("^C\r\n{}", prompt);
+                self.terminal_emulator.process(output.as_bytes());
+            }
+            CtrlCResult::ClearedInput
+        }
+    }
+
+    /// Handle CTRL+D with cascading logic.
+    ///
+    /// Returns a `CtrlCResult` indicating what action was taken:
+    /// - `KilledSubprocess`: Sent EOF to the running subprocess
+    /// - `ClosePane`: Input was empty, caller should close this pane
+    pub fn handle_ctrl_d(&mut self) -> CtrlCResult {
+        if let Some(ref proc) = self.subprocess {
+            // CTRL+D - send EOF to subprocess
+            let _ = proc.write(&[0x04]);
+            CtrlCResult::KilledSubprocess
+        } else {
+            // Shell is active - close pane if input is empty
+            if self.shell.input_is_empty() {
                 CtrlCResult::ClosePane
+            } else {
+                // Input is not empty - do nothing (or could delete char under cursor)
+                CtrlCResult::ClearedInput
             }
         }
     }

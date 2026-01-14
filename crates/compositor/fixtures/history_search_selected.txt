@@ -1,5 +1,4 @@
-    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;                .
-compositor $ git status                                                         
+compositor ➜ git status                                                         
                                                                                 
                                                                                 
                                                                                 
@@ -21,4 +20,5 @@ compositor $ git status
                                                                                 
                                                                                 
                                                                                 
- 0 shell                                                       2026-01-13 16:50 
+                                                                                
+ 0 shell                                                       2026-01-13 18:10 

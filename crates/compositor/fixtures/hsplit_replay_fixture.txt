@@ -1,6 +1,6 @@
-compositor $ printf 'TOP_PANE_MARKER\n'                                         
+compositor ➜ printf 'TOP_PANE_MARKER\n'                                         
 TOP_PANE_MARKER                                                                 
-compositor $                                                                    
+compositor ➜                                                                    
                                                                                 
                                                                                 
                                                                                 
@@ -10,9 +10,9 @@ compositor $
                                                                                 
                                                                                 
 ────────────────────────────────────────────────────────────────────────────────
-compositor $ printf 'BOTTOM_PANE_MARKER\n'                                      
+compositor ➜ printf 'BOTTOM_PANE_MARKER\n'                                      
 BOTTOM_PANE_MARKER                                                              
-compositor $                                                                    
+compositor ➜                                                                    
                                                                                 
                                                                                 
                                                                                 
@@ -21,4 +21,4 @@ compositor $
                                                                                 
                                                                                 
                                                                                 
- 0 bash                                                        2026-01-13 16:50 
+ 0 bash                                                        2026-01-13 18:10 

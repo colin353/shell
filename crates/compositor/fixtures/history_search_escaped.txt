@@ -1,12 +1,4 @@
-..                                                                              
-    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;                .
-..                                                                              
-    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;                .
-..                                                                              
-    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;                .
-..                                                                              
-    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;                .
-compositor $ my_command                                                         
+compositor ➜ my_command                                                         
                                                                                 
                                                                                 
                                                                                 
@@ -21,4 +13,12 @@ compositor $ my_command
                                                                                 
                                                                                 
                                                                                 
- 0 shell                                                       2026-01-13 16:50 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ 0 shell                                                       2026-01-13 18:10 
