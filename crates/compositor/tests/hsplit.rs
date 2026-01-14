@@ -443,3 +443,234 @@ fn test_render_and_replay_hvsplit() -> Result<(), CompositorError> {
 
     Ok(())
 }
+
+#[test]
+fn test_history_search_navigation() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    // Create a temporary directory for the test history file with a unique name
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    // Create a ShellCore with our custom history path
+    // This will NOT import from zsh/bash because the file doesn't exist yet
+    // and we're not in a normal home directory context
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    // Pre-populate the history with fake commands
+    let history = core.history();
+
+    // Record some fake commands with varying properties
+    let id1 = history
+        .record_command("git status".to_string(), libshell::CommandSource::Human)
+        .unwrap();
+    history.record_exit(&id1, 0, 100).unwrap(); // Successful
+
+    let id2 = history
+        .record_command(
+            "git commit -m 'Initial commit'".to_string(),
+            libshell::CommandSource::Human,
+        )
+        .unwrap();
+    history.record_exit(&id2, 0, 500).unwrap(); // Successful
+
+    let id3 = history
+        .record_command(
+            "git push origin main".to_string(),
+            libshell::CommandSource::Ai,
+        )
+        .unwrap();
+    history.record_exit(&id3, 1, 200).unwrap(); // Failed (AI command)
+
+    let id4 = history
+        .record_command(
+            "cargo build --release".to_string(),
+            libshell::CommandSource::Human,
+        )
+        .unwrap();
+    history.record_exit(&id4, 0, 5000).unwrap(); // Successful
+
+    let id5 = history
+        .record_command("cargo test".to_string(), libshell::CommandSource::Human)
+        .unwrap();
+    history.record_exit(&id5, 0, 3000).unwrap(); // Successful
+
+    let id6 = history
+        .record_command(
+            "git log --oneline".to_string(),
+            libshell::CommandSource::Human,
+        )
+        .unwrap();
+    history.record_exit(&id6, 0, 50).unwrap(); // Successful
+
+    // Create a compositor with the custom core
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // No need to wait for subprocess - we're using the embedded shell
+    // Render the initial state
+    compositor.render_to_vec();
+
+    let initial_lines = compositor.get_text_lines();
+    save_fixture("history_search_initial.txt", &initial_lines);
+
+    // Send Ctrl+R to enter history search mode
+    compositor.handle_input(&[0x12]); // Ctrl+R
+    compositor.render_to_vec();
+
+    let search_mode_lines = compositor.get_text_lines();
+    save_fixture("history_search_empty_query.txt", &search_mode_lines);
+
+    // Verify we see the search indicator
+    let search_text: String = search_mode_lines.join("\n");
+    assert!(
+        search_text.contains("reverse-i-search") || search_text.contains("search"),
+        "Expected search indicator in output. Got:\n{}",
+        search_text
+    );
+
+    // Type "git" to search for git commands
+    compositor.handle_input(b"git");
+    compositor.render_to_vec();
+
+    let git_search_lines = compositor.get_text_lines();
+    save_fixture("history_search_git_query.txt", &git_search_lines);
+
+    // Verify we see git-related results
+    let git_search_text: String = git_search_lines.join("\n");
+    assert!(
+        git_search_text.contains("git"),
+        "Expected 'git' in search results. Got:\n{}",
+        git_search_text
+    );
+
+    // Press Down arrow to navigate to next result
+    compositor.handle_input(&[0x1b, b'[', b'B']); // Down arrow
+    compositor.render_to_vec();
+
+    let nav_down_lines = compositor.get_text_lines();
+    save_fixture("history_search_nav_down.txt", &nav_down_lines);
+
+    // Press Down arrow again
+    compositor.handle_input(&[0x1b, b'[', b'B']); // Down arrow
+    compositor.render_to_vec();
+
+    let nav_down2_lines = compositor.get_text_lines();
+    save_fixture("history_search_nav_down2.txt", &nav_down2_lines);
+
+    // Press Up arrow to go back
+    compositor.handle_input(&[0x1b, b'[', b'A']); // Up arrow
+    compositor.render_to_vec();
+
+    let nav_up_lines = compositor.get_text_lines();
+    save_fixture("history_search_nav_up.txt", &nav_up_lines);
+
+    // Press Enter to select the current result
+    compositor.handle_input(&[b'\r']); // Enter
+
+    // Force a full re-render to ensure the terminal state is updated
+    compositor.force_render();
+
+    let after_select_lines = compositor.get_text_lines();
+    save_fixture("history_search_selected.txt", &after_select_lines);
+
+    // The input line should now contain one of the git commands
+    // Check that the prompt line contains a git command
+    let after_select_text: String = after_select_lines.join("\n");
+    assert!(
+        after_select_text.contains("git"),
+        "Expected selected git command in input line. Got:\n{}",
+        after_select_text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+#[test]
+fn test_history_search_escape() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    // Create a temporary directory for the test history file
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_esc_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    // Create a ShellCore with our custom history path
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    // Pre-populate the history with some commands
+    let history = core.history();
+    let id1 = history
+        .record_command("echo hello".to_string(), libshell::CommandSource::Human)
+        .unwrap();
+    history.record_exit(&id1, 0, 10).unwrap();
+
+    let id2 = history
+        .record_command("ls -la".to_string(), libshell::CommandSource::Human)
+        .unwrap();
+    history.record_exit(&id2, 0, 20).unwrap();
+
+    // Create a compositor with the custom core
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Render initial state
+    compositor.render_to_vec();
+
+    // Type something first to have input to preserve
+    compositor.handle_input(b"my_command");
+    compositor.render_to_vec();
+
+    // Send Ctrl+R to enter history search mode
+    compositor.handle_input(&[0x12]); // Ctrl+R
+    compositor.render_to_vec();
+
+    let search_lines = compositor.get_text_lines();
+    let search_text: String = search_lines.join("\n");
+    assert!(
+        search_text.contains("reverse-i-search") || search_text.contains("search"),
+        "Should be in search mode"
+    );
+
+    // Press Escape to cancel search
+    compositor.handle_input(&[0x1b]); // ESC
+                                      // Need a small delay or another byte to distinguish from escape sequence
+    compositor.handle_input(&[0x1b]); // Send ESC again to confirm it's not a sequence start
+    compositor.render_to_vec();
+
+    let after_escape_lines = compositor.get_text_lines();
+    save_fixture("history_search_escaped.txt", &after_escape_lines);
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}

@@ -1,6 +1,4 @@
-compositor $ printf 'TOP_PANE_MARKER\n'                                         
-TOP_PANE_MARKER                                                                 
-compositor $                                                                    
+compositor $ git status                                                         
                                                                                 
                                                                                 
                                                                                 
@@ -9,10 +7,6 @@ compositor $
                                                                                 
                                                                                 
                                                                                 
-────────────────────────────────────────────────────────────────────────────────
-compositor $ printf 'BOTTOM_PANE_MARKER\n'                                      
-BOTTOM_PANE_MARKER                                                              
-compositor $                                                                    
                                                                                 
                                                                                 
                                                                                 
@@ -21,4 +15,10 @@ compositor $
                                                                                 
                                                                                 
                                                                                 
- 0 bash                                                        2026-01-11 20:19 
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ 0 shell                                                       2026-01-13 16:06 

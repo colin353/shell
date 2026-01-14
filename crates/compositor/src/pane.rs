@@ -177,6 +177,37 @@ impl Pane {
         }
     }
 
+    /// Create a new pane with a shared ShellCore (for custom history).
+    pub fn with_core(
+        width: usize,
+        height: usize,
+        core: std::sync::Arc<libshell::ShellCore>,
+    ) -> Self {
+        let (shell, initial_output) = libshell::Shell::with_core(core, width as u16, height as u16);
+        let mut terminal_emulator = emulator::TerminalEmulator::new(width, height);
+
+        // Process the initial prompt output
+        terminal_emulator.process(&initial_output);
+
+        Pane {
+            terminal_emulator,
+            shell,
+            subprocess: None,
+            read_buffer: [0u8; 4096],
+            scrollback_mode: false,
+            scroll_offset: 0,
+            search_mode: false,
+            search_input_focused: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match_index: None,
+            url_mode: false,
+            url_matches: Vec::new(),
+            current_url_index: None,
+            vim_engine: libvim::VimCursorEngine::new_owned(Vec::new(), height, width),
+        }
+    }
+
     /// Handle keyboard input.
     ///
     /// If a subprocess is running, input goes to it.

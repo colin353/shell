@@ -152,6 +152,16 @@ pub struct SearchResult {
     pub score: i64,
 }
 
+/// Search result with match indices for highlighting
+#[derive(Debug, Clone)]
+pub struct HistorySearchResult {
+    pub entry: HistoryEntry,
+    /// Base fuzzy match score
+    pub score: i64,
+    /// Character indices that matched the query (for highlighting)
+    pub match_indices: Vec<usize>,
+}
+
 /// Backup interval configuration
 #[derive(Debug, Clone)]
 pub struct BackupConfig {
@@ -574,6 +584,98 @@ impl ShellHistory {
             .collect()
     }
 
+    /// Search history with match indices for highlighting.
+    ///
+    /// This method performs fuzzy search and returns results with:
+    /// - Match indices for highlighting matched characters
+    /// - Enhanced scoring that prioritizes:
+    ///   - Better fuzzy match scores
+    ///   - Commands with exit_code = 0 (successful commands)
+    ///   - Commands typed by humans (not AI-generated)
+    ///   - More recent commands (slight recency bonus)
+    ///
+    /// If query is empty, returns most recent commands.
+    pub fn search_with_indices(&self, query: &str, limit: usize) -> Vec<HistorySearchResult> {
+        let entries = self.entries.read().unwrap();
+        let order = self.entry_order.read().unwrap();
+
+        // Scoring bonuses
+        const EXIT_SUCCESS_BONUS: i64 = 50;
+        const HUMAN_SOURCE_BONUS: i64 = 30;
+        const MAX_RECENCY_BONUS: i64 = 20;
+
+        let total_entries = order.len();
+
+        if query.is_empty() {
+            // Return most recent unique commands when query is empty
+            let mut seen_commands = std::collections::HashSet::new();
+            let mut results = Vec::new();
+            for id in order.iter().rev() {
+                if let Some(entry) = entries.get(id) {
+                    // Deduplicate by command text
+                    if seen_commands.insert(entry.command.clone()) {
+                        results.push(HistorySearchResult {
+                            entry: entry.clone(),
+                            score: 0,
+                            match_indices: Vec::new(),
+                        });
+                        if results.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+            return results;
+        }
+
+        let mut results: Vec<HistorySearchResult> = order
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, id)| {
+                let entry = entries.get(id)?;
+                let (base_score, indices) = self.matcher.fuzzy_indices(&entry.command, query)?;
+
+                // Calculate enhanced score with bonuses
+                let mut score = base_score;
+
+                // Bonus for successful commands (exit_code == 0)
+                if entry.exit_code == Some(0) {
+                    score += EXIT_SUCCESS_BONUS;
+                }
+
+                // Bonus for human-typed commands
+                if entry.source == CommandSource::Human {
+                    score += HUMAN_SOURCE_BONUS;
+                }
+
+                // Small recency bonus (more recent = higher index in order)
+                // Scale: 0 for oldest, MAX_RECENCY_BONUS for newest
+                if total_entries > 1 {
+                    let recency_factor = idx as f64 / (total_entries - 1) as f64;
+                    score += (recency_factor * MAX_RECENCY_BONUS as f64) as i64;
+                }
+
+                Some(HistorySearchResult {
+                    entry: entry.clone(),
+                    score,
+                    match_indices: indices,
+                })
+            })
+            .collect();
+
+        // Sort by score descending
+        results.sort_by(|a, b| b.score.cmp(&a.score));
+
+        // Deduplicate by command text, keeping highest-scoring entry for each command
+        let mut seen_commands = std::collections::HashSet::new();
+        results.retain(|result| seen_commands.insert(result.entry.command.clone()));
+
+        // Truncate to limit
+        results.truncate(limit);
+
+        results
+    }
+
     /// Import from a .zsh_history file
     ///
     /// Format: `: timestamp:0;command` or just `command` for older formats
@@ -955,6 +1057,50 @@ mod tests {
 
         let entry = history.get(&id).unwrap();
         assert!(entry.killed);
+    }
+
+    #[test]
+    fn test_search_with_indices() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("history.log");
+
+        let history = ShellHistory::new(&log_path).unwrap();
+
+        // Record some commands with different properties
+        let id1 = history
+            .record_command("git commit -m 'test'".to_string(), CommandSource::Human)
+            .unwrap();
+        history.record_exit(&id1, 0, 100).unwrap(); // Successful
+
+        let _id2 = history
+            .record_command("git push origin main".to_string(), CommandSource::Ai)
+            .unwrap();
+        // No exit recorded (still running or crashed)
+
+        let id3 = history
+            .record_command("git status".to_string(), CommandSource::Human)
+            .unwrap();
+        history.record_exit(&id3, 0, 50).unwrap(); // Successful
+
+        // Search for "git"
+        let results = history.search_with_indices("git", 10);
+        assert_eq!(results.len(), 3);
+
+        // Check that match indices are provided
+        assert!(!results[0].match_indices.is_empty());
+
+        // All results should have 'g', 'i', 't' matched at positions 0, 1, 2
+        for result in &results {
+            assert!(result.match_indices.contains(&0)); // 'g'
+            assert!(result.match_indices.contains(&1)); // 'i'
+            assert!(result.match_indices.contains(&2)); // 't'
+        }
+
+        // Empty query should return most recent commands
+        let empty_results = history.search_with_indices("", 10);
+        assert_eq!(empty_results.len(), 3);
+        // Most recent should be first (git status was last recorded)
+        assert_eq!(empty_results[0].entry.command, "git status");
     }
 }
 

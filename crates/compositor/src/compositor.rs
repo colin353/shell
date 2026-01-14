@@ -90,6 +90,46 @@ impl Compositor {
         })
     }
 
+    /// Create a new compositor with a custom ShellCore (for testing with pre-populated history).
+    pub fn with_core(
+        width: usize,
+        height: usize,
+        output: Arc<Mutex<dyn Write + Send>>,
+        core: Arc<libshell::ShellCore>,
+    ) -> Result<Self, CompositorError> {
+        // Create the wake pipe for signaling keyboard input
+        let (wake_read, wake_write) = nix::unistd::pipe().map_err(CompositorError::Pipe)?;
+
+        // Set wake_read to non-blocking
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        let flags =
+            fcntl(wake_read.as_raw_fd(), FcntlArg::F_GETFL).map_err(CompositorError::Fcntl)?;
+        let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+        fcntl(wake_read.as_raw_fd(), FcntlArg::F_SETFL(new_flags))
+            .map_err(CompositorError::Fcntl)?;
+
+        // Calculate pane height (total height minus status bar)
+        let pane_height = height.saturating_sub(STATUS_BAR_HEIGHT);
+
+        // Create the initial tab with the custom core
+        let tab = Tab::with_core("shell".to_string(), width, pane_height, core)?;
+
+        Ok(Self {
+            tabs: vec![tab],
+            active_tab: 0,
+            width,
+            height,
+            global_emulator: emulator::TerminalEmulator::new(width, height),
+            prev_frame: emulator::TerminalGrid::new(width, height),
+            output,
+            wake_read,
+            wake_write,
+            input_queue: Mutex::new(VecDeque::new()),
+            prefix_mode: false,
+            synchronized_output: false,
+        })
+    }
+
     /// Queue keyboard input to be processed by the event loop.
     ///
     /// This method is thread-safe and can be called from any thread.

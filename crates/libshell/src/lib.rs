@@ -21,7 +21,10 @@ use std::sync::{Arc, RwLock};
 
 pub mod history;
 
-pub use history::{BackupConfig, CommandSource, EntryId, HistoryEntry, SearchResult, ShellHistory};
+pub use history::{
+    BackupConfig, CommandSource, EntryId, HistoryEntry, HistorySearchResult, SearchResult,
+    ShellHistory,
+};
 
 /// Error type for shell operations
 #[derive(Debug)]
@@ -253,6 +256,16 @@ pub struct Shell {
     current_command_id: Option<EntryId>,
     /// Start time of currently running command
     command_start_time: Option<std::time::Instant>,
+
+    // --- CTRL+R history search state ---
+    /// Whether we're in history search mode (CTRL+R)
+    history_search_mode: bool,
+    /// Search results from fuzzy matching
+    history_search_results: Vec<HistorySearchResult>,
+    /// Currently selected result index (0 = first/best match)
+    history_search_selected: usize,
+    /// Number of UI lines drawn in the last render (for cleanup)
+    history_search_ui_lines: usize,
 }
 
 impl Shell {
@@ -298,6 +311,11 @@ impl Shell {
             in_escape_sequence: false,
             current_command_id: None,
             command_start_time: None,
+            // CTRL+R search state
+            history_search_mode: false,
+            history_search_results: Vec::new(),
+            history_search_selected: 0,
+            history_search_ui_lines: 0,
         };
 
         let prompt = shell.get_prompt();
@@ -451,6 +469,11 @@ impl Shell {
     // --- Private implementation ---
 
     fn process_input_byte(&mut self, byte: u8) -> Option<Vec<u8>> {
+        // If in history search mode, route to search input handler
+        if self.history_search_mode {
+            return self.process_search_input_byte(byte);
+        }
+
         // Handle escape sequences
         if self.in_escape_sequence {
             self.escape_buffer.push(byte);
@@ -497,6 +520,8 @@ impl Shell {
                     None
                 }
             }
+            // Ctrl+R - enter history search mode
+            0x12 => Some(self.enter_history_search()),
             // Ctrl+C - cancel current input
             0x03 => {
                 self.input_buffer.clear();
@@ -704,6 +729,359 @@ impl Shell {
         } else {
             None
         }
+    }
+
+    // --- CTRL+R History Search Implementation ---
+
+    /// Number of search results to display
+    const SEARCH_RESULT_COUNT: usize = 20;
+
+    /// Enter history search mode
+    fn enter_history_search(&mut self) -> Vec<u8> {
+        self.history_search_mode = true;
+        self.history_search_selected = 0;
+
+        // Perform initial search with current input
+        self.update_history_search();
+
+        // Render the search UI
+        self.render_search_ui()
+    }
+
+    /// Exit history search mode without selecting
+    fn exit_history_search(&mut self) -> Vec<u8> {
+        self.history_search_mode = false;
+        self.history_search_results.clear();
+        self.history_search_selected = 0;
+
+        // Clear search UI and redraw prompt with current input
+        self.clear_search_ui_and_redraw()
+    }
+
+    /// Select current result and exit search mode
+    fn select_history_search(&mut self) -> Vec<u8> {
+        let selected_command = if !self.history_search_results.is_empty() {
+            Some(
+                self.history_search_results[self.history_search_selected]
+                    .entry
+                    .command
+                    .clone(),
+            )
+        } else {
+            None
+        };
+
+        self.history_search_mode = false;
+        self.history_search_results.clear();
+        self.history_search_selected = 0;
+
+        // If we have a selection, replace the input buffer
+        if let Some(cmd) = selected_command {
+            self.input_buffer = cmd;
+            self.cursor_pos = self.input_buffer.len();
+        }
+
+        // Clear search UI and redraw prompt with the selected command
+        self.clear_search_ui_and_redraw()
+    }
+
+    /// Update search results based on current input
+    fn update_history_search(&mut self) {
+        self.history_search_results = self
+            .core
+            .history()
+            .search_with_indices(&self.input_buffer, Self::SEARCH_RESULT_COUNT);
+
+        // Reset selection to first result
+        self.history_search_selected = 0;
+    }
+
+    /// Process input while in history search mode
+    fn process_search_input_byte(&mut self, byte: u8) -> Option<Vec<u8>> {
+        // Handle escape sequences in search mode
+        if self.in_escape_sequence {
+            self.escape_buffer.push(byte);
+            return self.try_parse_search_escape_sequence();
+        }
+
+        if byte == 0x1b {
+            // ESC - could be escape key or start of sequence
+            self.in_escape_sequence = true;
+            self.escape_buffer.clear();
+            self.escape_buffer.push(byte);
+            return None;
+        }
+
+        match byte {
+            // Enter - select current result
+            b'\r' | b'\n' => Some(self.select_history_search()),
+            // Ctrl+C or Escape (handled in escape sequence) - cancel search
+            0x03 => Some(self.exit_history_search()),
+            // Ctrl+R again - move to next result (cycle down)
+            0x12 => {
+                if !self.history_search_results.is_empty() {
+                    self.history_search_selected =
+                        (self.history_search_selected + 1) % self.history_search_results.len();
+                }
+                Some(self.render_search_ui())
+            }
+            // Backspace - remove character from search query
+            0x7f | 0x08 => {
+                if self.cursor_pos > 0 {
+                    self.cursor_pos -= 1;
+                    self.input_buffer.remove(self.cursor_pos);
+                    self.update_history_search();
+                }
+                Some(self.render_search_ui())
+            }
+            // Regular printable character - add to search query
+            0x20..=0x7e => {
+                self.input_buffer.insert(self.cursor_pos, byte as char);
+                self.cursor_pos += 1;
+                self.update_history_search();
+                Some(self.render_search_ui())
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to parse escape sequence while in search mode
+    fn try_parse_search_escape_sequence(&mut self) -> Option<Vec<u8>> {
+        if self.escape_buffer.len() < 2 {
+            return None;
+        }
+
+        // Just ESC key pressed (no following bytes) - exit search
+        if self.escape_buffer.len() == 1 {
+            self.in_escape_sequence = false;
+            self.escape_buffer.clear();
+            return Some(self.exit_history_search());
+        }
+
+        // Check for CSI sequence (ESC [)
+        if self.escape_buffer[1] != b'[' {
+            // Plain ESC - exit search
+            self.in_escape_sequence = false;
+            self.escape_buffer.clear();
+            return Some(self.exit_history_search());
+        }
+
+        if self.escape_buffer.len() < 3 {
+            return None;
+        }
+
+        let result = match self.escape_buffer[2] {
+            b'A' => {
+                // Up arrow - move selection up visually (higher index, since results are displayed bottom-to-top)
+                if !self.history_search_results.is_empty() {
+                    self.history_search_selected = (self.history_search_selected + 1)
+                        .min(self.history_search_results.len() - 1);
+                }
+                Some(self.render_search_ui())
+            }
+            b'B' => {
+                // Down arrow - move selection down visually (lower index, towards best match near prompt)
+                if !self.history_search_results.is_empty() && self.history_search_selected > 0 {
+                    self.history_search_selected -= 1;
+                }
+                Some(self.render_search_ui())
+            }
+            _ => None,
+        };
+
+        self.in_escape_sequence = false;
+        self.escape_buffer.clear();
+        result
+    }
+
+    /// Render the search UI above the input line
+    fn render_search_ui(&mut self) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        let num_results = self.history_search_results.len();
+        let display_count = num_results.min(Self::SEARCH_RESULT_COUNT);
+
+        // Calculate how many lines we need for the UI
+        // Results + 1 for the search indicator line
+        let new_ui_lines = display_count + 1;
+        let prev_ui_lines = self.history_search_ui_lines;
+
+        // Update the UI lines count immediately so subsequent renders in the same
+        // batch will have the correct value (important when processing multiple chars)
+        self.history_search_ui_lines = new_ui_lines;
+
+        let prompt = self.get_prompt();
+        let prompt_len = prompt.len();
+
+        // Move cursor to column 0
+        output.extend(b"\r");
+
+        // If we previously rendered UI lines, move up past them first to get to the top
+        // This ensures we're starting from a known position
+        if prev_ui_lines > 0 {
+            for _ in 0..prev_ui_lines {
+                output.extend(b"\x1b[A"); // Move up
+            }
+        }
+
+        // Now we're at the top of the previous UI (or at the prompt if first render)
+        // If this is the first render, we need to create space by printing newlines
+        if prev_ui_lines == 0 && new_ui_lines > 0 {
+            // First time: create space by printing newlines (scrolls terminal if needed)
+            for _ in 0..new_ui_lines {
+                output.extend(b"\n");
+            }
+            // Move back up to where UI should start
+            for _ in 0..new_ui_lines {
+                output.extend(b"\x1b[A");
+            }
+        }
+
+        // Clear from cursor to end of screen
+        output.extend(b"\x1b[J");
+
+        // Now draw each result line (from top to bottom)
+        // Best matches should be at the bottom (closest to prompt), so display in reverse
+        for i in (0..display_count).rev() {
+            let result = &self.history_search_results[i];
+            let is_selected = i == self.history_search_selected;
+
+            // Selection indicator
+            if is_selected {
+                // Cyan background for selected line
+                output.extend(b"\x1b[46m\x1b[30m"); // Cyan bg, black fg
+                output.extend(b"> ");
+            } else {
+                output.extend(b"  ");
+            }
+
+            // Render the command with match highlighting
+            output.extend(self.render_highlighted_command(
+                &result.entry.command,
+                &result.match_indices,
+                is_selected,
+            ));
+
+            // Reset colors and clear to end of line
+            output.extend(b"\x1b[0m\x1b[K\r\n");
+        }
+
+        // Draw the search indicator line
+        output.extend(b"\x1b[36m"); // Cyan text
+        output.extend(format!("(reverse-i-search)`{}'", self.input_buffer).as_bytes());
+        if num_results == 0 && !self.input_buffer.is_empty() {
+            output.extend(b" [no matches]");
+        } else if num_results > 0 {
+            output.extend(
+                format!(" [{}/{}]", self.history_search_selected + 1, num_results).as_bytes(),
+            );
+        }
+        output.extend(b"\x1b[0m\x1b[K\r\n");
+
+        // Now redraw the prompt line
+        output.extend(prompt.as_bytes());
+        output.extend(self.input_buffer.as_bytes());
+        output.extend(b"\x1b[K"); // Clear to end of line
+
+        // Position cursor correctly
+        let target_col = prompt_len + self.cursor_pos;
+        let current_pos = prompt_len + self.input_buffer.len();
+        if current_pos > target_col {
+            output.extend(format!("\x1b[{}D", current_pos - target_col).as_bytes());
+        }
+
+        output
+    }
+
+    /// Render a command with matched characters highlighted
+    fn render_highlighted_command(
+        &self,
+        command: &str,
+        match_indices: &[usize],
+        is_selected: bool,
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        // Replace newlines and other control characters with visible representations
+        // We need to track original indices for match highlighting
+        let chars: Vec<char> = command.chars().collect();
+
+        // Account for 2 chars for selection indicator "  " or "> "
+        let max_display_width = (self.cols as usize).saturating_sub(5); // 2 for indicator, 3 for "..."
+        let mut display_width = 0;
+
+        for (i, &ch) in chars.iter().enumerate() {
+            // Check if we've exceeded the display width
+            if display_width >= max_display_width {
+                output.extend(b"...");
+                break;
+            }
+
+            // Determine what to display for this character
+            let display_char = match ch {
+                '\n' | '\r' => '\\',
+                '\t' => ' ',
+                c if c.is_control() => ' ',
+                c => c,
+            };
+
+            if match_indices.contains(&i) {
+                // Highlighted match - bold yellow
+                if is_selected {
+                    output.extend(b"\x1b[1;33m"); // Bold yellow on cyan bg
+                } else {
+                    output.extend(b"\x1b[1;33m"); // Bold yellow
+                }
+                output.extend(display_char.to_string().as_bytes());
+                if is_selected {
+                    output.extend(b"\x1b[22;30m"); // Reset bold, back to black fg
+                } else {
+                    output.extend(b"\x1b[22;39m"); // Reset bold and color
+                }
+            } else {
+                output.extend(display_char.to_string().as_bytes());
+            }
+
+            display_width += 1;
+        }
+
+        output
+    }
+
+    /// Clear the search UI and redraw the prompt
+    fn clear_search_ui_and_redraw(&mut self) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        let ui_lines = self.history_search_ui_lines;
+
+        // Move cursor to column 0
+        output.extend(b"\r");
+
+        // Move up to the first UI line
+        for _ in 0..ui_lines {
+            output.extend(b"\x1b[A");
+        }
+
+        // Clear from cursor to end of screen
+        output.extend(b"\x1b[J");
+
+        // Redraw prompt with current input
+        let prompt = self.get_prompt();
+        output.extend(prompt.as_bytes());
+        output.extend(self.input_buffer.as_bytes());
+
+        // Position cursor correctly
+        let prompt_len = prompt.len();
+        let target_col = prompt_len + self.cursor_pos;
+        let current_pos = prompt_len + self.input_buffer.len();
+        if current_pos > target_col {
+            output.extend(format!("\x1b[{}D", current_pos - target_col).as_bytes());
+        }
+
+        // Reset the UI lines tracking
+        self.history_search_ui_lines = 0;
+
+        output
     }
 
     /// Execute the current command and return output bytes.
