@@ -9,6 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Fixed time used for all tests to avoid fixture churn
+fn fixed_test_time() -> chrono::DateTime<chrono::Local> {
+    use chrono::TimeZone;
+    chrono::Local.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap()
+}
+
 /// A simple in-memory writer for capturing compositor output
 #[derive(Clone, Default)]
 struct MemoryWriter {
@@ -248,6 +254,9 @@ fn test_render_and_replay() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
 
@@ -312,6 +321,9 @@ fn test_vsplit_render_and_replay() -> Result<(), CompositorError> {
     // Create a compositor and split it vertically using Ctrl+b %
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -400,6 +412,9 @@ fn test_render_and_replay_hvsplit() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -518,6 +533,9 @@ fn test_history_search_navigation() -> Result<(), CompositorError> {
     // Create a compositor with the custom core
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // No need to wait for subprocess - we're using the embedded shell
     // Render the initial state
@@ -640,6 +658,9 @@ fn test_history_search_escape() -> Result<(), CompositorError> {
     // Create a compositor with the custom core
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // Render initial state
     compositor.render_to_vec();

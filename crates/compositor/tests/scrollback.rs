@@ -9,6 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Fixed time used for all tests to avoid fixture churn
+fn fixed_test_time() -> chrono::DateTime<chrono::Local> {
+    use chrono::TimeZone;
+    chrono::Local.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap()
+}
+
 /// A simple in-memory writer for capturing compositor output
 #[derive(Clone, Default)]
 struct MemoryWriter {
@@ -70,6 +76,9 @@ fn test_scrollback_basic() -> Result<(), CompositorError> {
     // Create a compositor with a small terminal to ensure scrollback is used
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -140,6 +149,9 @@ fn test_scrollback_jump_to_top() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -227,6 +239,9 @@ fn test_search_basic() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
 
@@ -271,6 +286,9 @@ fn test_search_navigate_matches() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -321,6 +339,9 @@ fn test_search_exit_to_scrollback() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
 
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
 
@@ -367,6 +388,9 @@ fn test_search_clear_query() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -415,6 +439,9 @@ fn test_search_backspace() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
     let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);

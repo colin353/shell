@@ -21,4 +21,4 @@ compositor ➜ my_command
                                                                                 
                                                                                 
                                                                                 
- 0 shell                                                       2026-01-13 18:14 
+ 0 shell                                                       2025-01-01 12:00 

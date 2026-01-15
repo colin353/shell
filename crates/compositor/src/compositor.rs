@@ -10,6 +10,9 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
 
+/// Clock function type for getting current time (allows mocking in tests)
+pub type ClockFn = Box<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>;
+
 /// The main compositor that manages terminal panes and the event loop.
 pub struct Compositor {
     /// List of tabs, each with its own root pane tree
@@ -38,6 +41,9 @@ pub struct Compositor {
 
     // Whether the terminal supports synchronized output mode
     pub synchronized_output: bool,
+
+    // Clock function for getting current time (mockable for tests)
+    clock: ClockFn,
 }
 
 impl Compositor {
@@ -87,6 +93,7 @@ impl Compositor {
             input_queue: Mutex::new(VecDeque::new()),
             prefix_mode: false,
             synchronized_output: false,
+            clock: Box::new(|| chrono::Local::now()),
         })
     }
 
@@ -127,7 +134,13 @@ impl Compositor {
             input_queue: Mutex::new(VecDeque::new()),
             prefix_mode: false,
             synchronized_output: false,
+            clock: Box::new(|| chrono::Local::now()),
         })
+    }
+
+    /// Set a fixed time for rendering (useful for tests to avoid fixture churn).
+    pub fn set_fixed_time(&mut self, time: chrono::DateTime<chrono::Local>) {
+        self.clock = Box::new(move || time);
     }
 
     /// Queue keyboard input to be processed by the event loop.
@@ -1176,8 +1189,7 @@ impl Compositor {
             return;
         } else {
             // Render the date/time on the right side of the first status bar row
-            let now = std::time::SystemTime::now();
-            let datetime = chrono::DateTime::<chrono::Local>::from(now);
+            let datetime = (self.clock)();
             datetime.format(" %Y-%m-%d %H:%M ").to_string()
         };
 
