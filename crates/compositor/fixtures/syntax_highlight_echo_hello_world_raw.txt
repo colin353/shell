@@ -1,0 +1,1 @@
+compositor\x1b[1;12H\x1b[32m\xe2\x9e\x9c\x1b[1;14H\x1b[1;36mecho\x1b[1;19H\x1b[0mhello\x1b[1;25Hworld\x1b[24;1H\x1b[1;32;40m 0 shell \x1b[0;30;42m                                                      2025-01-01 12:00\x1b[?7l \x1b[?7h\x1b[1;30H\x1b[0m

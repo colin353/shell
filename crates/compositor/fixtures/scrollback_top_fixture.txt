@@ -1,5 +1,6 @@
-compositor ➜ cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/
-lorem_ipsum.txt                                                                 
+cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/lorem_ipsum.t
+cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/lorem_ipsum.t
+xt                                                                              
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor i
 ncididunt ut labore et dolore magna aliqua.                                     
 Line 2: Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi 
@@ -20,5 +21,4 @@ Line 9: Maecenas fermentum consequat mi. Donec fermentum. Pellentesque malesuada
  nulla a mi.                                                                    
 Line 10: Duis sapien sem, aliquet sed, vulputate eget, feugiat sit amet, eros. D
 uis sapien sem.                                                                 
-Line 11: SEARCHABLE_MARKER_ALPHA - This line contains a unique marker for search
- 0 bash                                                             SCROLL 0/94 
+ 0 bash                                                             SCROLL 0/95 

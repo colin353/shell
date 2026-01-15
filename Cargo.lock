@@ -301,6 +301,7 @@ dependencies = [
  "fuzzy-matcher",
  "serde",
  "serde_json",
+ "shell-syntax",
  "tempfile",
  "uuid",
 ]

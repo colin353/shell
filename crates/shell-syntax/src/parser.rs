@@ -47,10 +47,14 @@ impl<F: FileSystem> ShellSyntax<F> {
 
     /// Update the source text and reparse.
     ///
-    /// Uses incremental parsing when possible for efficiency.
+    /// For now, we do a full reparse each time. Incremental parsing with
+    /// tree-sitter requires calling `tree.edit()` before reparsing to describe
+    /// the edit operation, which adds complexity. For shell input which is
+    /// typically short (a few hundred characters at most), full reparsing is
+    /// fast enough.
     pub fn update(&mut self, new_source: &str) {
-        // Parse with the old tree for incremental parsing
-        self.tree = self.parser.parse(new_source, self.tree.as_ref());
+        // Do a full reparse (pass None instead of old tree)
+        self.tree = self.parser.parse(new_source, None);
         self.source = new_source.to_string();
     }
 

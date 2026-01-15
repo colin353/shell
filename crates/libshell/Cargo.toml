@@ -9,6 +9,7 @@ serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
 fuzzy-matcher = "0.3"
 fs2 = "0.4"
+shell-syntax = { path = "../shell-syntax" }
 
 [dev-dependencies]
 tempfile = "3.10"

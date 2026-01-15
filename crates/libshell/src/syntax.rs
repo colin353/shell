@@ -1,0 +1,247 @@
+//! Syntax highlighting and tab completion integration.
+//!
+//! This module wraps the `shell-syntax` crate and provides:
+//! - ANSI color rendering for highlighted spans
+//! - CompletionContext construction from shell state
+//! - Tab completion handling
+
+use shell_syntax::{
+    CompletionContext, HighlightKind, HighlightedSpan, ShellSyntax,
+};
+use std::path::PathBuf;
+
+/// Syntax highlighter and completion engine for the shell.
+pub struct SyntaxHandler {
+    syntax: ShellSyntax,
+    /// Cached PATH executables (refreshed periodically).
+    path_executables: Vec<String>,
+    /// Last time PATH was scanned.
+    path_last_refresh: std::time::Instant,
+}
+
+impl Default for SyntaxHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SyntaxHandler {
+    /// Create a new syntax handler.
+    pub fn new() -> Self {
+        let path_executables = scan_path_executables();
+        Self {
+            syntax: ShellSyntax::new(),
+            path_executables,
+            path_last_refresh: std::time::Instant::now(),
+        }
+    }
+
+    /// Update the input and get highlighted output.
+    ///
+    /// Returns the input string with ANSI color codes applied.
+    pub fn highlight(&mut self, input: &str, cwd: &PathBuf) -> String {
+        self.maybe_refresh_path();
+        self.syntax.update(input);
+
+        let context = self.build_context(cwd);
+        let spans = self.syntax.highlight(&context);
+
+        render_highlighted(input, &spans)
+    }
+
+    /// Get a single completion if exactly one match exists.
+    ///
+    /// Returns the completion text to insert and the range to replace.
+    pub fn complete(
+        &mut self,
+        input: &str,
+        cursor_pos: usize,
+        cwd: &PathBuf,
+    ) -> Option<(String, usize, usize)> {
+        self.maybe_refresh_path();
+        self.syntax.update(input);
+
+        let context = self.build_context(cwd);
+        self.syntax.complete(cursor_pos, &context).map(|c| {
+            (c.text, c.replace_start, c.replace_end)
+        })
+    }
+
+    /// Get all completions at cursor position.
+    #[allow(dead_code)]
+    pub fn completions(
+        &mut self,
+        input: &str,
+        cursor_pos: usize,
+        cwd: &PathBuf,
+    ) -> Vec<String> {
+        self.maybe_refresh_path();
+        self.syntax.update(input);
+
+        let context = self.build_context(cwd);
+        self.syntax
+            .completions(cursor_pos, &context)
+            .into_iter()
+            .map(|c| c.text)
+            .collect()
+    }
+
+    /// Check if current input has syntax errors.
+    #[allow(dead_code)]
+    pub fn has_errors(&self) -> bool {
+        self.syntax.has_errors()
+    }
+
+    /// Build completion context from current shell state.
+    fn build_context(&self, cwd: &PathBuf) -> CompletionContext {
+        CompletionContext {
+            env_vars: std::env::vars().collect(),
+            path_executables: self.path_executables.clone(),
+            cwd: cwd.clone(),
+        }
+    }
+
+    /// Refresh PATH executables if enough time has passed.
+    fn maybe_refresh_path(&mut self) {
+        // Refresh every 30 seconds
+        if self.path_last_refresh.elapsed().as_secs() > 30 {
+            self.path_executables = scan_path_executables();
+            self.path_last_refresh = std::time::Instant::now();
+        }
+    }
+}
+
+/// Scan PATH for available executables.
+fn scan_path_executables() -> Vec<String> {
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let mut executables = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for dir in path_var.split(':') {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            if metadata.permissions().mode() & 0o111 != 0 {
+                                if let Some(name) = entry.file_name().to_str() {
+                                    if seen.insert(name.to_string()) {
+                                        executables.push(name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            if let Some(name) = entry.file_name().to_str() {
+                                if seen.insert(name.to_string()) {
+                                    executables.push(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    executables.sort();
+    executables
+}
+
+/// Render input with ANSI color codes based on highlight spans.
+fn render_highlighted(input: &str, spans: &[HighlightedSpan]) -> String {
+    if spans.is_empty() {
+        return input.to_string();
+    }
+
+    let mut result = String::with_capacity(input.len() * 2);
+    let mut pos = 0;
+
+    for span in spans {
+        // Add unhighlighted text before this span
+        if span.start > pos {
+            result.push_str(&input[pos..span.start]);
+        }
+
+        // Add highlighted span
+        let text = &input[span.start..span.end.min(input.len())];
+        let (start_code, end_code) = highlight_to_ansi(span.kind);
+        result.push_str(start_code);
+        result.push_str(text);
+        result.push_str(end_code);
+
+        pos = span.end;
+    }
+
+    // Add remaining text
+    if pos < input.len() {
+        result.push_str(&input[pos..]);
+    }
+
+    result
+}
+
+/// Convert a HighlightKind to ANSI escape codes.
+fn highlight_to_ansi(kind: HighlightKind) -> (&'static str, &'static str) {
+    const RESET: &str = "\x1b[0m";
+
+    match kind {
+        // Commands - bold blue
+        HighlightKind::Command => ("\x1b[1;34m", RESET),
+        // Command not found - red with underline
+        HighlightKind::CommandNotFound => ("\x1b[31;4m", RESET),
+        // Builtins - bold cyan
+        HighlightKind::Builtin => ("\x1b[1;36m", RESET),
+        // Arguments - default (no color)
+        HighlightKind::Argument => ("", ""),
+        // Flags - yellow
+        HighlightKind::Flag => ("\x1b[33m", RESET),
+        // Strings - green
+        HighlightKind::String => ("\x1b[32m", RESET),
+        // Environment variables - magenta
+        HighlightKind::EnvVar => ("\x1b[35m", RESET),
+        // Env var not found - red
+        HighlightKind::EnvVarNotFound => ("\x1b[31m", RESET),
+        // Operators - bold white
+        HighlightKind::Operator => ("\x1b[1;37m", RESET),
+        // Redirects - cyan
+        HighlightKind::Redirect => ("\x1b[36m", RESET),
+        // Comments - dim/gray
+        HighlightKind::Comment => ("\x1b[90m", RESET),
+        // Errors - red background
+        HighlightKind::Error => ("\x1b[41;97m", RESET),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_highlight_to_ansi() {
+        let (start, end) = highlight_to_ansi(HighlightKind::Command);
+        assert!(start.contains("34")); // Blue
+        assert_eq!(end, "\x1b[0m");
+    }
+
+    #[test]
+    fn test_render_highlighted_empty() {
+        let result = render_highlighted("echo hello", &[]);
+        assert_eq!(result, "echo hello");
+    }
+
+    #[test]
+    fn test_render_highlighted() {
+        let spans = vec![
+            HighlightedSpan::new(0, 4, HighlightKind::Builtin),
+            HighlightedSpan::new(5, 10, HighlightKind::Argument),
+        ];
+        let result = render_highlighted("echo hello", &spans);
+        assert!(result.contains("\x1b[1;36m")); // Cyan for builtin
+        assert!(result.contains("echo"));
+        assert!(result.contains("hello"));
+    }
+}
