@@ -1,0 +1,13 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "$PATH",
+        display: "PATH",
+        kind: EnvVar,
+        replace_start: 6,
+        replace_end: 8,
+    },
+]

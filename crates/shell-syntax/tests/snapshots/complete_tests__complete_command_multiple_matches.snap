@@ -1,0 +1,34 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "case",
+        display: "case",
+        kind: Builtin,
+        replace_start: 0,
+        replace_end: 2,
+    },
+    Completion {
+        text: "cat",
+        display: "cat",
+        kind: Command,
+        replace_start: 0,
+        replace_end: 2,
+    },
+    Completion {
+        text: "cargo",
+        display: "cargo",
+        kind: Command,
+        replace_start: 0,
+        replace_end: 2,
+    },
+    Completion {
+        text: "cat",
+        display: "cat",
+        kind: Command,
+        replace_start: 0,
+        replace_end: 2,
+    },
+]

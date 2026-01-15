@@ -1,0 +1,13 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "grep",
+        display: "grep",
+        kind: Command,
+        replace_start: 5,
+        replace_end: 8,
+    },
+]

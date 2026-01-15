@@ -1,0 +1,16 @@
+---
+source: crates/shell-syntax/tests/highlight_tests.rs
+expression: highlights
+---
+[
+    HighlightedSpan {
+        start: 0,
+        end: 4,
+        kind: Builtin,
+    },
+    HighlightedSpan {
+        start: 5,
+        end: 18,
+        kind: String,
+    },
+]

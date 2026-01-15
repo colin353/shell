@@ -1,0 +1,12 @@
+[package]
+name = "shell-syntax"
+version = "0.1.0"
+edition = "2021"
+description = "Syntax highlighting and tab completion for shell input using tree-sitter"
+
+[dependencies]
+tree-sitter = "0.24"
+tree-sitter-bash = "0.23"
+
+[dev-dependencies]
+insta = "1.40"

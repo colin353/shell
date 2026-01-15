@@ -1,0 +1,13 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "./file.txt",
+        display: "file.txt",
+        kind: File,
+        replace_start: 4,
+        replace_end: 8,
+    },
+]

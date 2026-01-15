@@ -1,0 +1,13 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completion
+---
+Some(
+    Completion {
+        text: "cargo",
+        display: "cargo",
+        kind: Command,
+        replace_start: 0,
+        replace_end: 4,
+    },
+)

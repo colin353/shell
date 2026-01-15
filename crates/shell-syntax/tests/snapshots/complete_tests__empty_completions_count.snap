@@ -1,0 +1,5 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions.len()
+---
+3

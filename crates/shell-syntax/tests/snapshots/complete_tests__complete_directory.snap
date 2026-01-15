@@ -1,0 +1,13 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "folder/",
+        display: "folder/",
+        kind: Directory,
+        replace_start: 3,
+        replace_end: 5,
+    },
+]

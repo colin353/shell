@@ -1,0 +1,13 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "test",
+        display: "test",
+        kind: Subcommand,
+        replace_start: 6,
+        replace_end: 8,
+    },
+]

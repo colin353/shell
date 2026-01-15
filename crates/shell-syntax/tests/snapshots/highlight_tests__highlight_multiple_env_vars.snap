@@ -1,0 +1,26 @@
+---
+source: crates/shell-syntax/tests/highlight_tests.rs
+expression: highlights
+---
+[
+    HighlightedSpan {
+        start: 0,
+        end: 4,
+        kind: Builtin,
+    },
+    HighlightedSpan {
+        start: 5,
+        end: 10,
+        kind: EnvVar,
+    },
+    HighlightedSpan {
+        start: 11,
+        end: 16,
+        kind: EnvVar,
+    },
+    HighlightedSpan {
+        start: 17,
+        end: 29,
+        kind: EnvVarNotFound,
+    },
+]

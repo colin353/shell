@@ -1,0 +1,20 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "$HOME",
+        display: "HOME",
+        kind: EnvVar,
+        replace_start: 6,
+        replace_end: 8,
+    },
+    Completion {
+        text: "$HOSTNAME",
+        display: "HOSTNAME",
+        kind: EnvVar,
+        replace_start: 6,
+        replace_end: 8,
+    },
+]

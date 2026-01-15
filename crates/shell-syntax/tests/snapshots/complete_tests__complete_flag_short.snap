@@ -1,0 +1,118 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "-a",
+        display: "-a",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "--all",
+        display: "--all",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "-l",
+        display: "-l",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "--long",
+        display: "--long",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "-h",
+        display: "-h",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "--human-readable",
+        display: "--human-readable",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "-R",
+        display: "-R",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "--recursive",
+        display: "--recursive",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "-S",
+        display: "-S",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "-t",
+        display: "-t",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "-r",
+        display: "-r",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "--reverse",
+        display: "--reverse",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "--color",
+        display: "--color",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "-1",
+        display: "-1",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "-d",
+        display: "-d",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+    Completion {
+        text: "--directory",
+        display: "--directory",
+        kind: Flag,
+        replace_start: 3,
+        replace_end: 4,
+    },
+]
