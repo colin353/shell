@@ -9,3 +9,4 @@ emulator.path = "../emulator"
 [dev-dependencies]
 pty = { path = "../pty" }
 emulator = { path = "../emulator" }
+serial_test = "3"

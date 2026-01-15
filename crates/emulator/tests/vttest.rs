@@ -2,10 +2,14 @@
 //!
 //! These tests spawn the `vttest` program and verify that the emulator
 //! correctly renders the various test screens.
+//!
+//! These tests must run serially because they spawn PTY processes that compete
+//! for system resources when run in parallel, causing timing-related failures.
 
 use emulator::TerminalEmulator;
 use pty::PtyProcess;
 use serde::Deserialize;
+use serial_test::serial;
 use std::thread;
 use std::time::Duration;
 

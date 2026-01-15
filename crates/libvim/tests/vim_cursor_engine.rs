@@ -2,10 +2,14 @@
 //!
 //! These tests spawn real vim with a test file, send input sequences,
 //! and compare the cursor position and selection state with VimCursorEngine.
+//!
+//! These tests must run serially because they spawn vim processes that compete
+//! for system resources when run in parallel, causing timing-related failures.
 
 use emulator::TerminalEmulator;
 use libvim::VimCursorEngine;
 use pty::PtyProcess;
+use serial_test::serial;
 use std::fs;
 use std::path::Path;
 use std::thread;
@@ -27,7 +31,14 @@ struct CursorInfo {
 }
 
 /// Run an arbitrary command with given input sequences and return the emulator state.
-fn run_pty_test(command: &str, cols: u16, rows: u16, inputs: &[&[u8]]) -> TerminalEmulator {
+/// Waits for `wait_for_content` to appear in the terminal before sending inputs.
+fn run_pty_test(
+    command: &str,
+    cols: u16,
+    rows: u16,
+    inputs: &[&[u8]],
+    wait_for_content: &str,
+) -> TerminalEmulator {
     let pty = PtyProcess::spawn(command, cols, rows)
         .unwrap_or_else(|e| panic!("Failed to spawn {}: {}", command, e));
 
@@ -49,10 +60,47 @@ fn run_pty_test(command: &str, cols: u16, rows: u16, inputs: &[&[u8]]) -> Termin
         }
     };
 
-    // Wait for vim to start
-    for _ in 0..50 {
+    // Helper to check if content is visible in the grid
+    let content_visible = |emulator: &TerminalEmulator, content: &str| -> bool {
+        for y in 0..emulator.grid().rows {
+            let line = emulator.grid().get_line_text(y);
+            if line.contains(content) {
+                return true;
+            }
+        }
+        false
+    };
+
+    // Wait for expected content to appear (e.g., file content in vim)
+    // This ensures vim has fully loaded before we send input
+    // vim startup to take longer than this timeout under parallel load.
+    let max_wait_iterations = 200; // 200 * 20ms = 4 seconds max
+    let mut content_found = false;
+    for _ in 0..max_wait_iterations {
         thread::sleep(Duration::from_millis(20));
         drain_pty(&pty, &mut emulator, &mut buf);
+
+        if content_visible(&emulator, wait_for_content) {
+            content_found = true;
+            // Content found, wait a bit more for vim to fully stabilize
+            for _ in 0..10 {
+                thread::sleep(Duration::from_millis(20));
+                drain_pty(&pty, &mut emulator, &mut buf);
+            }
+            break;
+        }
+    }
+
+    // Verify content was found before proceeding
+    if !content_found {
+        let mut grid_dump = String::new();
+        for y in 0..std::cmp::min(emulator.grid().rows, 10) {
+            grid_dump.push_str(&format!("{}: {}\n", y, emulator.grid().get_line_text(y)));
+        }
+        panic!(
+            "Timed out waiting for '{}' to appear in terminal. Current grid:\n{}",
+            wait_for_content, grid_dump
+        );
     }
 
     // Send each input sequence with a wait period between
@@ -317,9 +365,12 @@ fn assert_vim_engine_match(inputs: &[&[u8]]) {
         .join("fixtures")
         .join("test_code.rs");
 
-    // Run real vim
-    let vim_command = format!("vim -n {}", fixture_path.display());
-    let vim_emulator = run_pty_test(&vim_command, cols, rows, inputs);
+    // Run real vim with minimal config for faster, deterministic startup:
+    // -u NONE: Skip loading vimrc and plugins
+    // -n: No swap file
+    // Wait for the first line of the test file to appear before sending input
+    let vim_command = format!("vim -u NONE -n {}", fixture_path.display());
+    let vim_emulator = run_pty_test(&vim_command, cols, rows, inputs, "/// Emit character set");
     let vim_cursor_info = detect_cursor_info(&vim_emulator);
 
     // Load test file for VimCursorEngine

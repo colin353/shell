@@ -12,7 +12,9 @@ use std::time::Duration;
 /// Fixed time used for all tests to avoid fixture churn
 fn fixed_test_time() -> chrono::DateTime<chrono::Local> {
     use chrono::TimeZone;
-    chrono::Local.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap()
+    chrono::Local
+        .with_ymd_and_hms(2025, 1, 1, 12, 0, 0)
+        .unwrap()
 }
 
 /// A simple in-memory writer for capturing compositor output
