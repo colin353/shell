@@ -1,112 +1,144 @@
-use std::time::Duration;
-
-mod input;
-mod pane;
-mod pty;
-mod session;
-mod terminal;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use raw_tty::GuardMode;
-use tui::{AppController, KeyboardEvent, Transition};
+
+// Global flag to indicate a resize event occurred
+static RESIZE_PENDING: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigwinch(_: libc::c_int) {
+    RESIZE_PENDING.store(true, Ordering::SeqCst);
+}
 
 fn main() {
-    let mut pane = pane::Pane::new();
-    let mut terminal = tui::Terminal::new();
-
-    // We need to handle events differently now - we'll poll both keyboard and PTY
+    // Set up raw mode TTY for input
     let tty = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
-        .unwrap();
+        .expect("Failed to open /dev/tty");
+
+    // Get terminal size
+    let (width, height) = get_terminal_size(tty.as_raw_fd());
+
+    // Open a SEPARATE /dev/tty for output - this is critical!
+    // We can't use try_clone() because that shares the file description,
+    // and when we set the input to non-blocking, it would affect the output too.
+    let tty_output_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .expect("Failed to open /dev/tty for output");
+
+    let tty_output: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(tty_output_file));
+
     let mut tty_input = tty.try_clone().unwrap().guard_mode().unwrap();
-    tty_input.set_raw_mode().unwrap();
+    tty_input.set_raw_mode().expect("Failed to set raw mode");
 
-    // Create the app with initial state using actual terminal dimensions
-    let mut state = pane.initial_state_with_size(terminal.width as u16, terminal.height as u16);
+    // Create the compositor with the terminal dimensions and TTY output
+    let mut compositor = compositor::Compositor::with_output(width, height, tty_output.clone())
+        .expect("Failed to create compositor");
 
-    // Initial render
-    tui::AppController::render(&mut pane, &mut terminal, &state, None);
-    update_cursor(&mut terminal);
+    // Always enable synchronized output - terminals that don't support it will
+    // ignore the BSU/ESU sequences.
+    compositor.set_synchronized_output(true);
 
-    // KeyboardEventStream spawns its own thread for reading
-    let mut keyboard_stream = tui::KeyboardEventStream::new(tty_input);
+    // Set tty_input to non-blocking
+    let fd = tty_input.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    // Set up SIGWINCH handler for terminal resize events
+    unsafe {
+        libc::signal(libc::SIGWINCH, handle_sigwinch as libc::sighandler_t);
+    }
+
+    // Clear screen and move cursor to home position
+    {
+        let mut output = tty_output.lock().unwrap();
+        let _ = output.write_all(b"\x1b[2J\x1b[H");
+        let _ = output.flush();
+    }
+
+    // Initial render to display the shell prompt
+    compositor.render();
+
+    // Main event loop
+    let mut input_buf = [0u8; 1024];
 
     loop {
-        // Determine timeout based on whether we have a running session
-        let timeout = if pane.has_session() {
-            Duration::from_millis(10)
+        // Check for resize events
+        if RESIZE_PENDING.swap(false, Ordering::SeqCst) {
+            let (new_width, new_height) = get_terminal_size(tty.as_raw_fd());
+            compositor.resize(new_width, new_height);
+            // Clear screen and force a full redraw after resize
+            {
+                let mut output = tty_output.lock().unwrap();
+                let _ = output.write_all(b"\x1b[2J\x1b[H");
+                let _ = output.flush();
+            }
+            compositor.force_render();
+        }
+
+        // Check for keyboard input
+        match tty_input.read(&mut input_buf) {
+            Ok(0) => {
+                // EOF - terminal closed
+                break;
+            }
+            Ok(n) => {
+                let input = &input_buf[..n];
+
+                // Send input to the compositor
+                // handle_input returns true if we should exit
+                if compositor.handle_input(input) {
+                    break;
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No input available, continue
+            }
+            Err(e) => {
+                eprintln!("Error reading input: {}", e);
+                break;
+            }
+        }
+
+        // Poll the compositor for PTY events with a short timeout
+        match compositor.poll_once(10) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Compositor error: {}", e);
+                break;
+            }
+        }
+    }
+
+    // Clean up: reset terminal
+    print!("\x1b[?25h"); // Show cursor
+    print!("\x1b[0m"); // Reset attributes
+    print!("\x1b[2J\x1b[H"); // Clear screen
+    std::io::stdout().flush().unwrap();
+}
+
+/// Get the terminal size using ioctl
+fn get_terminal_size(fd: std::os::fd::RawFd) -> (usize, usize) {
+    let mut winsize = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    unsafe {
+        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut winsize) == 0 {
+            (winsize.ws_col as usize, winsize.ws_row as usize)
         } else {
-            Duration::from_millis(100)
-        };
-
-        // Check for keyboard input with timeout
-        if let Some(event) = keyboard_stream.try_next(timeout) {
-            // Handle resize events specially
-            if event == KeyboardEvent::TerminalResizeEvent {
-                // Update terminal dimensions
-                terminal.determine_terminal_size();
-
-                // Resize the pane and propagate to any running session
-                state = pane.resize(&state, terminal.width as u16, terminal.height as u16);
-
-                // Force full redraw by passing None as previous state
-                terminal.clear_screen();
-                tui::AppController::render(&mut pane, &mut terminal, &state, None);
-                update_cursor(&mut terminal);
-                continue;
-            }
-
-            let transition = tui::AppController::transition(&mut pane, &state, event);
-            match handle_transition(&mut pane, &mut terminal, &mut state, transition) {
-                Some(true) => return, // Terminate
-                _ => {}
-            }
+            // Fallback to default size
+            (80, 24)
         }
-
-        // Poll session for output
-        if pane.has_session() {
-            if let Some(new_state) = pane.poll_session(&state) {
-                let prev_state = state.clone();
-                state = new_state;
-                tui::AppController::render(&mut pane, &mut terminal, &state, Some(&prev_state));
-                update_cursor(&mut terminal);
-            }
-        }
-    }
-}
-
-fn update_cursor(terminal: &mut tui::Terminal) {
-    if let Some((x, y)) = terminal.get_focus() {
-        terminal.move_cursor_to(x, y);
-        terminal.show_cursor();
-    } else {
-        terminal.hide_cursor();
-    }
-}
-
-fn handle_transition(
-    pane: &mut pane::Pane,
-    terminal: &mut tui::Terminal,
-    state: &mut pane::PaneState,
-    transition: Transition<pane::PaneState>,
-) -> Option<bool> {
-    match transition {
-        Transition::Updated(new_state) => {
-            terminal.hide_cursor();
-            tui::AppController::render(pane, terminal, &new_state, Some(state));
-            *state = new_state;
-            update_cursor(terminal);
-            None
-        }
-        Transition::Terminate(_) => {
-            tui::AppController::clean_up(pane, terminal);
-            Some(true)
-        }
-        Transition::Finished(_) => {
-            tui::AppController::clean_up(pane, terminal);
-            Some(true)
-        }
-        Transition::Nothing => None,
     }
 }

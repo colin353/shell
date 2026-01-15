@@ -608,19 +608,6 @@ dependencies = [
 name = "shell"
 version = "0.1.0"
 dependencies = [
- "emulator",
- "lazy_static",
- "libc",
- "nix",
- "pty",
- "raw_tty",
- "tui",
-]
-
-[[package]]
-name = "shell2"
-version = "0.1.0"
-dependencies = [
  "compositor",
  "libc",
  "nix",
