@@ -122,6 +122,60 @@ impl SyntaxHandler {
         Some((items, replace_start, replace_end))
     }
 
+    /// Get the word at the cursor position with its boundaries.
+    /// Returns (word, start, end) or None if cursor is not on a word.
+    pub fn word_at_cursor(&mut self, input: &str, cursor_pos: usize) -> Option<(String, usize, usize)> {
+        self.syntax.update(input);
+        
+        // Use completions to get the word boundaries (they include word info)
+        // This is a bit indirect, but it uses tree-sitter properly
+        let context = CompletionContext {
+            env_vars: std::collections::HashMap::new(),
+            path_executables: Vec::new(),
+            cwd: PathBuf::from("."),
+        };
+        
+        let completions = self.syntax.completions(cursor_pos, &context);
+        
+        if !completions.is_empty() {
+            let first = &completions[0];
+            let word = input[first.replace_start..first.replace_end].to_string();
+            return Some((word, first.replace_start, first.replace_end));
+        }
+        
+        // Fallback: simple word extraction
+        if input.is_empty() || cursor_pos == 0 {
+            return Some((String::new(), cursor_pos, cursor_pos));
+        }
+        
+        let pos = cursor_pos.min(input.len());
+        let bytes = input.as_bytes();
+        
+        // Find word start (scan backwards)
+        let mut start = pos;
+        while start > 0 {
+            let prev = start - 1;
+            let c = bytes[prev] as char;
+            if c.is_whitespace() {
+                break;
+            }
+            start = prev;
+        }
+        
+        // Find word end (scan forwards)
+        let mut end = pos;
+        while end < bytes.len() {
+            let c = bytes[end] as char;
+            if c.is_whitespace() {
+                break;
+            }
+            end += 1;
+        }
+        
+        let word = input[start..end].to_string();
+        Some((word, start, end))
+    }
+
     /// Check if current input has syntax errors.
     #[allow(dead_code)]
     pub fn has_errors(&self) -> bool {

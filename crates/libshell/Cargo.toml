@@ -10,6 +10,7 @@ uuid = { version = "1.0", features = ["v4"] }
 fuzzy-matcher = "0.3"
 fs2 = "0.4"
 shell-syntax = { path = "../shell-syntax" }
+ignore = "0.4.25"
 
 [dev-dependencies]
 tempfile = "3.10"

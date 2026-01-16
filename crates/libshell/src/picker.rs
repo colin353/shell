@@ -4,11 +4,13 @@
 //! - CTRL+R history search
 //! - Tab completions (when multiple ambiguous completions exist)
 //! - Path completions
+//! - CTRL+P fuzzy file finder
 //! - And other selection interfaces
 //!
 //! The picker renders a list of items above the prompt, supports fuzzy filtering
 //! via the input buffer, and handles keyboard navigation (up/down arrows, enter to select).
 
+use crate::file_finder::FileFinderContext;
 use crate::history::HistorySearchResult;
 
 /// Maximum number of items to display in the picker
@@ -21,6 +23,8 @@ pub enum PickerMode {
     HistorySearch,
     /// Tab completion (when multiple ambiguous completions exist)
     TabCompletion,
+    /// CTRL+P fuzzy file finder
+    FileFinder,
 }
 
 /// An item that can be displayed in the picker
@@ -30,6 +34,8 @@ pub enum PickerItem {
     History(HistorySearchResult),
     /// A tab completion option
     TabCompletion(TabCompletionItem),
+    /// A file finder result
+    File(FileItem),
 }
 
 /// A tab completion item
@@ -42,6 +48,19 @@ pub struct TabCompletionItem {
     /// Character indices that matched the query (for highlighting)
     pub match_indices: Vec<usize>,
     /// Whether this is a directory completion (don't add trailing space)
+    pub is_directory: bool,
+}
+
+/// A file finder item
+#[derive(Debug, Clone)]
+pub struct FileItem {
+    /// The text to display (the path)
+    pub display_text: String,
+    /// The path to insert when selected
+    pub path: String,
+    /// Character indices that matched the query (for highlighting)
+    pub match_indices: Vec<usize>,
+    /// Whether this is a directory
     pub is_directory: bool,
 }
 
@@ -64,6 +83,7 @@ impl PickerItem {
         match self {
             PickerItem::History(result) => &result.entry.command,
             PickerItem::TabCompletion(item) => &item.display_text,
+            PickerItem::File(item) => &item.display_text,
         }
     }
 
@@ -72,6 +92,7 @@ impl PickerItem {
         match self {
             PickerItem::History(result) => &result.entry.command,
             PickerItem::TabCompletion(item) => &item.completion_text,
+            PickerItem::File(item) => &item.path,
         }
     }
 
@@ -80,6 +101,7 @@ impl PickerItem {
         match self {
             PickerItem::History(result) => &result.match_indices,
             PickerItem::TabCompletion(item) => &item.match_indices,
+            PickerItem::File(item) => &item.match_indices,
         }
     }
 
@@ -97,6 +119,13 @@ impl PickerItem {
                 })
             }
             PickerItem::TabCompletion(_) => None,
+            PickerItem::File(item) => {
+                if item.is_directory {
+                    Some(('📁', true))
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -105,6 +134,7 @@ impl PickerItem {
         match self {
             PickerItem::History(_) => false,
             PickerItem::TabCompletion(item) => item.is_directory,
+            PickerItem::File(item) => item.is_directory,
         }
     }
 }
@@ -139,11 +169,21 @@ impl PickerConfig {
         }
     }
 
+    /// Create config for file finder mode
+    pub fn file_finder() -> Self {
+        PickerConfig {
+            title: "(find file)".to_string(),
+            empty_message: "[no files]".to_string(),
+            show_counter: true,
+        }
+    }
+
     /// Get config for a given picker mode
     pub fn for_mode(mode: &PickerMode) -> Self {
         match mode {
             PickerMode::HistorySearch => Self::history_search(),
             PickerMode::TabCompletion => Self::tab_completion(),
+            PickerMode::FileFinder => Self::file_finder(),
         }
     }
 }
@@ -161,6 +201,8 @@ pub struct PickerState {
     pub ui_lines: usize,
     /// Context for tab completion (only set when mode is TabCompletion)
     pub tab_completion_ctx: Option<TabCompletionContext>,
+    /// Context for file finder (only set when mode is FileFinder)
+    pub file_finder_ctx: Option<FileFinderContext>,
 }
 
 impl PickerState {
@@ -172,6 +214,7 @@ impl PickerState {
             selected: 0,
             ui_lines: 0,
             tab_completion_ctx: None,
+            file_finder_ctx: None,
         }
     }
 
@@ -189,6 +232,31 @@ impl PickerState {
             selected: 0,
             ui_lines: 0,
             tab_completion_ctx: Some(ctx),
+            file_finder_ctx: None,
+        }
+    }
+
+    /// Create a new picker state for file finder with context
+    pub fn new_file_finder(ctx: FileFinderContext, initial_query: &str) -> Self {
+        let matches = ctx.search(initial_query);
+        let items: Vec<PickerItem> = matches
+            .into_iter()
+            .map(|m| {
+                PickerItem::File(FileItem {
+                    display_text: m.display_path,
+                    path: m.path,
+                    match_indices: m.match_indices,
+                    is_directory: m.is_directory,
+                })
+            })
+            .collect();
+        PickerState {
+            mode: PickerMode::FileFinder,
+            items,
+            selected: 0,
+            ui_lines: 0,
+            tab_completion_ctx: None,
+            file_finder_ctx: Some(ctx),
         }
     }
 

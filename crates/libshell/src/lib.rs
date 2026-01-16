@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+pub mod file_finder;
 pub mod history;
 pub mod picker;
 mod syntax;
@@ -27,7 +28,7 @@ pub use history::{
     BackupConfig, CommandSource, EntryId, HistoryEntry, HistorySearchResult, SearchResult,
     ShellHistory,
 };
-pub use picker::{PickerConfig, PickerItem, PickerMode, PickerState, TabCompletionContext, TabCompletionItem};
+pub use picker::{FileItem, PickerConfig, PickerItem, PickerMode, PickerState, TabCompletionContext, TabCompletionItem};
 
 /// Find the longest common prefix among a set of strings
 fn find_common_prefix<'a>(strings: impl Iterator<Item = &'a str>) -> String {
@@ -306,6 +307,10 @@ pub struct Shell {
     // --- Picker UI state (used for CTRL+R history search, tab completion, etc.) ---
     /// Current picker state, if a picker is active
     picker_state: Option<PickerState>,
+    /// Saved input buffer when entering a picker mode that uses its own input
+    saved_input_buffer: Option<String>,
+    /// Saved cursor position when entering a picker mode
+    saved_cursor_pos: Option<usize>,
 
     // --- Syntax highlighting and completion ---
     /// Syntax highlighter and completion engine
@@ -357,6 +362,8 @@ impl Shell {
             command_start_time: None,
             // Picker UI state
             picker_state: None,
+            saved_input_buffer: None,
+            saved_cursor_pos: None,
             // Syntax highlighting
             syntax_handler: syntax::SyntaxHandler::new(),
         };
@@ -594,6 +601,8 @@ impl Shell {
             }
             // Ctrl+R - enter history search mode
             0x12 => Some(self.enter_history_search()),
+            // Ctrl+P - enter file finder mode
+            0x10 => Some(self.enter_file_finder()),
             // Ctrl+C - cancel current input
             0x03 => {
                 self.input_buffer.clear();
@@ -1134,10 +1143,60 @@ impl Shell {
         self.render_picker_ui()
     }
 
+    /// Enter file finder mode (CTRL+P)
+    fn enter_file_finder(&mut self) -> Vec<u8> {
+        use crate::file_finder::{parse_word_for_search, FileFinderContext};
+
+        // Get the word under the cursor
+        let (word, replace_start, replace_end) = self
+            .syntax_handler
+            .word_at_cursor(&self.input_buffer, self.cursor_pos)
+            .unwrap_or_else(|| (String::new(), self.cursor_pos, self.cursor_pos));
+
+        // Parse the word to determine base directory and initial query
+        let (base_dir, initial_query, is_absolute) = parse_word_for_search(&word, &self.cwd);
+
+        // Create the file finder context
+        let mut ctx = FileFinderContext::new(
+            base_dir,
+            is_absolute,
+            replace_start,
+            replace_end,
+            word.clone(),
+        );
+
+        // Collect files from the directory
+        ctx.collect_files();
+
+        // Create picker state with initial search
+        self.picker_state = Some(PickerState::new_file_finder(ctx, &initial_query));
+
+        // Set the input buffer to the initial query for filtering
+        // Save the original input buffer first
+        self.saved_input_buffer = Some(self.input_buffer.clone());
+        self.saved_cursor_pos = Some(self.cursor_pos);
+        self.input_buffer = initial_query;
+        self.cursor_pos = self.input_buffer.len();
+
+        // Render the picker UI
+        self.render_picker_ui()
+    }
+
     /// Exit picker mode without selecting
     fn exit_picker(&mut self) -> Vec<u8> {
         let ui_lines = self.picker_state.as_ref().map(|s| s.ui_lines).unwrap_or(0);
+        let is_file_finder = self.picker_state.as_ref().map(|s| s.mode == PickerMode::FileFinder).unwrap_or(false);
         self.picker_state = None;
+
+        // Restore original input buffer if we were in file finder mode
+        if is_file_finder {
+            if let Some(saved) = self.saved_input_buffer.take() {
+                self.input_buffer = saved;
+            }
+            if let Some(saved) = self.saved_cursor_pos.take() {
+                self.cursor_pos = saved;
+            }
+        }
 
         // Clear picker UI and redraw prompt with current input
         self.clear_picker_ui_and_redraw(ui_lines)
@@ -1145,9 +1204,10 @@ impl Shell {
 
     /// Select current item and exit picker mode
     fn select_picker_item(&mut self) -> Vec<u8> {
+        use crate::file_finder::quote_path_if_needed;
+        
         // Extract the selection info before dropping picker_state
         // For tab completion, use current cursor position as the end of replacement
-        let current_cursor = self.cursor_pos;
         let selection_info = self.picker_state.as_ref().and_then(|state| {
             let selected_item = state.selected_item()?;
             let selected_text = selected_item.completion_text().to_string();
@@ -1156,23 +1216,37 @@ impl Shell {
             match &state.mode {
                 PickerMode::HistorySearch => {
                     // History search replaces entire input (is_directory = false)
-                    Some((selected_text, None, false))
+                    Some((selected_text, None, false, false))
                 }
                 PickerMode::TabCompletion => {
-                    // Tab completion replaces from original start to current cursor
+                    // Tab completion replaces from original start to saved end
                     let ctx = state.tab_completion_ctx.as_ref()?;
-                    // Use the current cursor position as the end, since user may have typed more
-                    let replace_end = current_cursor.max(ctx.replace_start);
-                    Some((selected_text, Some((ctx.replace_start, replace_end)), is_directory))
+                    Some((selected_text, Some((ctx.replace_start, ctx.replace_end)), is_directory, false))
+                }
+                PickerMode::FileFinder => {
+                    // File finder replaces the original word with the selected path
+                    let ctx = state.file_finder_ctx.as_ref()?;
+                    Some((selected_text, Some((ctx.replace_start, ctx.replace_end)), is_directory, true))
                 }
             }
         });
 
         let ui_lines = self.picker_state.as_ref().map(|s| s.ui_lines).unwrap_or(0);
+        let is_file_finder = self.picker_state.as_ref().map(|s| s.mode == PickerMode::FileFinder).unwrap_or(false);
         self.picker_state = None;
 
+        // Restore original input buffer if we were in file finder mode
+        if is_file_finder {
+            if let Some(saved) = self.saved_input_buffer.take() {
+                self.input_buffer = saved;
+            }
+            if let Some(saved) = self.saved_cursor_pos.take() {
+                self.cursor_pos = saved;
+            }
+        }
+
         // Apply the selection
-        if let Some((text, replace_range, is_directory)) = selection_info {
+        if let Some((text, replace_range, is_directory, needs_quoting)) = selection_info {
             match replace_range {
                 None => {
                     // History search: replace entire input
@@ -1180,11 +1254,20 @@ impl Shell {
                     self.cursor_pos = self.input_buffer.len();
                 }
                 Some((start, end)) => {
-                    // Tab completion: replace only the specified range
-                    // Don't add trailing space for directories
-                    let completion_text = if is_directory {
+                    // Tab/file completion: replace only the specified range
+                    let completion_text = if needs_quoting {
+                        // File finder: quote if needed, add trailing slash for dirs
+                        let quoted = quote_path_if_needed(&text);
+                        if is_directory {
+                            format!("{}/", quoted)
+                        } else {
+                            format!("{} ", quoted)
+                        }
+                    } else if is_directory {
+                        // Tab completion directory
                         text
                     } else {
+                        // Tab completion file/command
                         format!("{} ", text)
                     };
                     self.input_buffer.replace_range(start..end, &completion_text);
@@ -1230,6 +1313,25 @@ impl Shell {
                                 // Update match indices based on current filter
                                 item.match_indices = (0..filter.len().min(item.display_text.len())).collect();
                                 PickerItem::TabCompletion(item)
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                PickerMode::FileFinder => {
+                    // Re-search with the current input as the query
+                    if let Some(ref ctx) = state.file_finder_ctx {
+                        let matches = ctx.search(&self.input_buffer);
+                        matches
+                            .into_iter()
+                            .map(|m| {
+                                PickerItem::File(picker::FileItem {
+                                    display_text: m.display_path,
+                                    path: m.path,
+                                    match_indices: m.match_indices,
+                                    is_directory: m.is_directory,
+                                })
                             })
                             .collect()
                     } else {
