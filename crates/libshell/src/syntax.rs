@@ -10,6 +10,9 @@ use shell_syntax::{
 };
 use std::path::PathBuf;
 
+// Re-export CompletionKind for use in lib.rs
+pub use shell_syntax::CompletionKind;
+
 /// Syntax highlighter and completion engine for the shell.
 pub struct SyntaxHandler {
     syntax: ShellSyntax,
@@ -90,12 +93,13 @@ impl SyntaxHandler {
 
     /// Get all completions with full metadata at cursor position.
     /// Returns (completions, replace_start, replace_end) or None if no completions.
+    /// Each completion is (display_text, completion_text, kind).
     pub fn completions_full(
         &mut self,
         input: &str,
         cursor_pos: usize,
         cwd: &PathBuf,
-    ) -> Option<(Vec<(String, String)>, usize, usize)> {
+    ) -> Option<(Vec<(String, String, CompletionKind)>, usize, usize)> {
         self.maybe_refresh_path();
         self.syntax.update(input);
 
@@ -110,9 +114,9 @@ impl SyntaxHandler {
         let replace_start = completions[0].replace_start;
         let replace_end = completions[0].replace_end;
 
-        let items: Vec<(String, String)> = completions
+        let items: Vec<(String, String, CompletionKind)> = completions
             .into_iter()
-            .map(|c| (c.display, c.text))
+            .map(|c| (c.display, c.text, c.kind))
             .collect();
 
         Some((items, replace_start, replace_end))

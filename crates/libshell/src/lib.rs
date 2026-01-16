@@ -57,6 +57,12 @@ fn find_common_prefix<'a>(strings: impl Iterator<Item = &'a str>) -> String {
     first.chars().take(prefix_len).collect()
 }
 
+/// Check if a character is a word boundary for word navigation.
+/// Word boundaries include whitespace and path separators (/).
+fn is_word_boundary(c: char) -> bool {
+    c.is_whitespace() || c == '/'
+}
+
 /// Error type for shell operations
 #[derive(Debug)]
 pub enum ShellError {
@@ -852,11 +858,16 @@ impl Shell {
 
         // If exactly one completion, insert it directly
         if completions.len() == 1 {
-            let (_, text) = &completions[0];
+            let (_, text, kind) = &completions[0];
             let old_pos = self.cursor_pos;
 
-            // Add trailing space for complete completions
-            let completion_text = format!("{} ", text);
+            // Add trailing space unless it's a directory
+            let is_directory = matches!(kind, syntax::CompletionKind::Directory);
+            let completion_text = if is_directory {
+                text.clone()
+            } else {
+                format!("{} ", text)
+            };
 
             // Replace the text in the input buffer
             self.input_buffer.replace_range(replace_start..replace_end, &completion_text);
@@ -869,7 +880,7 @@ impl Shell {
         }
 
         // Multiple completions - check if there's a common prefix we can complete first
-        let common_prefix = find_common_prefix(completions.iter().map(|(_, t)| t.as_str()));
+        let common_prefix = find_common_prefix(completions.iter().map(|(_, t, _)| t.as_str()));
         let current_word = &self.input_buffer[replace_start..replace_end];
         
         if common_prefix.len() > current_word.len() {
@@ -887,7 +898,7 @@ impl Shell {
     /// Enter tab completion picker mode
     fn enter_tab_completion(
         &mut self,
-        completions: Vec<(String, String)>,
+        completions: Vec<(String, String, syntax::CompletionKind)>,
         replace_start: usize,
         replace_end: usize,
     ) -> Option<Vec<u8>> {
@@ -896,13 +907,15 @@ impl Shell {
         // Convert completions to TabCompletionItems
         let items: Vec<TabCompletionItem> = completions
             .into_iter()
-            .map(|(display, text)| {
+            .map(|(display, text, kind)| {
                 // Calculate match indices for highlighting the prefix
                 let match_indices: Vec<usize> = (0..prefix.len().min(display.len())).collect();
+                let is_directory = matches!(kind, syntax::CompletionKind::Directory);
                 TabCompletionItem {
                     display_text: display,
                     completion_text: text,
                     match_indices,
+                    is_directory,
                 }
             })
             .collect();
@@ -967,12 +980,12 @@ impl Shell {
         }
 
         let mut new_pos = self.cursor_pos;
-        // Skip current word characters
-        while new_pos < chars.len() && !chars[new_pos].is_whitespace() {
+        // Skip current word characters (non-boundaries)
+        while new_pos < chars.len() && !is_word_boundary(chars[new_pos]) {
             new_pos += 1;
         }
-        // Skip whitespace
-        while new_pos < chars.len() && chars[new_pos].is_whitespace() {
+        // Skip word boundaries (whitespace and /)
+        while new_pos < chars.len() && is_word_boundary(chars[new_pos]) {
             new_pos += 1;
         }
 
@@ -994,12 +1007,12 @@ impl Shell {
         let chars: Vec<char> = self.input_buffer.chars().collect();
         let mut new_pos = self.cursor_pos;
 
-        // Skip whitespace before cursor
-        while new_pos > 0 && chars[new_pos - 1].is_whitespace() {
+        // Skip word boundaries before cursor
+        while new_pos > 0 && is_word_boundary(chars[new_pos - 1]) {
             new_pos -= 1;
         }
-        // Skip word characters
-        while new_pos > 0 && !chars[new_pos - 1].is_whitespace() {
+        // Skip word characters (non-boundaries)
+        while new_pos > 0 && !is_word_boundary(chars[new_pos - 1]) {
             new_pos -= 1;
         }
 
@@ -1022,12 +1035,12 @@ impl Shell {
         let chars: Vec<char> = self.input_buffer.chars().collect();
         let mut new_pos = self.cursor_pos;
 
-        // Skip whitespace before cursor
-        while new_pos > 0 && chars[new_pos - 1].is_whitespace() {
+        // Skip word boundaries before cursor
+        while new_pos > 0 && is_word_boundary(chars[new_pos - 1]) {
             new_pos -= 1;
         }
-        // Skip word characters
-        while new_pos > 0 && !chars[new_pos - 1].is_whitespace() {
+        // Skip word characters (non-boundaries)
+        while new_pos > 0 && !is_word_boundary(chars[new_pos - 1]) {
             new_pos -= 1;
         }
 
@@ -1053,12 +1066,12 @@ impl Shell {
         let start = self.cursor_pos;
         let mut end = self.cursor_pos;
 
-        // Skip word characters
-        while end < chars.len() && !chars[end].is_whitespace() {
+        // Skip word characters (non-boundaries)
+        while end < chars.len() && !is_word_boundary(chars[end]) {
             end += 1;
         }
-        // Skip whitespace
-        while end < chars.len() && chars[end].is_whitespace() {
+        // Skip word boundaries
+        while end < chars.len() && is_word_boundary(chars[end]) {
             end += 1;
         }
 
@@ -1124,19 +1137,21 @@ impl Shell {
         // For tab completion, use current cursor position as the end of replacement
         let current_cursor = self.cursor_pos;
         let selection_info = self.picker_state.as_ref().and_then(|state| {
-            let selected_text = state.selected_item()?.completion_text().to_string();
+            let selected_item = state.selected_item()?;
+            let selected_text = selected_item.completion_text().to_string();
+            let is_directory = selected_item.is_directory();
             
             match &state.mode {
                 PickerMode::HistorySearch => {
-                    // History search replaces entire input
-                    Some((selected_text, None))
+                    // History search replaces entire input (is_directory = false)
+                    Some((selected_text, None, false))
                 }
                 PickerMode::TabCompletion => {
                     // Tab completion replaces from original start to current cursor
                     let ctx = state.tab_completion_ctx.as_ref()?;
                     // Use the current cursor position as the end, since user may have typed more
                     let replace_end = current_cursor.max(ctx.replace_start);
-                    Some((selected_text, Some((ctx.replace_start, replace_end))))
+                    Some((selected_text, Some((ctx.replace_start, replace_end)), is_directory))
                 }
             }
         });
@@ -1145,7 +1160,7 @@ impl Shell {
         self.picker_state = None;
 
         // Apply the selection
-        if let Some((text, replace_range)) = selection_info {
+        if let Some((text, replace_range, is_directory)) = selection_info {
             match replace_range {
                 None => {
                     // History search: replace entire input
@@ -1153,8 +1168,13 @@ impl Shell {
                     self.cursor_pos = self.input_buffer.len();
                 }
                 Some((start, end)) => {
-                    // Tab completion: replace only the specified range and add trailing space
-                    let completion_text = format!("{} ", text);
+                    // Tab completion: replace only the specified range
+                    // Don't add trailing space for directories
+                    let completion_text = if is_directory {
+                        text
+                    } else {
+                        format!("{} ", text)
+                    };
                     self.input_buffer.replace_range(start..end, &completion_text);
                     self.cursor_pos = start + completion_text.len();
                 }
@@ -1250,14 +1270,14 @@ impl Shell {
             // Ctrl+W - delete word before cursor
             0x17 => {
                 if self.cursor_pos > 0 {
-                    // Find start of previous word
+                    let chars: Vec<char> = self.input_buffer.chars().collect();
                     let mut new_pos = self.cursor_pos;
-                    // Skip trailing spaces
-                    while new_pos > 0 && self.input_buffer.chars().nth(new_pos - 1) == Some(' ') {
+                    // Skip word boundaries before cursor
+                    while new_pos > 0 && is_word_boundary(chars[new_pos - 1]) {
                         new_pos -= 1;
                     }
-                    // Skip word characters
-                    while new_pos > 0 && self.input_buffer.chars().nth(new_pos - 1) != Some(' ') {
+                    // Skip word characters (non-boundaries)
+                    while new_pos > 0 && !is_word_boundary(chars[new_pos - 1]) {
                         new_pos -= 1;
                     }
                     // Remove the text
@@ -1324,12 +1344,12 @@ impl Shell {
                     // Alt+F - forward word
                     let chars: Vec<char> = self.input_buffer.chars().collect();
                     let mut new_pos = self.cursor_pos;
-                    // Skip current word
-                    while new_pos < chars.len() && chars[new_pos] != ' ' {
+                    // Skip current word (non-boundaries)
+                    while new_pos < chars.len() && !is_word_boundary(chars[new_pos]) {
                         new_pos += 1;
                     }
-                    // Skip spaces
-                    while new_pos < chars.len() && chars[new_pos] == ' ' {
+                    // Skip word boundaries
+                    while new_pos < chars.len() && is_word_boundary(chars[new_pos]) {
                         new_pos += 1;
                     }
                     self.cursor_pos = new_pos;
@@ -1339,12 +1359,12 @@ impl Shell {
                     // Alt+B - backward word
                     let chars: Vec<char> = self.input_buffer.chars().collect();
                     let mut new_pos = self.cursor_pos;
-                    // Skip spaces
-                    while new_pos > 0 && chars.get(new_pos.saturating_sub(1)) == Some(&' ') {
+                    // Skip word boundaries
+                    while new_pos > 0 && is_word_boundary(chars[new_pos - 1]) {
                         new_pos -= 1;
                     }
-                    // Skip word
-                    while new_pos > 0 && chars.get(new_pos.saturating_sub(1)) != Some(&' ') {
+                    // Skip word characters (non-boundaries)
+                    while new_pos > 0 && !is_word_boundary(chars[new_pos - 1]) {
                         new_pos -= 1;
                     }
                     self.cursor_pos = new_pos;
@@ -1355,12 +1375,12 @@ impl Shell {
                     let chars: Vec<char> = self.input_buffer.chars().collect();
                     let start = self.cursor_pos;
                     let mut end = self.cursor_pos;
-                    // Skip current word
-                    while end < chars.len() && chars[end] != ' ' {
+                    // Skip current word (non-boundaries)
+                    while end < chars.len() && !is_word_boundary(chars[end]) {
                         end += 1;
                     }
-                    // Skip spaces
-                    while end < chars.len() && chars[end] == ' ' {
+                    // Skip word boundaries
+                    while end < chars.len() && is_word_boundary(chars[end]) {
                         end += 1;
                     }
                     if end > start {

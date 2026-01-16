@@ -4,7 +4,7 @@ expression: completions
 ---
 [
     Completion {
-        text: "$PATH",
+        text: "PATH",
         display: "PATH",
         kind: EnvVar,
         replace_start: 6,

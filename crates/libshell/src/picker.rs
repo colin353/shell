@@ -41,6 +41,8 @@ pub struct TabCompletionItem {
     pub completion_text: String,
     /// Character indices that matched the query (for highlighting)
     pub match_indices: Vec<usize>,
+    /// Whether this is a directory completion (don't add trailing space)
+    pub is_directory: bool,
 }
 
 /// Context for tab completion (stored when picker is in TabCompletion mode)
@@ -95,6 +97,14 @@ impl PickerItem {
                 })
             }
             PickerItem::TabCompletion(_) => None,
+        }
+    }
+
+    /// Check if this completion is for a directory (should not add trailing space)
+    pub fn is_directory(&self) -> bool {
+        match self {
+            PickerItem::History(_) => false,
+            PickerItem::TabCompletion(item) => item.is_directory,
         }
     }
 }
@@ -481,16 +491,19 @@ mod tests {
                 display_text: "item1".to_string(),
                 completion_text: "item1".to_string(),
                 match_indices: vec![],
+                is_directory: false,
             }),
             PickerItem::TabCompletion(TabCompletionItem {
                 display_text: "item2".to_string(),
                 completion_text: "item2".to_string(),
                 match_indices: vec![],
+                is_directory: false,
             }),
             PickerItem::TabCompletion(TabCompletionItem {
                 display_text: "item3".to_string(),
                 completion_text: "item3".to_string(),
                 match_indices: vec![],
+                is_directory: false,
             }),
         ]);
 
@@ -536,12 +549,14 @@ mod tests {
             display_text: "my_function".to_string(),
             completion_text: "my_function()".to_string(),
             match_indices: vec![0, 1, 2],
+            is_directory: false,
         });
 
         assert_eq!(item.display_text(), "my_function");
         assert_eq!(item.completion_text(), "my_function()");
         assert_eq!(item.match_indices(), &[0, 1, 2]);
         assert!(item.status_indicator().is_none());
+        assert!(!item.is_directory());
     }
 
     #[test]
@@ -551,11 +566,13 @@ mod tests {
                 display_text: "cargo".to_string(),
                 completion_text: "cargo".to_string(),
                 match_indices: vec![],
+                is_directory: false,
             },
             TabCompletionItem {
                 display_text: "cargo-clippy".to_string(),
                 completion_text: "cargo-clippy".to_string(),
                 match_indices: vec![],
+                is_directory: false,
             },
         ];
 

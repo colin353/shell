@@ -4,7 +4,7 @@ expression: completions
 ---
 [
     Completion {
-        text: "$HOME",
+        text: "HOME",
         display: "HOME",
         kind: EnvVar,
         replace_start: 6,
@@ -12,7 +12,7 @@ expression: completions
         is_partial: false,
     },
     Completion {
-        text: "$HOSTNAME",
+        text: "HOSTNAME",
         display: "HOSTNAME",
         kind: EnvVar,
         replace_start: 6,

@@ -83,6 +83,8 @@ pub fn get_completions<F: FileSystem>(
     } else if cursor_ctx.is_command_position {
         // Complete commands (PATH + builtins)
         completions.extend(complete_commands(&cursor_ctx, context));
+        // Also include files/directories since they can be executables (e.g., ./script.sh)
+        completions.extend(complete_files(&cursor_ctx, context, fs));
     } else if cursor_ctx.word.starts_with('-') {
         // Complete flags
         completions.extend(complete_flags(&cursor_ctx));
@@ -137,8 +139,11 @@ fn analyze_cursor_position<'a>(tree: &Tree, source: &'a str, cursor_pos: usize) 
             || node.kind() == "variable_name"
         {
             ctx.is_env_var = true;
-            // Extract just the variable name part
+            // Extract just the variable name part, updating word_start to match
+            let original_len = ctx.word.len();
             let var_text = ctx.word.trim_start_matches('$').trim_start_matches('{');
+            let trimmed_len = original_len - var_text.len();
+            ctx.word_start += trimmed_len;
             if let Some(end_idx) = var_text.find('}') {
                 ctx.word = &var_text[..end_idx];
             } else {
@@ -176,7 +181,9 @@ fn analyze_cursor_position<'a>(tree: &Tree, source: &'a str, cursor_pos: usize) 
         // Check for env var
         if ctx.word.starts_with('$') {
             ctx.is_env_var = true;
-            ctx.word = ctx.word.trim_start_matches('$');
+            let trimmed = ctx.word.trim_start_matches('$');
+            ctx.word_start += ctx.word.len() - trimmed.len();
+            ctx.word = trimmed;
         }
     }
 
@@ -309,7 +316,8 @@ fn complete_env_vars(ctx: &CursorContext, context: &CompletionContext) -> Vec<Co
         .keys()
         .filter(|name| name.starts_with(prefix))
         .map(|name| Completion {
-            text: format!("${}", name),
+            // word_start now points to after the $, so we replace just the var name
+            text: name.clone(),
             display: name.clone(),
             kind: CompletionKind::EnvVar,
             replace_start: ctx.word_start,
