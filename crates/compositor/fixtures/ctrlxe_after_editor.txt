@@ -1,0 +1,24 @@
+compositor ➜ initial textcompositor ➜ echo line1                                
+> echo line2                                                                    
+> echo line3                                                                    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ 0 shell                                                       2025-01-01 12:00 

@@ -1232,6 +1232,11 @@ impl Compositor {
         &mut self.tabs[self.active_tab].root
     }
 
+    /// Get a mutable reference to the focused pane of the active tab.
+    pub fn get_focused_pane_mut(&mut self) -> Option<&mut crate::pane::Pane> {
+        self.tabs[self.active_tab].root.get_focused_pane_mut()
+    }
+
     /// Get the wake file descriptor for external polling.
     ///
     /// This can be used to integrate the compositor into an external event loop.

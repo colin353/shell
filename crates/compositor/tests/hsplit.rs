@@ -772,3 +772,272 @@ fn test_ctrl_c_display() -> Result<(), CompositorError> {
 
     Ok(())
 }
+
+#[test]
+fn test_multiline_command_with_backslash_continuation() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    // Create a temporary directory for the test history file
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_multiline_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    // Create a ShellCore with our custom history path
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    // Create a compositor with the custom core (using embedded shell, not bash)
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Render initial state
+    compositor.render_to_vec();
+
+    // Type "ls \" (backslash at end to continue to next line)
+    compositor.handle_input(b"ls \\");
+    compositor.render_to_vec();
+
+    let before_enter_lines = compositor.get_text_lines();
+    save_fixture("multiline_before_enter.txt", &before_enter_lines);
+
+    // Press Enter - this should NOT execute the command, but continue to next line
+    compositor.handle_input(b"\r");
+    compositor.render_to_vec();
+
+    let after_enter_lines = compositor.get_text_lines();
+    save_fixture("multiline_after_enter.txt", &after_enter_lines);
+
+    // Now type "-lah" on the continuation line
+    compositor.handle_input(b"-lah");
+    compositor.render_to_vec();
+
+    let after_continuation_lines = compositor.get_text_lines();
+    save_fixture("multiline_after_continuation.txt", &after_continuation_lines);
+
+    // The output should show both lines of the multi-line command
+    let text: String = after_continuation_lines.join("\n");
+    
+    // Verify that the continuation line shows the input
+    assert!(
+        text.contains("-lah"),
+        "Expected '-lah' to appear on the continuation line. Got:\n{}",
+        text
+    );
+
+    // Verify that the command has NOT executed yet (no spawn error or output)
+    assert!(
+        !text.contains("spawn error") && !text.contains("No such file"),
+        "Command should not have executed yet. Got:\n{}",
+        text
+    );
+
+    // Now press Enter to execute the complete command
+    compositor.handle_input(b"\r");
+    wait_for_output(&mut compositor, 500);
+    compositor.render_to_vec();
+
+    let after_execute_lines = compositor.get_text_lines();
+    save_fixture("multiline_after_execute.txt", &after_execute_lines);
+
+    // The command should have executed and we should see a new prompt
+    let executed_text: String = after_execute_lines.join("\n");
+    
+    // Verify we see the continuation line with -lah before execution
+    // and a new prompt after (the command ran)
+    assert!(
+        executed_text.contains("➜"),
+        "Expected a new prompt after command execution. Got:\n{}",
+        executed_text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+#[test]
+fn test_multiline_backspace_across_newline() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    // Create a temporary directory for the test history file
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_multiline_bs_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    // Create a ShellCore with our custom history path
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    // Create a compositor with the custom core (using embedded shell, not bash)
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Render initial state
+    compositor.render_to_vec();
+
+    // Type "echo \" (backslash at end to continue to next line)
+    compositor.handle_input(b"echo \\");
+    compositor.render_to_vec();
+
+    // Press Enter to go to continuation line
+    compositor.handle_input(b"\r");
+    compositor.render_to_vec();
+
+    // Type "hello" on the continuation line
+    compositor.handle_input(b"hello");
+    compositor.render_to_vec();
+
+    let before_backspace_lines = compositor.get_text_lines();
+    save_fixture("multiline_bs_before.txt", &before_backspace_lines);
+
+    // Verify we have the multi-line input
+    let text_before: String = before_backspace_lines.join("\n");
+    assert!(
+        text_before.contains("echo") && text_before.contains("hello"),
+        "Expected 'echo' and 'hello' before backspace. Got:\n{}",
+        text_before
+    );
+
+    // Now press backspace 6 times to delete "hello" and the newline
+    for _ in 0..6 {
+        compositor.handle_input(&[0x7f]); // Backspace
+        compositor.render_to_vec();
+    }
+
+    let after_backspace_lines = compositor.get_text_lines();
+    save_fixture("multiline_bs_after.txt", &after_backspace_lines);
+
+    // The output should now show just "echo " on a single line (back to first line)
+    let text_after: String = after_backspace_lines.join("\n");
+    
+    // Verify that "hello" is gone
+    assert!(
+        !text_after.contains("hello"),
+        "Expected 'hello' to be deleted after backspace. Got:\n{}",
+        text_after
+    );
+
+    // Verify that "echo " is still there on the first line
+    assert!(
+        text_after.contains("echo "),
+        "Expected 'echo ' to still be present. Got:\n{}",
+        text_after
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+#[test]
+fn test_ctrl_x_ctrl_e_edit_multiline_command() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    // Create a temporary directory for the test history file
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_ctrlxe_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    // Create a ShellCore with our custom history path
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    // Create a compositor with the custom core (using embedded shell, not bash)
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Render initial state
+    compositor.render_to_vec();
+
+    let initial_lines = compositor.get_text_lines();
+    save_fixture("ctrlxe_initial.txt", &initial_lines);
+
+    // Type some initial text
+    compositor.handle_input(b"initial text");
+    compositor.render_to_vec();
+
+    // Create a temp file to simulate what vim would write (multi-line content)
+    let temp_file = temp_dir.join(format!("shell_edit_{}.sh", std::process::id()));
+    let multiline_content = "echo line1\necho line2\necho line3";
+    std::fs::write(&temp_file, multiline_content).unwrap();
+
+    // Now simulate the editor exiting by directly calling the shell's editor_exited
+    // Get mutable access to the pane's shell
+    let pane = compositor.get_focused_pane_mut().expect("Expected focused pane");
+    let output = pane.shell.editor_exited(&temp_file);
+    pane.terminal_emulator.process(&output);
+
+    // Render the result
+    compositor.render_to_vec();
+
+    let after_editor_lines = compositor.get_text_lines();
+    save_fixture("ctrlxe_after_editor.txt", &after_editor_lines);
+
+    // The output should show the multi-line command properly rendered
+    let text: String = after_editor_lines.join("\n");
+
+    // Verify the multi-line content appears correctly
+    // The prompt should show the multi-line input
+    assert!(
+        text.contains("echo line1"),
+        "Expected 'echo line1' in output after editor exit. Got:\n{}",
+        text
+    );
+
+    // For a multi-line command, subsequent lines should also be visible
+    // (either on continuation lines or as part of a wrapped input)
+    assert!(
+        text.contains("line2") || text.contains("line3"),
+        "Expected multi-line content to be preserved. Got:\n{}",
+        text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}

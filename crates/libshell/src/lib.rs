@@ -565,10 +565,30 @@ impl Shell {
         let _ = std::fs::remove_file(temp_file);
 
         // Re-render prompt with the (possibly new) input
-        output.extend(self.get_prompt().as_bytes());
-        let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
-        output.extend(highlighted.as_bytes());
+        // For multi-line input, we need to render each line with appropriate prompts
+        output.extend(self.render_full_multiline_input().as_bytes());
         output
+    }
+    
+    /// Render the full input buffer with prompts, handling multi-line correctly.
+    fn render_full_multiline_input(&mut self) -> String {
+        let lines: Vec<&str> = self.input_buffer.split('\n').collect();
+        let mut result = String::new();
+        
+        for (i, line) in lines.iter().enumerate() {
+            if i == 0 {
+                // First line gets the main prompt
+                result.push_str(&self.get_prompt());
+            } else {
+                // Subsequent lines get CRLF and continuation prompt
+                result.push_str("\r\n");
+                result.push_str(&self.get_continuation_prompt());
+            }
+            // Highlight just this line
+            result.push_str(&self.syntax_handler.highlight(line, &self.cwd));
+        }
+        
+        result
     }
 
     /// Start editing the current input in an external editor (CTRL+X CTRL+E).
@@ -681,22 +701,42 @@ impl Shell {
         }
 
         match byte {
-            // Enter - execute command
+            // Enter - execute command (or continue if line ends with backslash)
             b'\r' | b'\n' => {
-                let mut output = vec![b'\r', b'\n'];
-                output.extend(self.execute_current_command());
-                Some(output)
+                // Check if the input ends with a backslash (line continuation)
+                if self.input_buffer.ends_with('\\') {
+                    // Remove the trailing backslash and add a newline to the input buffer
+                    self.input_buffer.pop();
+                    self.input_buffer.push('\n');
+                    self.cursor_pos = self.input_buffer.len();
+                    
+                    // Move to next line and show continuation prompt
+                    let mut output = vec![b'\r', b'\n'];
+                    output.extend(self.get_continuation_prompt().as_bytes());
+                    Some(output)
+                } else {
+                    let mut output = vec![b'\r', b'\n'];
+                    output.extend(self.execute_current_command());
+                    Some(output)
+                }
             }
             // Backspace (0x7f) or Ctrl+H (0x08)
             0x7f | 0x08 => {
                 if self.cursor_pos > 0 {
                     let old_pos = self.cursor_pos;
+                    let char_to_delete = self.input_buffer.chars().nth(self.cursor_pos - 1);
                     self.cursor_pos -= 1;
                     self.input_buffer.remove(self.cursor_pos);
 
-                    // Re-render the entire line with syntax highlighting
-                    // Terminal cursor was at old_pos before this operation
-                    Some(self.render_highlighted_input_from(old_pos))
+                    // Check if we deleted a newline - need special handling
+                    if char_to_delete == Some('\n') {
+                        // We deleted a newline, need to move cursor up and re-render
+                        Some(self.render_after_newline_delete(old_pos))
+                    } else {
+                        // Re-render the entire line with syntax highlighting
+                        // Terminal cursor was at old_pos before this operation
+                        Some(self.render_highlighted_input_from(old_pos))
+                    }
                 } else {
                     None
                 }
@@ -787,6 +827,12 @@ impl Shell {
         };
         // Green arrow: \x1b[32m sets green color, \x1b[0m resets
         format!("{} \x1b[32m➜\x1b[0m ", dir_name)
+    }
+
+    /// Get the continuation prompt string (for multi-line input).
+    pub fn get_continuation_prompt(&self) -> String {
+        // Use a simple continuation prompt: "> "
+        "> ".to_string()
     }
 
     /// Try to parse a complete escape sequence from the buffer.
@@ -1061,33 +1107,72 @@ impl Shell {
 
     /// Render the current input line with syntax highlighting.
     ///
-    /// `old_cursor_pos` is where the terminal cursor currently is.
-    /// Returns ANSI escape sequences to:
-    /// 1. Move cursor to start of input
-    /// 2. Clear the line
-    /// 3. Write highlighted text
-    /// 4. Position cursor correctly
+    /// `old_cursor_pos` is where the terminal cursor currently is (in input buffer coordinates).
+    /// Returns ANSI escape sequences to re-render the input properly.
+    ///
+    /// For single-line input: moves cursor to start, clears line, writes highlighted text.
+    /// For multi-line input: only re-renders the current line (after the last newline).
     fn render_highlighted_input_from(&mut self, old_cursor_pos: usize) -> Vec<u8> {
         let mut output = Vec::new();
 
-        // Move cursor to start of input area (after prompt)
-        if old_cursor_pos > 0 {
-            output.extend(format!("\x1b[{}D", old_cursor_pos).as_bytes());
-        }
+        // Check if we have multi-line input
+        if let Some(last_newline) = self.input_buffer.rfind('\n') {
+            // Multi-line input: only re-render the current line (after the last newline)
+            let current_line_start = last_newline + 1;
+            let current_line = &self.input_buffer[current_line_start..];
+            
+            // Calculate cursor position within the current line
+            let cursor_in_current_line = if self.cursor_pos > current_line_start {
+                self.cursor_pos - current_line_start
+            } else {
+                0
+            };
+            
+            // Calculate old cursor position within the current line
+            let old_cursor_in_current_line = if old_cursor_pos > current_line_start {
+                old_cursor_pos - current_line_start
+            } else {
+                0
+            };
+            
+            // Move cursor to start of current line (after continuation prompt)
+            if old_cursor_in_current_line > 0 {
+                output.extend(format!("\x1b[{}D", old_cursor_in_current_line).as_bytes());
+            }
+            
+            // Clear from cursor to end of line
+            output.extend(b"\x1b[K");
+            
+            // Get highlighted version of just the current line
+            let highlighted = self.syntax_handler.highlight(current_line, &self.cwd);
+            output.extend(highlighted.as_bytes());
+            
+            // Move cursor back to correct position within current line
+            let move_back = current_line.len() - cursor_in_current_line;
+            if move_back > 0 {
+                output.extend(format!("\x1b[{}D", move_back).as_bytes());
+            }
+        } else {
+            // Single-line input: original behavior
+            // Move cursor to start of input area (after prompt)
+            if old_cursor_pos > 0 {
+                output.extend(format!("\x1b[{}D", old_cursor_pos).as_bytes());
+            }
 
-        // Clear from cursor to end of line
-        output.extend(b"\x1b[K");
+            // Clear from cursor to end of line
+            output.extend(b"\x1b[K");
 
-        // Get highlighted version of input
-        let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
+            // Get highlighted version of input
+            let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
 
-        // Write the highlighted input
-        output.extend(highlighted.as_bytes());
+            // Write the highlighted input
+            output.extend(highlighted.as_bytes());
 
-        // Move cursor back to correct position
-        let move_back = self.input_buffer.len() - self.cursor_pos;
-        if move_back > 0 {
-            output.extend(format!("\x1b[{}D", move_back).as_bytes());
+            // Move cursor back to correct position
+            let move_back = self.input_buffer.len() - self.cursor_pos;
+            if move_back > 0 {
+                output.extend(format!("\x1b[{}D", move_back).as_bytes());
+            }
         }
 
         output
@@ -1098,6 +1183,26 @@ impl Shell {
     fn render_highlighted_input(&mut self) -> Vec<u8> {
         let pos = self.cursor_pos;
         self.render_highlighted_input_from(pos)
+    }
+
+    /// Render after deleting a newline character.
+    /// This needs to move the cursor up to the previous line and re-render.
+    fn render_after_newline_delete(&mut self, _old_cursor_pos: usize) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        // Move cursor up one line
+        output.extend(b"\x1b[A");
+        
+        // Move cursor to beginning of line
+        output.extend(b"\r");
+        
+        // Clear from cursor to end of screen (clears current line and all lines below)
+        output.extend(b"\x1b[J");
+        
+        // Re-render the full multi-line input from the prompt
+        output.extend(self.render_full_multiline_input().as_bytes());
+
+        output
     }
 
     /// Move cursor forward one word (Alt+F)

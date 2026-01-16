@@ -84,6 +84,21 @@ impl PaneCell {
         &self.inner
     }
 
+    /// Get a mutable reference to the focused pane.
+    pub fn get_focused_pane_mut(&mut self) -> Option<&mut Pane> {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => Some(pane),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_focused_pane_mut();
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Handle CTRL+C on the focused pane.
     ///
     /// Returns the result of the CTRL+C action. The caller should handle
