@@ -138,6 +138,7 @@ pub enum ShellAction {
 
 /// Shared shell state that can be accessed across threads
 pub struct ShellCore {
+    #[allow(dead_code)]
     env: RwLock<HashMap<String, String>>,
     history: ShellHistory,
 }

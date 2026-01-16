@@ -816,7 +816,7 @@ impl KeyboardEventStream {
         std::thread::spawn(move || loop {
             match raw_rx.recv() {
                 Ok(m) => {
-                    evt_tx.send(m);
+                    let _ = evt_tx.send(m);
                 }
                 Err(_) => break,
             }
@@ -827,7 +827,7 @@ impl KeyboardEventStream {
                 match byte {
                     Ok(b) => tx.send(RawEvent::Byte(b)).unwrap(),
                     _ => {
-                        tx.send(RawEvent::Terminate);
+                        let _ = tx.send(RawEvent::Terminate);
                         return;
                     }
                 }
@@ -989,5 +989,5 @@ extern "C" fn handle_sigwinch(_signal: c_int) {
         Some(s) => s,
         None => return,
     };
-    sink.send(RawEvent::TerminalResizeEvent);
+    let _ = sink.send(RawEvent::TerminalResizeEvent);
 }
