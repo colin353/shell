@@ -64,6 +64,77 @@ fn is_word_boundary(c: char) -> bool {
     c.is_whitespace() || c == '/'
 }
 
+/// Expand a path string, handling:
+/// - `~` and `~/...` -> $HOME expansion
+/// - `$VAR` and `${VAR}` -> environment variable expansion
+///
+/// Returns the expanded path as a PathBuf.
+pub fn expand_path(path: &str) -> PathBuf {
+    let mut result = path.to_string();
+    
+    // Handle tilde expansion
+    if result == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if result.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            result = format!("{}{}", home, &result[1..]);
+        }
+    }
+    
+    // Handle environment variable expansion
+    // Match $VAR or ${VAR} patterns
+    let mut expanded = String::new();
+    let mut chars = result.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            // Check for ${VAR} syntax
+            if chars.peek() == Some(&'{') {
+                chars.next(); // consume '{'
+                let mut var_name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch == '}' {
+                        chars.next(); // consume '}'
+                        break;
+                    }
+                    var_name.push(chars.next().unwrap());
+                }
+                if let Ok(value) = std::env::var(&var_name) {
+                    expanded.push_str(&value);
+                } else {
+                    // Keep the original if var not found
+                    expanded.push_str(&format!("${{{}}}", var_name));
+                }
+            } else {
+                // $VAR syntax - collect alphanumeric and underscore chars
+                let mut var_name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        var_name.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                if var_name.is_empty() {
+                    expanded.push('$');
+                } else if let Ok(value) = std::env::var(&var_name) {
+                    expanded.push_str(&value);
+                } else {
+                    // Keep the original if var not found
+                    expanded.push('$');
+                    expanded.push_str(&var_name);
+                }
+            }
+        } else {
+            expanded.push(c);
+        }
+    }
+    
+    PathBuf::from(expanded)
+}
+
 /// Error type for shell operations
 #[derive(Debug)]
 pub enum ShellError {
@@ -825,8 +896,9 @@ impl Shell {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "/".to_string())
         };
+        // Subdued grey for dir: \x1b[38;5;245m (grey from 256-color palette)
         // Green arrow: \x1b[32m sets green color, \x1b[0m resets
-        format!("{} \x1b[32m➜\x1b[0m ", dir_name)
+        format!("\x1b[38;5;245m{}\x1b[0m \x1b[32m➜\x1b[0m ", dir_name)
     }
 
     /// Get the continuation prompt string (for multi-line input).
@@ -1357,7 +1429,7 @@ impl Shell {
 
     /// Enter file finder mode (CTRL+P)
     fn enter_file_finder(&mut self) -> Vec<u8> {
-        use crate::file_finder::{parse_word_for_search, FileFinderContext};
+        use crate::file_finder::{parse_word_for_search_full, FileFinderContext};
 
         // Get the word under the cursor
         let (word, replace_start, replace_end) = self
@@ -1365,13 +1437,13 @@ impl Shell {
             .word_at_cursor(&self.input_buffer, self.cursor_pos)
             .unwrap_or_else(|| (String::new(), self.cursor_pos, self.cursor_pos));
 
-        // Parse the word to determine base directory and initial query
-        let (base_dir, initial_query, is_absolute) = parse_word_for_search(&word, &self.cwd);
+        // Parse the word to determine base directory, query, and prefix info
+        let parsed = parse_word_for_search_full(&word, &self.cwd);
+        let initial_query = parsed.query.clone();
 
-        // Create the file finder context
-        let mut ctx = FileFinderContext::new(
-            base_dir,
-            is_absolute,
+        // Create the file finder context with prefix preservation
+        let mut ctx = FileFinderContext::from_parsed(
+            parsed,
             replace_start,
             replace_end,
             word.clone(),
@@ -1808,14 +1880,15 @@ impl Shell {
         match parts[0] {
             "cd" => {
                 let target = parts.get(1).copied().unwrap_or("~");
-                let target_path = if target == "~" {
-                    std::env::var("HOME")
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|_| self.cwd.clone())
-                } else if target.starts_with('/') {
-                    std::path::PathBuf::from(target)
+                
+                // Expand tilde and environment variables
+                let expanded = expand_path(target);
+                
+                // If the path is relative (doesn't start with /), join with cwd
+                let target_path = if expanded.is_absolute() {
+                    expanded
                 } else {
-                    self.cwd.join(target)
+                    self.cwd.join(expanded)
                 };
 
                 let exit_code = if target_path.is_dir() {
@@ -1925,4 +1998,59 @@ impl Shell {
 
 pub fn hello() {
     println!("Hello from libshell!");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_path_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        
+        // Test ~ alone
+        assert_eq!(expand_path("~"), PathBuf::from(&home));
+        
+        // Test ~/something
+        assert_eq!(
+            expand_path("~/Documents"),
+            PathBuf::from(format!("{}/Documents", home))
+        );
+        
+        // Test ~/nested/path
+        assert_eq!(
+            expand_path("~/a/b/c"),
+            PathBuf::from(format!("{}/a/b/c", home))
+        );
+    }
+
+    #[test]
+    fn test_expand_path_env_var() {
+        // Set a test env var
+        std::env::set_var("TEST_SHELL_VAR", "/test/path");
+        
+        // Test $VAR syntax
+        assert_eq!(
+            expand_path("$TEST_SHELL_VAR/subdir"),
+            PathBuf::from("/test/path/subdir")
+        );
+        
+        // Test ${VAR} syntax
+        assert_eq!(
+            expand_path("${TEST_SHELL_VAR}/subdir"),
+            PathBuf::from("/test/path/subdir")
+        );
+        
+        // Clean up
+        std::env::remove_var("TEST_SHELL_VAR");
+    }
+
+    #[test]
+    fn test_expand_path_no_expansion() {
+        // Absolute paths without special chars
+        assert_eq!(expand_path("/usr/bin"), PathBuf::from("/usr/bin"));
+        
+        // Relative paths without special chars
+        assert_eq!(expand_path("foo/bar"), PathBuf::from("foo/bar"));
+    }
 }

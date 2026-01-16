@@ -5,6 +5,7 @@ http://google.com
 Things to do:
 
  - [x] CTRL+P for fuzzy file selection
+ - [ ] Change the directory name in the prompt to a tasteful color
  - [ ] Tilde is not expanded into $HOME, env vars are not expanded during completions/fuzzy finding
  - [ ] Environment variable configuration
  - [ ] Pressing CTRL+C immediately kills a process but should actually send sigterm and wait instead

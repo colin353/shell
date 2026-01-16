@@ -36,9 +36,9 @@ pub struct FileMatch {
 /// Context for a file finder search.
 #[derive(Debug, Clone)]
 pub struct FileFinderContext {
-    /// The base directory to search in
+    /// The base directory to search in (expanded path)
     pub base_dir: PathBuf,
-    /// Whether the original input was an absolute path
+    /// Whether the original input was an absolute path (or started with ~/$VAR)
     pub is_absolute: bool,
     /// Start position for replacement in the input buffer
     pub replace_start: usize,
@@ -48,12 +48,16 @@ pub struct FileFinderContext {
     pub original_word: String,
     /// Cached list of all files (for fast re-filtering)
     pub files: Vec<FileCacheEntry>,
+    /// The original prefix to preserve (e.g., "~" or "$HOME")
+    pub original_prefix: Option<String>,
+    /// The expanded prefix (e.g., "/Users/name")
+    pub expanded_prefix: Option<String>,
 }
 
 /// A cached file entry for fast re-filtering.
 #[derive(Debug, Clone)]
 pub struct FileCacheEntry {
-    /// The path to display/insert (relative or absolute)
+    /// The path to display/insert (may use ~ instead of $HOME)
     pub path: String,
     /// The display path (usually same as path, but may differ)
     pub display_path: String,
@@ -84,7 +88,44 @@ impl FileFinderContext {
             replace_end,
             original_word,
             files: Vec::new(),
+            original_prefix: None,
+            expanded_prefix: None,
         }
+    }
+
+    /// Create a new file finder context with prefix information.
+    ///
+    /// # Arguments
+    /// * `parsed` - The parsed search path with prefix info
+    /// * `replace_start` - Start of the word to replace in input buffer
+    /// * `replace_end` - End of the word to replace in input buffer
+    /// * `original_word` - The word that was under the cursor
+    pub fn from_parsed(
+        parsed: ParsedSearchPath,
+        replace_start: usize,
+        replace_end: usize,
+        original_word: String,
+    ) -> Self {
+        FileFinderContext {
+            base_dir: parsed.base_dir,
+            is_absolute: parsed.is_absolute,
+            replace_start,
+            replace_end,
+            original_word,
+            files: Vec::new(),
+            original_prefix: parsed.original_prefix,
+            expanded_prefix: parsed.expanded_prefix,
+        }
+    }
+
+    /// Convert an expanded path back to display form using the original prefix.
+    fn to_display_path(&self, expanded_path: &str) -> String {
+        if let (Some(orig), Some(exp)) = (&self.original_prefix, &self.expanded_prefix) {
+            if expanded_path.starts_with(exp) {
+                return format!("{}{}", orig, &expanded_path[exp.len()..]);
+            }
+        }
+        expanded_path.to_string()
     }
 
     /// Collect all files from the base directory.
@@ -112,7 +153,7 @@ impl FileFinderContext {
             let is_directory = path.is_dir();
 
             // Create the path string based on whether we want absolute or relative
-            let path_str = if self.is_absolute {
+            let expanded_path_str = if self.is_absolute {
                 path.to_string_lossy().to_string()
             } else {
                 path.strip_prefix(&self.base_dir)
@@ -121,7 +162,8 @@ impl FileFinderContext {
                     .to_string()
             };
 
-            // Display path is the same for now
+            // Convert to display form (replaces $HOME with ~ if applicable)
+            let path_str = self.to_display_path(&expanded_path_str);
             let display_path = path_str.clone();
 
             self.files.push(FileCacheEntry {
@@ -183,6 +225,38 @@ impl FileFinderContext {
     }
 }
 
+/// Result of parsing a word for file search.
+#[derive(Debug, Clone)]
+pub struct ParsedSearchPath {
+    /// The base directory to search in (expanded)
+    pub base_dir: PathBuf,
+    /// The query string (filename portion to match)
+    pub query: String,
+    /// Whether the original path was absolute (or started with ~)
+    pub is_absolute: bool,
+    /// The original prefix to preserve when constructing completion paths.
+    /// For "~/Doc" this would be "~", for "$HOME/Doc" this would be "$HOME".
+    /// None for regular relative/absolute paths.
+    pub original_prefix: Option<String>,
+    /// The expanded prefix (e.g., "/Users/name" for ~)
+    pub expanded_prefix: Option<String>,
+}
+
+impl ParsedSearchPath {
+    /// Convert an expanded path back to display form using the original prefix.
+    /// 
+    /// For example, if original_prefix is "~" and expanded_prefix is "/Users/name",
+    /// then "/Users/name/Documents" becomes "~/Documents".
+    pub fn to_display_path(&self, expanded_path: &str) -> String {
+        if let (Some(orig), Some(exp)) = (&self.original_prefix, &self.expanded_prefix) {
+            if expanded_path.starts_with(exp) {
+                return format!("{}{}", orig, &expanded_path[exp.len()..]);
+            }
+        }
+        expanded_path.to_string()
+    }
+}
+
 /// Parse a word to extract the base directory and initial query.
 ///
 /// # Arguments
@@ -192,49 +266,122 @@ impl FileFinderContext {
 /// # Returns
 /// (base_dir, initial_query, is_absolute)
 pub fn parse_word_for_search(word: &str, cwd: &Path) -> (PathBuf, String, bool) {
+    let parsed = parse_word_for_search_full(word, cwd);
+    (parsed.base_dir, parsed.query, parsed.is_absolute)
+}
+
+/// Parse a word to extract the base directory, query, and prefix information.
+///
+/// This version preserves the original prefix (like ~) for path reconstruction.
+///
+/// # Arguments
+/// * `word` - The word under the cursor
+/// * `cwd` - The current working directory
+///
+/// # Returns
+/// A ParsedSearchPath with all the information needed for completion
+pub fn parse_word_for_search_full(word: &str, cwd: &Path) -> ParsedSearchPath {
+    use crate::expand_path;
+    
     if word.is_empty() {
-        return (cwd.to_path_buf(), String::new(), false);
+        return ParsedSearchPath {
+            base_dir: cwd.to_path_buf(),
+            query: String::new(),
+            is_absolute: false,
+            original_prefix: None,
+            expanded_prefix: None,
+        };
     }
 
-    let is_absolute = word.starts_with('/');
+    // Check for tilde or environment variable at the start
+    let (expanded_word, original_prefix, expanded_prefix) = if word.starts_with('~') {
+        let expanded = expand_path(word);
+        let home = std::env::var("HOME").unwrap_or_default();
+        (expanded.to_string_lossy().to_string(), Some("~".to_string()), Some(home))
+    } else if word.starts_with('$') {
+        let expanded = expand_path(word);
+        let expanded_str = expanded.to_string_lossy().to_string();
+        // Extract the variable name for the prefix
+        let var_end = word[1..].chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '{' || *c == '}')
+            .count() + 1;
+        let var_part = &word[..var_end];
+        // Get the expanded value of just the variable
+        let var_expanded = expand_path(var_part);
+        (expanded_str, Some(var_part.to_string()), Some(var_expanded.to_string_lossy().to_string()))
+    } else {
+        (word.to_string(), None, None)
+    };
+
+    let is_absolute = expanded_word.starts_with('/');
 
     if is_absolute {
         // Find the last '/' to split into directory and query
-        if let Some(last_slash) = word.rfind('/') {
-            let dir_part = &word[..=last_slash];
-            let query_part = &word[last_slash + 1..];
+        if let Some(last_slash) = expanded_word.rfind('/') {
+            let dir_part = &expanded_word[..=last_slash];
+            let query_part = &expanded_word[last_slash + 1..];
 
             let base_dir = PathBuf::from(dir_part);
             if base_dir.is_dir() {
-                return (base_dir, query_part.to_string(), true);
+                return ParsedSearchPath {
+                    base_dir,
+                    query: query_part.to_string(),
+                    is_absolute: true,
+                    original_prefix,
+                    expanded_prefix,
+                };
             } else {
                 // Directory doesn't exist, try parent
-                let parent = PathBuf::from(&word[..last_slash]);
+                let parent = PathBuf::from(&expanded_word[..last_slash]);
                 if parent.is_dir() || last_slash == 0 {
                     let search_base = if last_slash == 0 {
                         PathBuf::from("/")
                     } else {
                         parent
                     };
-                    return (search_base, query_part.to_string(), true);
+                    return ParsedSearchPath {
+                        base_dir: search_base,
+                        query: query_part.to_string(),
+                        is_absolute: true,
+                        original_prefix,
+                        expanded_prefix,
+                    };
                 }
             }
         }
         // Fallback: search from root with the word as query
-        (PathBuf::from("/"), word[1..].to_string(), true)
+        ParsedSearchPath {
+            base_dir: PathBuf::from("/"),
+            query: expanded_word[1..].to_string(),
+            is_absolute: true,
+            original_prefix,
+            expanded_prefix,
+        }
     } else {
         // Relative path - check if it contains a directory component
-        if let Some(last_slash) = word.rfind('/') {
-            let dir_part = &word[..last_slash];
-            let query_part = &word[last_slash + 1..];
+        if let Some(last_slash) = expanded_word.rfind('/') {
+            let dir_part = &expanded_word[..last_slash];
+            let query_part = &expanded_word[last_slash + 1..];
 
             let base_dir = cwd.join(dir_part);
             if base_dir.is_dir() {
-                return (base_dir, query_part.to_string(), false);
+                return ParsedSearchPath {
+                    base_dir,
+                    query: query_part.to_string(),
+                    is_absolute: false,
+                    original_prefix,
+                    expanded_prefix,
+                };
             }
         }
         // No directory component or directory doesn't exist - search from cwd
-        (cwd.to_path_buf(), word.to_string(), false)
+        ParsedSearchPath {
+            base_dir: cwd.to_path_buf(),
+            query: expanded_word,
+            is_absolute: false,
+            original_prefix,
+            expanded_prefix,
+        }
     }
 }
 

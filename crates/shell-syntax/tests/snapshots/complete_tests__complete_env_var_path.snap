@@ -1,0 +1,14 @@
+---
+source: crates/shell-syntax/tests/complete_tests.rs
+expression: completions
+---
+[
+    Completion {
+        text: "$HOME/Documents/",
+        display: "Documents/",
+        kind: Directory,
+        replace_start: 4,
+        replace_end: 12,
+        is_partial: false,
+    },
+]

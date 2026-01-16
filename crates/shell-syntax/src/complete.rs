@@ -138,16 +138,46 @@ fn analyze_cursor_position<'a>(tree: &Tree, source: &'a str, cursor_pos: usize) 
             || node.kind() == "expansion"
             || node.kind() == "variable_name"
         {
-            ctx.is_env_var = true;
-            // Extract just the variable name part, updating word_start to match
-            let original_len = ctx.word.len();
-            let var_text = ctx.word.trim_start_matches('$').trim_start_matches('{');
-            let trimmed_len = original_len - var_text.len();
-            ctx.word_start += trimmed_len;
-            if let Some(end_idx) = var_text.find('}') {
-                ctx.word = &var_text[..end_idx];
+            // Check if this is part of a concatenation (e.g., $HOME/something)
+            // In that case, treat it as a file path, not an env var
+            let parent = node.parent();
+            let is_path_with_var = parent.map_or(false, |p| {
+                p.kind() == "concatenation" && source[start..].contains('/')
+            });
+            
+            if is_path_with_var {
+                // Get the full concatenated word for file completion
+                if let Some(p) = parent {
+                    ctx.word_start = p.start_byte();
+                    ctx.word_end = p.end_byte().min(source.len());
+                    ctx.word = &source[ctx.word_start..ctx.word_end];
+                }
+                // Don't set is_env_var - we want file completion
             } else {
-                ctx.word = var_text;
+                ctx.is_env_var = true;
+                // Extract just the variable name part, updating word_start to match
+                let original_len = ctx.word.len();
+                let var_text = ctx.word.trim_start_matches('$').trim_start_matches('{');
+                let trimmed_len = original_len - var_text.len();
+                ctx.word_start += trimmed_len;
+                if let Some(end_idx) = var_text.find('}') {
+                    ctx.word = &var_text[..end_idx];
+                } else {
+                    ctx.word = var_text;
+                }
+            }
+        }
+
+        // Also check if we're a plain word that's part of a concatenation with a var prefix
+        // e.g., when cursor is on "/Do" in "$HOME/Do"
+        if !ctx.is_env_var && (node.kind() == "word" || node.kind() == "concatenation") {
+            if let Some(parent) = node.parent() {
+                if parent.kind() == "concatenation" {
+                    // Get the full concatenation
+                    ctx.word_start = parent.start_byte();
+                    ctx.word_end = parent.end_byte().min(source.len());
+                    ctx.word = &source[ctx.word_start..ctx.word_end];
+                }
             }
         }
 
@@ -418,17 +448,24 @@ fn complete_files<F: FileSystem>(
     context: &CompletionContext,
     fs: &F,
 ) -> Vec<Completion> {
+    use crate::expand_path_with_info_env;
+    
     let word = ctx.word;
 
+    // Check if the word starts with ~ or $ (needs expansion)
+    let expanded_info = expand_path_with_info_env(word, Some(&context.env_vars));
+    let expanded_word = expanded_info.expanded.to_string_lossy().to_string();
+    let has_prefix = expanded_info.original_prefix.is_some();
+
     // Determine the directory to search and the prefix to match
-    let (search_dir, file_prefix): (PathBuf, String) = if word.contains('/') {
-        let path = if word.starts_with('/') {
-            PathBuf::from(word)
+    let (search_dir, file_prefix): (PathBuf, String) = if expanded_word.contains('/') {
+        let path = if expanded_word.starts_with('/') {
+            PathBuf::from(&expanded_word)
         } else {
-            context.cwd.join(word)
+            context.cwd.join(&expanded_word)
         };
 
-        if word.ends_with('/') {
+        if expanded_word.ends_with('/') {
             // Directory path, list its contents
             (path, String::new())
         } else {
@@ -440,6 +477,15 @@ fn complete_files<F: FileSystem>(
                 .unwrap_or("")
                 .to_string();
             (parent, prefix)
+        }
+    } else if has_prefix {
+        // Word starts with ~ or $ but has no /
+        // Just expand and use as directory if it's a dir, otherwise as prefix
+        let path = PathBuf::from(&expanded_word);
+        if path.is_dir() {
+            (path, String::new())
+        } else {
+            (context.cwd.clone(), word.to_string())
         }
     } else {
         // No path separator, search in cwd
@@ -456,12 +502,14 @@ fn complete_files<F: FileSystem>(
         .filter(|entry| !entry.name.starts_with('.') || file_prefix.starts_with("."))
         .map(|entry| {
             let is_dir = entry.is_dir;
-            let completion_text = build_file_completion_text(
+            let completion_text = build_file_completion_text_with_prefix(
                 word,
                 &entry.name,
                 is_dir,
                 ctx.in_quotes,
                 ctx.quote_char,
+                &expanded_info.original_prefix,
+                &expanded_info.expanded_prefix,
             );
 
             Completion {
@@ -484,7 +532,8 @@ fn complete_files<F: FileSystem>(
         .collect()
 }
 
-/// Build the completion text for a file, handling quotes and escaping.
+/// Build the completion text for a file, handling quotes, escaping, and path prefixes like ~ or $VAR.
+#[allow(dead_code)]
 fn build_file_completion_text(
     original_word: &str,
     filename: &str,
@@ -492,11 +541,37 @@ fn build_file_completion_text(
     in_quotes: bool,
     _quote_char: Option<char>,
 ) -> String {
+    build_file_completion_text_with_prefix(
+        original_word,
+        filename,
+        is_dir,
+        in_quotes,
+        _quote_char,
+        &None,
+        &None,
+    )
+}
+
+/// Build the completion text for a file, handling quotes, escaping, and path prefixes like ~ or $VAR.
+fn build_file_completion_text_with_prefix(
+    original_word: &str,
+    filename: &str,
+    is_dir: bool,
+    in_quotes: bool,
+    _quote_char: Option<char>,
+    original_prefix: &Option<String>,
+    _expanded_prefix: &Option<String>,
+) -> String {
     let mut result = String::new();
 
     // Preserve the path prefix from the original word
     if let Some(last_slash) = original_word.rfind('/') {
-        result.push_str(&original_word[..=last_slash]);
+        let prefix_part = &original_word[..=last_slash];
+        result.push_str(prefix_part);
+    } else if let Some(orig_prefix) = original_prefix {
+        // If no slash but we have a prefix like ~ or $HOME, use it with a slash
+        result.push_str(orig_prefix);
+        result.push('/');
     }
 
     // Add the filename, with escaping if needed

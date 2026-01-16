@@ -960,6 +960,104 @@ fn test_multiline_backspace_across_newline() -> Result<(), CompositorError> {
 }
 
 #[test]
+fn test_cd_tilde_expansion() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    // Create a temporary directory for the test history file
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_cd_tilde_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    // Create a ShellCore with our custom history path
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    // Create a compositor with the custom core (using embedded shell, not bash)
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Render initial state
+    compositor.render_to_vec();
+
+    // First, get the home directory for verification
+    let home = std::env::var("HOME").expect("HOME not set");
+
+    // Test cd ~ (should work, but let's verify)
+    compositor.handle_input(b"cd ~\r");
+    compositor.render_to_vec();
+
+    let lines_after_cd_home = compositor.get_text_lines();
+    let text = lines_after_cd_home.join("\n");
+    
+    // Should see ~ in the prompt (which is how home dir is displayed)
+    assert!(
+        text.contains("~ "),
+        "Expected '~ ' in prompt after cd ~. Got:\n{}",
+        text
+    );
+
+    // Now test cd ~/Documents (or any subdir of home that exists)
+    // Use a directory we know exists - let's check for common ones
+    let test_dirs = ["Documents", "Desktop", "Downloads", "."];
+    let mut found_dir = None;
+    for dir in &test_dirs {
+        let path = std::path::PathBuf::from(&home).join(dir);
+        if path.is_dir() {
+            found_dir = Some(*dir);
+            break;
+        }
+    }
+
+    if let Some(dir) = found_dir {
+        let cmd = format!("cd ~/{}\r", dir);
+        compositor.handle_input(cmd.as_bytes());
+        compositor.render_to_vec();
+
+        let lines_after = compositor.get_text_lines();
+        save_fixture("cd_tilde_expansion.txt", &lines_after);
+        let text_after = lines_after.join("\n");
+
+        // Should NOT see "no such directory" error
+        assert!(
+            !text_after.contains("no such directory"),
+            "cd ~/{} should work. Got:\n{}",
+            dir,
+            text_after
+        );
+
+        // The prompt should show the directory name (not ~)
+        if dir != "." {
+            assert!(
+                text_after.contains(dir),
+                "Expected '{}' in prompt after cd ~/{}. Got:\n{}",
+                dir,
+                dir,
+                text_after
+            );
+        }
+    }
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+#[test]
 fn test_ctrl_x_ctrl_e_edit_multiline_command() -> Result<(), CompositorError> {
     use std::sync::Arc;
 
