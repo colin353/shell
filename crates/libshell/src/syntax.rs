@@ -49,21 +49,22 @@ impl SyntaxHandler {
         render_highlighted(input, &spans)
     }
 
-    /// Get a single completion if exactly one match exists.
+    /// Get a single completion if exactly one match exists, or a common prefix.
     ///
-    /// Returns the completion text to insert and the range to replace.
+    /// Returns (completion_text, replace_start, replace_end, is_partial).
+    /// If is_partial is false, the caller should add a trailing space.
     pub fn complete(
         &mut self,
         input: &str,
         cursor_pos: usize,
         cwd: &PathBuf,
-    ) -> Option<(String, usize, usize)> {
+    ) -> Option<(String, usize, usize, bool)> {
         self.maybe_refresh_path();
         self.syntax.update(input);
 
         let context = self.build_context(cwd);
         self.syntax.complete(cursor_pos, &context).map(|c| {
-            (c.text, c.replace_start, c.replace_end)
+            (c.text, c.replace_start, c.replace_end, c.is_partial)
         })
     }
 
@@ -120,7 +121,8 @@ fn scan_path_executables() -> Vec<String> {
     for dir in path_var.split(':') {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
+                // Use std::fs::metadata to follow symlinks (entry.metadata() doesn't)
+                if let Ok(metadata) = std::fs::metadata(entry.path()) {
                     if metadata.is_file() {
                         #[cfg(unix)]
                         {
@@ -243,5 +245,50 @@ mod tests {
         assert!(result.contains("\x1b[1;36m")); // Cyan for builtin
         assert!(result.contains("echo"));
         assert!(result.contains("hello"));
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn test_path_has_cargo() {
+        let executables = scan_path_executables();
+        assert!(executables.contains(&"cargo".to_string()), 
+            "cargo should be in PATH executables");
+    }
+    
+    #[test]
+    fn test_completions_include_cargo() {
+        let mut handler = SyntaxHandler::new();
+        let cwd = std::path::PathBuf::from("/tmp");
+        
+        // There should be multiple completions for "carg" (cargo, cargo-clippy, etc.)
+        let completions = handler.completions("carg", 4, &cwd);
+        assert!(completions.contains(&"cargo".to_string()), 
+            "Completions should include 'cargo'. Got: {:?}", completions);
+        
+        // With multiple matches, complete() now returns the common prefix
+        // "carg" -> "cargo" (common prefix of cargo, cargo-clippy, cargo-deb, etc.)
+        let completion = handler.complete("carg", 4, &cwd);
+        assert!(completion.is_some(), "Should return common prefix completion");
+        let (text, _, _, is_partial) = completion.unwrap();
+        assert_eq!(text, "cargo", "Should complete to common prefix 'cargo'");
+        assert!(is_partial, "Should be marked as partial completion");
+    }
+    
+    #[test]
+    fn test_highlight_cargo_is_command() {
+        let mut handler = SyntaxHandler::new();
+        let cwd = std::path::PathBuf::from("/tmp");
+        
+        // cargo should be highlighted as a valid command, not red
+        let highlighted = handler.highlight("cargo build", &cwd);
+        // Should contain bold blue for Command, not red for CommandNotFound
+        assert!(highlighted.contains("\x1b[1;34m"), 
+            "cargo should be highlighted as Command (bold blue). Got: {:?}", highlighted);
+        assert!(!highlighted.contains("\x1b[31;4m"), 
+            "cargo should NOT be highlighted as CommandNotFound (red underline)");
     }
 }

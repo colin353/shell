@@ -9,5 +9,6 @@ expression: completions
         kind: Subcommand,
         replace_start: 4,
         replace_end: 8,
+        is_partial: false,
     },
 ]

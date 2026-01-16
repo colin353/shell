@@ -75,14 +75,61 @@ impl<F: FileSystem> ShellSyntax<F> {
         highlight_tree(tree, &self.source, context, &self.fs)
     }
 
-    /// Get a single completion if exactly one match exists.
+    /// Get a single completion if exactly one match exists, or a common prefix completion.
     ///
-    /// Returns `None` if there are zero or multiple matches.
+    /// Returns:
+    /// - Full completion (with `is_partial = false`) if exactly one match
+    /// - Prefix completion (with `is_partial = true`) if multiple matches share a common prefix
+    /// - `None` if no matches or no common prefix beyond current word
     pub fn complete(&self, cursor_pos: usize, context: &CompletionContext) -> Option<Completion> {
         let completions = self.completions(cursor_pos, context);
+        
+        if completions.is_empty() {
+            return None;
+        }
+        
         if completions.len() == 1 {
-            Some(completions.into_iter().next().unwrap())
+            // Single match - return full completion
+            let mut completion = completions.into_iter().next().unwrap();
+            completion.is_partial = false;
+            return Some(completion);
+        }
+        
+        // Multiple matches - find common prefix
+        let first = &completions[0];
+        let mut common_prefix = first.text.clone();
+        
+        for completion in &completions[1..] {
+            // Find common prefix between current common_prefix and this completion
+            let new_len = common_prefix
+                .chars()
+                .zip(completion.text.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            
+            // Get the prefix in terms of bytes (chars may be multi-byte)
+            let char_indices: Vec<_> = common_prefix.char_indices().collect();
+            if new_len < char_indices.len() {
+                common_prefix = common_prefix[..char_indices[new_len].0].to_string();
+            }
+        }
+        
+        // Check if the common prefix is longer than what's already typed
+        // The current word is from replace_start to replace_end in the source
+        let current_word_len = first.replace_end - first.replace_start;
+        
+        if common_prefix.len() > current_word_len {
+            // Return prefix completion
+            Some(Completion {
+                text: common_prefix.clone(),
+                display: common_prefix,
+                kind: first.kind,
+                replace_start: first.replace_start,
+                replace_end: first.replace_end,
+                is_partial: true,
+            })
         } else {
+            // Common prefix is not longer than current word - no completion
             None
         }
     }
@@ -226,5 +273,78 @@ mod tests {
         let context = make_context();
         let completions = syntax.completions(2, &context);
         assert!(completions.iter().any(|c| c.text == "ls"));
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+    use crate::filesystem::FakeFileSystem;
+    use std::path::PathBuf;
+
+    fn make_context_with_commands(commands: Vec<&str>) -> CompletionContext {
+        CompletionContext {
+            env_vars: [("HOME".into(), "/home/user".into())]
+                .into_iter()
+                .collect(),
+            path_executables: commands.into_iter().map(|s| s.to_string()).collect(),
+            cwd: PathBuf::from("/home/user"),
+        }
+    }
+
+    #[test]
+    fn test_prefix_completion_single_match() {
+        let mut syntax = ShellSyntax::with_filesystem(FakeFileSystem::new());
+        syntax.update("ech");
+        
+        // Only "echo" matches
+        let context = make_context_with_commands(vec!["echo", "ls", "cat"]);
+        let completion = syntax.complete(3, &context);
+        
+        assert!(completion.is_some());
+        let c = completion.unwrap();
+        assert_eq!(c.text, "echo");
+        assert!(!c.is_partial, "Single match should be full completion");
+    }
+
+    #[test]
+    fn test_prefix_completion_multiple_matches_common_prefix() {
+        let mut syntax = ShellSyntax::with_filesystem(FakeFileSystem::new());
+        syntax.update("car");
+        
+        // "cargo", "cargo-clippy", "cargo-deb" all match
+        let context = make_context_with_commands(vec!["cargo", "cargo-clippy", "cargo-deb"]);
+        let completion = syntax.complete(3, &context);
+        
+        assert!(completion.is_some());
+        let c = completion.unwrap();
+        assert_eq!(c.text, "cargo", "Should complete to common prefix");
+        assert!(c.is_partial, "Multiple matches should be partial completion");
+    }
+
+    #[test]
+    fn test_prefix_completion_no_longer_prefix() {
+        let mut syntax = ShellSyntax::with_filesystem(FakeFileSystem::new());
+        syntax.update("cargo");
+        
+        // Already typed "cargo" - common prefix is "cargo" but not longer
+        let context = make_context_with_commands(vec!["cargo", "cargo-clippy", "cargo-deb"]);
+        let completion = syntax.complete(5, &context);
+        
+        // Should return None since common prefix is not longer than typed
+        assert!(completion.is_none(), "Should return None when prefix is not longer");
+    }
+
+    #[test]
+    fn test_prefix_completion_different_starts() {
+        let mut syntax = ShellSyntax::with_filesystem(FakeFileSystem::new());
+        syntax.update("c");
+        
+        // "cat", "cargo", "curl" - common prefix is just "c"
+        let context = make_context_with_commands(vec!["cat", "cargo", "curl"]);
+        let completion = syntax.complete(1, &context);
+        
+        // Should return None since common prefix "c" is not longer than typed "c"
+        assert!(completion.is_none(), "Should return None when no longer common prefix");
     }
 }

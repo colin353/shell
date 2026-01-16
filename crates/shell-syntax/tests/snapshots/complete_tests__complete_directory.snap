@@ -9,5 +9,6 @@ expression: completions
         kind: Directory,
         replace_start: 3,
         replace_end: 5,
+        is_partial: false,
     },
 ]

@@ -39,6 +39,9 @@ pub struct Completion {
     pub replace_start: usize,
     /// End position for replacement (byte offset).
     pub replace_end: usize,
+    /// Whether this is a partial (prefix) completion.
+    /// If true, don't add trailing space. If false, add trailing space.
+    pub is_partial: bool,
 }
 
 /// Context about where the cursor is in the AST.
@@ -311,6 +314,7 @@ fn complete_env_vars(ctx: &CursorContext, context: &CompletionContext) -> Vec<Co
             kind: CompletionKind::EnvVar,
             replace_start: ctx.word_start,
             replace_end: ctx.word_end,
+            is_partial: false,
         })
         .collect();
 
@@ -333,6 +337,7 @@ fn complete_commands(ctx: &CursorContext, context: &CompletionContext) -> Vec<Co
                 kind: CompletionKind::Builtin,
                 replace_start: ctx.word_start,
                 replace_end: ctx.word_end,
+                is_partial: false,
             });
         }
     }
@@ -346,6 +351,7 @@ fn complete_commands(ctx: &CursorContext, context: &CompletionContext) -> Vec<Co
                 kind: CompletionKind::Command,
                 replace_start: ctx.word_start,
                 replace_end: ctx.word_end,
+                is_partial: false,
             });
         }
     }
@@ -371,6 +377,7 @@ fn complete_flags(ctx: &CursorContext) -> Vec<Completion> {
             kind: CompletionKind::Flag,
             replace_start: ctx.word_start,
             replace_end: ctx.word_end,
+            is_partial: false,
         })
         .collect()
 }
@@ -392,6 +399,7 @@ fn complete_subcommands(ctx: &CursorContext, cmd: &str) -> Vec<Completion> {
             kind: CompletionKind::Subcommand,
             replace_start: ctx.word_start,
             replace_end: ctx.word_end,
+            is_partial: false,
         })
         .collect()
 }
@@ -462,6 +470,7 @@ fn complete_files<F: FileSystem>(
                 },
                 replace_start: ctx.word_start,
                 replace_end: ctx.word_end,
+                is_partial: false,
             }
         })
         .collect()

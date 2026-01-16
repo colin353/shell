@@ -9,5 +9,6 @@ Some(
         kind: Builtin,
         replace_start: 0,
         replace_end: 3,
+        is_partial: false,
     },
 )

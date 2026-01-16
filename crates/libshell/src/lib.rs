@@ -820,17 +820,24 @@ impl Shell {
             &self.cwd,
         );
 
-        let Some((text, replace_start, replace_end)) = completion else {
+        let Some((text, replace_start, replace_end, is_partial)) = completion else {
             return None;
         };
 
         let old_pos = self.cursor_pos;
 
+        // Build the completion text (add trailing space for full completions)
+        let completion_text = if is_partial {
+            text
+        } else {
+            format!("{} ", text)
+        };
+
         // Replace the text in the input buffer
-        self.input_buffer.replace_range(replace_start..replace_end, &text);
+        self.input_buffer.replace_range(replace_start..replace_end, &completion_text);
 
         // Update cursor position to end of inserted completion
-        self.cursor_pos = replace_start + text.len();
+        self.cursor_pos = replace_start + completion_text.len();
 
         // Re-render with syntax highlighting
         // Terminal cursor was at old_pos before this operation

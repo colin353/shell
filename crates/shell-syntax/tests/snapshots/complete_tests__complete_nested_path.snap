@@ -9,5 +9,6 @@ expression: completions
         kind: File,
         replace_start: 4,
         replace_end: 13,
+        is_partial: false,
     },
 ]

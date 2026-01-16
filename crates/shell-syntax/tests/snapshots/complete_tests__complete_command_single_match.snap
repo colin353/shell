@@ -9,5 +9,6 @@ Some(
         kind: Command,
         replace_start: 0,
         replace_end: 4,
+        is_partial: false,
     },
 )

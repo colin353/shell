@@ -9,6 +9,7 @@ expression: completions
         kind: Builtin,
         replace_start: 0,
         replace_end: 2,
+        is_partial: false,
     },
     Completion {
         text: "cat",
@@ -16,6 +17,7 @@ expression: completions
         kind: Command,
         replace_start: 0,
         replace_end: 2,
+        is_partial: false,
     },
     Completion {
         text: "cargo",
@@ -23,6 +25,7 @@ expression: completions
         kind: Command,
         replace_start: 0,
         replace_end: 2,
+        is_partial: false,
     },
     Completion {
         text: "cat",
@@ -30,5 +33,6 @@ expression: completions
         kind: Command,
         replace_start: 0,
         replace_end: 2,
+        is_partial: false,
     },
 ]

@@ -9,6 +9,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "--all",
@@ -16,6 +17,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "-l",
@@ -23,6 +25,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "--long",
@@ -30,6 +33,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "-h",
@@ -37,6 +41,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "--human-readable",
@@ -44,6 +49,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "-R",
@@ -51,6 +57,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "--recursive",
@@ -58,6 +65,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "-S",
@@ -65,6 +73,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "-t",
@@ -72,6 +81,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "-r",
@@ -79,6 +89,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "--reverse",
@@ -86,6 +97,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "--color",
@@ -93,6 +105,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "-1",
@@ -100,6 +113,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "-d",
@@ -107,6 +121,7 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
     Completion {
         text: "--directory",
@@ -114,5 +129,6 @@ expression: completions
         kind: Flag,
         replace_start: 3,
         replace_end: 4,
+        is_partial: false,
     },
 ]

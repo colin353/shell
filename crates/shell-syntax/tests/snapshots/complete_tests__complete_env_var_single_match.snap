@@ -9,5 +9,6 @@ expression: completions
         kind: EnvVar,
         replace_start: 6,
         replace_end: 8,
+        is_partial: false,
     },
 ]

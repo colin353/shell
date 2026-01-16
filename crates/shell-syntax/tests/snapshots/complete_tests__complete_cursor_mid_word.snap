@@ -9,5 +9,6 @@ expression: completions
         kind: Command,
         replace_start: 0,
         replace_end: 5,
+        is_partial: false,
     },
 ]
