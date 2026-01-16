@@ -20,12 +20,42 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 pub mod history;
+pub mod picker;
 mod syntax;
 
 pub use history::{
     BackupConfig, CommandSource, EntryId, HistoryEntry, HistorySearchResult, SearchResult,
     ShellHistory,
 };
+pub use picker::{PickerConfig, PickerItem, PickerMode, PickerState, TabCompletionContext, TabCompletionItem};
+
+/// Find the longest common prefix among a set of strings
+fn find_common_prefix<'a>(strings: impl Iterator<Item = &'a str>) -> String {
+    let strings: Vec<&str> = strings.collect();
+    if strings.is_empty() {
+        return String::new();
+    }
+    if strings.len() == 1 {
+        return strings[0].to_string();
+    }
+
+    let first = strings[0];
+    let mut prefix_len = first.len();
+
+    for s in &strings[1..] {
+        prefix_len = first
+            .chars()
+            .zip(s.chars())
+            .take(prefix_len)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if prefix_len == 0 {
+            break;
+        }
+    }
+
+    first.chars().take(prefix_len).collect()
+}
 
 /// Error type for shell operations
 #[derive(Debug)]
@@ -258,15 +288,9 @@ pub struct Shell {
     /// Start time of currently running command
     command_start_time: Option<std::time::Instant>,
 
-    // --- CTRL+R history search state ---
-    /// Whether we're in history search mode (CTRL+R)
-    history_search_mode: bool,
-    /// Search results from fuzzy matching
-    history_search_results: Vec<HistorySearchResult>,
-    /// Currently selected result index (0 = first/best match)
-    history_search_selected: usize,
-    /// Number of UI lines drawn in the last render (for cleanup)
-    history_search_ui_lines: usize,
+    // --- Picker UI state (used for CTRL+R history search, tab completion, etc.) ---
+    /// Current picker state, if a picker is active
+    picker_state: Option<PickerState>,
 
     // --- Syntax highlighting and completion ---
     /// Syntax highlighter and completion engine
@@ -316,11 +340,8 @@ impl Shell {
             in_escape_sequence: false,
             current_command_id: None,
             command_start_time: None,
-            // CTRL+R search state
-            history_search_mode: false,
-            history_search_results: Vec::new(),
-            history_search_selected: 0,
-            history_search_ui_lines: 0,
+            // Picker UI state
+            picker_state: None,
             // Syntax highlighting
             syntax_handler: syntax::SyntaxHandler::new(),
         };
@@ -482,7 +503,7 @@ impl Shell {
     /// This is used to determine whether CTRL+C should clear input or
     /// trigger a pane close action.
     pub fn is_input_empty(&self) -> bool {
-        self.input_buffer.is_empty() && !self.history_search_mode
+        self.input_buffer.is_empty() && self.picker_state.is_none()
     }
 
     /// Handle CTRL+C when the shell is active (no subprocess).
@@ -490,9 +511,9 @@ impl Shell {
     /// If there is input, clears it and shows a new prompt.
     /// Returns the output to write to the terminal, or None if input was already empty.
     pub fn handle_ctrl_c(&mut self) -> Option<Vec<u8>> {
-        // If in history search mode, exit it first
-        if self.history_search_mode {
-            let output = self.exit_history_search();
+        // If in picker mode, exit it first
+        if self.picker_state.is_some() {
+            let output = self.exit_picker();
             return Some(output);
         }
 
@@ -513,9 +534,9 @@ impl Shell {
     // --- Private implementation ---
 
     fn process_input_byte(&mut self, byte: u8) -> Option<Vec<u8>> {
-        // If in history search mode, route to search input handler
-        if self.history_search_mode {
-            return self.process_search_input_byte(byte);
+        // If in picker mode, route to picker input handler
+        if self.picker_state.is_some() {
+            return self.process_picker_input_byte(byte);
         }
 
         // Handle escape sequences
@@ -812,36 +833,89 @@ impl Shell {
     /// Handle tab completion.
     ///
     /// If exactly one completion matches, insert it.
-    /// Otherwise, do nothing (future: show completion menu).
+    /// If multiple completions match, show the picker UI.
     fn handle_tab_completion(&mut self) -> Option<Vec<u8>> {
-        let completion = self.syntax_handler.complete(
+        // Get all completions
+        let completions_data = self.syntax_handler.completions_full(
             &self.input_buffer,
             self.cursor_pos,
             &self.cwd,
         );
 
-        let Some((text, replace_start, replace_end, is_partial)) = completion else {
+        let Some((completions, replace_start, replace_end)) = completions_data else {
             return None;
         };
 
-        let old_pos = self.cursor_pos;
+        if completions.is_empty() {
+            return None;
+        }
 
-        // Build the completion text (add trailing space for full completions)
-        let completion_text = if is_partial {
-            text
-        } else {
-            format!("{} ", text)
+        // If exactly one completion, insert it directly
+        if completions.len() == 1 {
+            let (_, text) = &completions[0];
+            let old_pos = self.cursor_pos;
+
+            // Add trailing space for complete completions
+            let completion_text = format!("{} ", text);
+
+            // Replace the text in the input buffer
+            self.input_buffer.replace_range(replace_start..replace_end, &completion_text);
+
+            // Update cursor position to end of inserted completion
+            self.cursor_pos = replace_start + completion_text.len();
+
+            // Re-render with syntax highlighting
+            return Some(self.render_highlighted_input_from(old_pos));
+        }
+
+        // Multiple completions - check if there's a common prefix we can complete first
+        let common_prefix = find_common_prefix(completions.iter().map(|(_, t)| t.as_str()));
+        let current_word = &self.input_buffer[replace_start..replace_end];
+        
+        if common_prefix.len() > current_word.len() {
+            // There's a common prefix longer than what's typed - complete to that first
+            let old_pos = self.cursor_pos;
+            self.input_buffer.replace_range(replace_start..replace_end, &common_prefix);
+            self.cursor_pos = replace_start + common_prefix.len();
+            return Some(self.render_highlighted_input_from(old_pos));
+        }
+
+        // No common prefix to extend - show the picker
+        self.enter_tab_completion(completions, replace_start, replace_end)
+    }
+
+    /// Enter tab completion picker mode
+    fn enter_tab_completion(
+        &mut self,
+        completions: Vec<(String, String)>,
+        replace_start: usize,
+        replace_end: usize,
+    ) -> Option<Vec<u8>> {
+        let prefix = self.input_buffer[replace_start..replace_end].to_string();
+        
+        // Convert completions to TabCompletionItems
+        let items: Vec<TabCompletionItem> = completions
+            .into_iter()
+            .map(|(display, text)| {
+                // Calculate match indices for highlighting the prefix
+                let match_indices: Vec<usize> = (0..prefix.len().min(display.len())).collect();
+                TabCompletionItem {
+                    display_text: display,
+                    completion_text: text,
+                    match_indices,
+                }
+            })
+            .collect();
+
+        let ctx = TabCompletionContext {
+            replace_start,
+            replace_end,
+            prefix,
+            all_completions: items,
         };
 
-        // Replace the text in the input buffer
-        self.input_buffer.replace_range(replace_start..replace_end, &completion_text);
-
-        // Update cursor position to end of inserted completion
-        self.cursor_pos = replace_start + completion_text.len();
-
-        // Re-render with syntax highlighting
-        // Terminal cursor was at old_pos before this operation
-        Some(self.render_highlighted_input_from(old_pos))
+        self.picker_state = Some(PickerState::new_tab_completion(ctx));
+        Some(self.render_picker_ui())
     }
 
     /// Render the current input line with syntax highlighting.
@@ -1022,77 +1096,125 @@ impl Shell {
         }
     }
 
-    // --- CTRL+R History Search Implementation ---
-
-    /// Number of search results to display
-    const SEARCH_RESULT_COUNT: usize = 20;
+    // --- Picker UI Implementation (CTRL+R History Search, Tab Completion, etc.) ---
 
     /// Enter history search mode
     fn enter_history_search(&mut self) -> Vec<u8> {
-        self.history_search_mode = true;
-        self.history_search_selected = 0;
+        self.picker_state = Some(PickerState::new(PickerMode::HistorySearch));
 
         // Perform initial search with current input
-        self.update_history_search();
+        self.update_picker_items();
 
-        // Render the search UI
-        self.render_search_ui()
+        // Render the picker UI
+        self.render_picker_ui()
     }
 
-    /// Exit history search mode without selecting
-    fn exit_history_search(&mut self) -> Vec<u8> {
-        self.history_search_mode = false;
-        self.history_search_results.clear();
-        self.history_search_selected = 0;
+    /// Exit picker mode without selecting
+    fn exit_picker(&mut self) -> Vec<u8> {
+        let ui_lines = self.picker_state.as_ref().map(|s| s.ui_lines).unwrap_or(0);
+        self.picker_state = None;
 
-        // Clear search UI and redraw prompt with current input
-        self.clear_search_ui_and_redraw()
+        // Clear picker UI and redraw prompt with current input
+        self.clear_picker_ui_and_redraw(ui_lines)
     }
 
-    /// Select current result and exit search mode
-    fn select_history_search(&mut self) -> Vec<u8> {
-        let selected_command = if !self.history_search_results.is_empty() {
-            Some(
-                self.history_search_results[self.history_search_selected]
-                    .entry
-                    .command
-                    .clone(),
-            )
-        } else {
-            None
-        };
+    /// Select current item and exit picker mode
+    fn select_picker_item(&mut self) -> Vec<u8> {
+        // Extract the selection info before dropping picker_state
+        // For tab completion, use current cursor position as the end of replacement
+        let current_cursor = self.cursor_pos;
+        let selection_info = self.picker_state.as_ref().and_then(|state| {
+            let selected_text = state.selected_item()?.completion_text().to_string();
+            
+            match &state.mode {
+                PickerMode::HistorySearch => {
+                    // History search replaces entire input
+                    Some((selected_text, None))
+                }
+                PickerMode::TabCompletion => {
+                    // Tab completion replaces from original start to current cursor
+                    let ctx = state.tab_completion_ctx.as_ref()?;
+                    // Use the current cursor position as the end, since user may have typed more
+                    let replace_end = current_cursor.max(ctx.replace_start);
+                    Some((selected_text, Some((ctx.replace_start, replace_end))))
+                }
+            }
+        });
 
-        self.history_search_mode = false;
-        self.history_search_results.clear();
-        self.history_search_selected = 0;
+        let ui_lines = self.picker_state.as_ref().map(|s| s.ui_lines).unwrap_or(0);
+        self.picker_state = None;
 
-        // If we have a selection, replace the input buffer
-        if let Some(cmd) = selected_command {
-            self.input_buffer = cmd;
-            self.cursor_pos = self.input_buffer.len();
+        // Apply the selection
+        if let Some((text, replace_range)) = selection_info {
+            match replace_range {
+                None => {
+                    // History search: replace entire input
+                    self.input_buffer = text;
+                    self.cursor_pos = self.input_buffer.len();
+                }
+                Some((start, end)) => {
+                    // Tab completion: replace only the specified range and add trailing space
+                    let completion_text = format!("{} ", text);
+                    self.input_buffer.replace_range(start..end, &completion_text);
+                    self.cursor_pos = start + completion_text.len();
+                }
+            }
         }
 
-        // Clear search UI and redraw prompt with the selected command
-        self.clear_search_ui_and_redraw()
+        // Clear picker UI and redraw prompt with the selected text
+        self.clear_picker_ui_and_redraw(ui_lines)
     }
 
-    /// Update search results based on current input
-    fn update_history_search(&mut self) {
-        self.history_search_results = self
-            .core
-            .history()
-            .search_with_indices(&self.input_buffer, Self::SEARCH_RESULT_COUNT);
-
-        // Reset selection to first result
-        self.history_search_selected = 0;
+    /// Update picker items based on current input and mode
+    fn update_picker_items(&mut self) {
+        if let Some(ref mut state) = self.picker_state {
+            let items = match &state.mode {
+                PickerMode::HistorySearch => {
+                    self.core
+                        .history()
+                        .search_with_indices(&self.input_buffer, picker::MAX_VISIBLE_ITEMS)
+                        .into_iter()
+                        .map(PickerItem::History)
+                        .collect()
+                }
+                PickerMode::TabCompletion => {
+                    // Filter completions based on the current word being typed
+                    if let Some(ref ctx) = state.tab_completion_ctx {
+                        // Get the current filter text (what's been typed in the word position)
+                        let filter = if ctx.replace_start < self.input_buffer.len() {
+                            &self.input_buffer[ctx.replace_start..self.cursor_pos.min(self.input_buffer.len())]
+                        } else {
+                            ""
+                        };
+                        
+                        // Filter completions that start with the current input
+                        ctx.all_completions
+                            .iter()
+                            .filter(|item| {
+                                item.completion_text.to_lowercase().starts_with(&filter.to_lowercase())
+                            })
+                            .cloned()
+                            .map(|mut item| {
+                                // Update match indices based on current filter
+                                item.match_indices = (0..filter.len().min(item.display_text.len())).collect();
+                                PickerItem::TabCompletion(item)
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+            };
+            state.set_items(items);
+        }
     }
 
-    /// Process input while in history search mode
-    fn process_search_input_byte(&mut self, byte: u8) -> Option<Vec<u8>> {
-        // Handle escape sequences in search mode
+    /// Process input while in picker mode
+    fn process_picker_input_byte(&mut self, byte: u8) -> Option<Vec<u8>> {
+        // Handle escape sequences in picker mode
         if self.in_escape_sequence {
             self.escape_buffer.push(byte);
-            return self.try_parse_search_escape_sequence();
+            return self.try_parse_picker_escape_sequence();
         }
 
         if byte == 0x1b {
@@ -1104,29 +1226,28 @@ impl Shell {
         }
 
         match byte {
-            // Enter - select current result
-            b'\r' | b'\n' => Some(self.select_history_search()),
-            // Ctrl+C or Escape (handled in escape sequence) - cancel search
-            0x03 => Some(self.exit_history_search()),
-            // Ctrl+R again - move to next result (cycle down)
+            // Enter or Tab - select current result
+            b'\r' | b'\n' | 0x09 => Some(self.select_picker_item()),
+            // Ctrl+C - cancel picker
+            0x03 => Some(self.exit_picker()),
+            // Ctrl+R again - cycle to next result (for history search mode)
             0x12 => {
-                if !self.history_search_results.is_empty() {
-                    self.history_search_selected =
-                        (self.history_search_selected + 1) % self.history_search_results.len();
+                if let Some(ref mut state) = self.picker_state {
+                    state.cycle_next();
                 }
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
-            // Ctrl+A - move to beginning of search query
+            // Ctrl+A - move to beginning of query
             0x01 => {
                 self.cursor_pos = 0;
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
-            // Ctrl+E - move to end of search query
+            // Ctrl+E - move to end of query
             0x05 => {
                 self.cursor_pos = self.input_buffer.len();
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
-            // Ctrl+W - delete word before cursor in search query
+            // Ctrl+W - delete word before cursor
             0x17 => {
                 if self.cursor_pos > 0 {
                     // Find start of previous word
@@ -1142,65 +1263,65 @@ impl Shell {
                     // Remove the text
                     self.input_buffer.drain(new_pos..self.cursor_pos);
                     self.cursor_pos = new_pos;
-                    self.update_history_search();
+                    self.update_picker_items();
                 }
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
             // Ctrl+U - kill to beginning of line
             0x15 => {
                 if self.cursor_pos > 0 {
                     self.input_buffer.drain(0..self.cursor_pos);
                     self.cursor_pos = 0;
-                    self.update_history_search();
+                    self.update_picker_items();
                 }
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
             // Ctrl+K - kill to end of line
             0x0b => {
                 if self.cursor_pos < self.input_buffer.len() {
                     self.input_buffer.truncate(self.cursor_pos);
-                    self.update_history_search();
+                    self.update_picker_items();
                 }
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
-            // Backspace - remove character from search query
+            // Backspace - remove character from query
             0x7f | 0x08 => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
                     self.input_buffer.remove(self.cursor_pos);
-                    self.update_history_search();
+                    self.update_picker_items();
                 }
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
-            // Regular printable character - add to search query
+            // Regular printable character - add to query
             0x20..=0x7e => {
                 self.input_buffer.insert(self.cursor_pos, byte as char);
                 self.cursor_pos += 1;
-                self.update_history_search();
-                Some(self.render_search_ui())
+                self.update_picker_items();
+                Some(self.render_picker_ui())
             }
             _ => None,
         }
     }
 
-    /// Try to parse escape sequence while in search mode
-    fn try_parse_search_escape_sequence(&mut self) -> Option<Vec<u8>> {
+    /// Try to parse escape sequence while in picker mode
+    fn try_parse_picker_escape_sequence(&mut self) -> Option<Vec<u8>> {
         if self.escape_buffer.len() < 2 {
             return None;
         }
 
-        // Just ESC key pressed (no following bytes) - exit search
+        // Just ESC key pressed (no following bytes) - exit picker
         if self.escape_buffer.len() == 1 {
             self.in_escape_sequence = false;
             self.escape_buffer.clear();
-            return Some(self.exit_history_search());
+            return Some(self.exit_picker());
         }
 
-        // Check for Alt+key sequences in search mode (ESC followed by a letter)
+        // Check for Alt+key sequences (ESC followed by a letter)
         if self.escape_buffer[1] != b'[' {
             let result = match self.escape_buffer[1] {
                 b'f' | b'F' => {
-                    // Alt+F - forward word in search query
+                    // Alt+F - forward word
                     let chars: Vec<char> = self.input_buffer.chars().collect();
                     let mut new_pos = self.cursor_pos;
                     // Skip current word
@@ -1212,10 +1333,10 @@ impl Shell {
                         new_pos += 1;
                     }
                     self.cursor_pos = new_pos;
-                    Some(self.render_search_ui())
+                    Some(self.render_picker_ui())
                 }
                 b'b' | b'B' => {
-                    // Alt+B - backward word in search query
+                    // Alt+B - backward word
                     let chars: Vec<char> = self.input_buffer.chars().collect();
                     let mut new_pos = self.cursor_pos;
                     // Skip spaces
@@ -1227,10 +1348,10 @@ impl Shell {
                         new_pos -= 1;
                     }
                     self.cursor_pos = new_pos;
-                    Some(self.render_search_ui())
+                    Some(self.render_picker_ui())
                 }
                 b'd' | b'D' => {
-                    // Alt+D - delete word forward in search query
+                    // Alt+D - delete word forward
                     let chars: Vec<char> = self.input_buffer.chars().collect();
                     let start = self.cursor_pos;
                     let mut end = self.cursor_pos;
@@ -1244,11 +1365,11 @@ impl Shell {
                     }
                     if end > start {
                         self.input_buffer.drain(start..end);
-                        self.update_history_search();
+                        self.update_picker_items();
                     }
-                    Some(self.render_search_ui())
+                    Some(self.render_picker_ui())
                 }
-                _ => Some(self.exit_history_search()), // Plain ESC or unknown - exit search
+                _ => Some(self.exit_picker()), // Plain ESC or unknown - exit picker
             };
             self.in_escape_sequence = false;
             self.escape_buffer.clear();
@@ -1261,19 +1382,18 @@ impl Shell {
 
         let result = match self.escape_buffer[2] {
             b'A' => {
-                // Up arrow - move selection up visually (higher index, since results are displayed bottom-to-top)
-                if !self.history_search_results.is_empty() {
-                    self.history_search_selected = (self.history_search_selected + 1)
-                        .min(self.history_search_results.len() - 1);
+                // Up arrow - move selection up visually
+                if let Some(ref mut state) = self.picker_state {
+                    state.move_up();
                 }
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
             b'B' => {
-                // Down arrow - move selection down visually (lower index, towards best match near prompt)
-                if !self.history_search_results.is_empty() && self.history_search_selected > 0 {
-                    self.history_search_selected -= 1;
+                // Down arrow - move selection down visually
+                if let Some(ref mut state) = self.picker_state {
+                    state.move_down();
                 }
-                Some(self.render_search_ui())
+                Some(self.render_picker_ui())
             }
             _ => None,
         };
@@ -1283,217 +1403,27 @@ impl Shell {
         result
     }
 
-    /// Render the search UI above the input line
-    fn render_search_ui(&mut self) -> Vec<u8> {
-        let mut output = Vec::new();
-
-        let num_results = self.history_search_results.len();
-        let display_count = num_results.min(Self::SEARCH_RESULT_COUNT);
-
-        // Calculate how many lines we need for the UI
-        // Results + 1 for the search indicator line
-        let new_ui_lines = display_count + 1;
-        let prev_ui_lines = self.history_search_ui_lines;
-
-        // Update the UI lines count immediately so subsequent renders in the same
-        // batch will have the correct value (important when processing multiple chars)
-        self.history_search_ui_lines = new_ui_lines;
-
+    /// Render the picker UI above the input line
+    fn render_picker_ui(&mut self) -> Vec<u8> {
         let prompt = self.get_prompt();
-        let prompt_len = prompt.len();
-
-        // Move cursor to column 0
-        output.extend(b"\r");
-
-        // If we previously rendered UI lines, move up past them first to get to the top
-        // This ensures we're starting from a known position
-        if prev_ui_lines > 0 {
-            for _ in 0..prev_ui_lines {
-                output.extend(b"\x1b[A"); // Move up
-            }
+        if let Some(ref mut state) = self.picker_state {
+            picker::render_picker_ui(state, &self.input_buffer, self.cursor_pos, &prompt, self.cols)
+        } else {
+            Vec::new()
         }
-
-        // Now we're at the top of the previous UI (or at the prompt if first render)
-        // If this is the first render, we need to create space by printing newlines
-        if prev_ui_lines == 0 && new_ui_lines > 0 {
-            // First time: create space by printing newlines (scrolls terminal if needed)
-            for _ in 0..new_ui_lines {
-                output.extend(b"\n");
-            }
-            // Move back up to where UI should start
-            for _ in 0..new_ui_lines {
-                output.extend(b"\x1b[A");
-            }
-        }
-
-        // Clear from cursor to end of screen
-        output.extend(b"\x1b[J");
-
-        // Now draw each result line (from top to bottom)
-        // Best matches should be at the bottom (closest to prompt), so display in reverse
-        for i in (0..display_count).rev() {
-            let result = &self.history_search_results[i];
-            let is_selected = i == self.history_search_selected;
-
-            // Selection indicator
-            if is_selected {
-                // Cyan background for selected line
-                output.extend(b"\x1b[46m\x1b[30m"); // Cyan bg, black fg
-                output.extend(b"> ");
-            } else {
-                output.extend(b"  ");
-            }
-
-            // Add exit status indicator if available (before the command)
-            if let Some(exit_code) = result.entry.exit_code {
-                if exit_code == 0 {
-                    // Green checkmark for success
-                    if is_selected {
-                        output.extend("\x1b[32m✓\x1b[30m ".as_bytes()); // Green checkmark, back to black fg
-                    } else {
-                        output.extend("\x1b[32m✓\x1b[0m ".as_bytes()); // Green checkmark, reset
-                    }
-                } else {
-                    // Red X with exit code for failure
-                    if is_selected {
-                        output.extend(format!("\x1b[31m✗\x1b[30m ").as_bytes());
-                    } else {
-                        output.extend(format!("\x1b[31m✗\x1b[0m ").as_bytes());
-                    }
-                }
-            } else {
-                output.extend(b"  "); // Padding when no exit code
-            }
-
-            // Render the command with match highlighting
-            output.extend(self.render_highlighted_command(
-                &result.entry.command,
-                &result.match_indices,
-                is_selected,
-            ));
-
-            // Reset colors and clear to end of line
-            output.extend(b"\x1b[0m\x1b[K\r\n");
-        }
-
-        // Draw the search indicator line
-        output.extend(b"\x1b[36m"); // Cyan text
-        output.extend(format!("(reverse-i-search)`{}'", self.input_buffer).as_bytes());
-        if num_results == 0 && !self.input_buffer.is_empty() {
-            output.extend(b" [no matches]");
-        } else if num_results > 0 {
-            output.extend(
-                format!(" [{}/{}]", self.history_search_selected + 1, num_results).as_bytes(),
-            );
-        }
-        output.extend(b"\x1b[0m\x1b[K\r\n");
-
-        // Now redraw the prompt line
-        output.extend(prompt.as_bytes());
-        output.extend(self.input_buffer.as_bytes());
-        output.extend(b"\x1b[K"); // Clear to end of line
-
-        // Position cursor correctly
-        let target_col = prompt_len + self.cursor_pos;
-        let current_pos = prompt_len + self.input_buffer.len();
-        if current_pos > target_col {
-            output.extend(format!("\x1b[{}D", current_pos - target_col).as_bytes());
-        }
-
-        output
     }
 
-    /// Render a command with matched characters highlighted
-    fn render_highlighted_command(
-        &self,
-        command: &str,
-        match_indices: &[usize],
-        is_selected: bool,
-    ) -> Vec<u8> {
-        let mut output = Vec::new();
-
-        // Replace newlines and other control characters with visible representations
-        // We need to track original indices for match highlighting
-        let chars: Vec<char> = command.chars().collect();
-
-        // Account for: 2 chars for selection indicator "  " or "> ", 2 chars for status "✓ " or "✗ ", 2 chars for ".."
-        let max_display_width = (self.cols as usize).saturating_sub(6); // 2 + 2 + 2
-        let mut display_width = 0;
-        let needs_truncation = chars.len() > max_display_width;
-
-        for (i, &ch) in chars.iter().enumerate() {
-            // Check if we need to truncate - leave room for ".."
-            if needs_truncation && display_width >= max_display_width {
-                output.extend(b"..");
-                break;
-            }
-
-            // Determine what to display for this character
-            let display_char = match ch {
-                '\n' | '\r' => '\\',
-                '\t' => ' ',
-                c if c.is_control() => ' ',
-                c => c,
-            };
-
-            if match_indices.contains(&i) {
-                // Highlighted match - bold yellow
-                if is_selected {
-                    output.extend(b"\x1b[1;33m"); // Bold yellow on cyan bg
-                } else {
-                    output.extend(b"\x1b[1;33m"); // Bold yellow
-                }
-                output.extend(display_char.to_string().as_bytes());
-                if is_selected {
-                    output.extend(b"\x1b[22;30m"); // Reset bold, back to black fg
-                } else {
-                    output.extend(b"\x1b[22;39m"); // Reset bold and color
-                }
-            } else {
-                output.extend(display_char.to_string().as_bytes());
-            }
-
-            display_width += 1;
-        }
-
-        output
-    }
-
-    /// Clear the search UI and redraw the prompt
-    fn clear_search_ui_and_redraw(&mut self) -> Vec<u8> {
-        let mut output = Vec::new();
-
-        let ui_lines = self.history_search_ui_lines;
-
-        // Move cursor to column 0
-        output.extend(b"\r");
-
-        // Move up to the first UI line
-        for _ in 0..ui_lines {
-            output.extend(b"\x1b[A");
-        }
-
-        // Clear from cursor to end of screen
-        output.extend(b"\x1b[J");
-
-        // Redraw prompt with highlighted input
+    /// Clear the picker UI and redraw the prompt
+    fn clear_picker_ui_and_redraw(&mut self, ui_lines: usize) -> Vec<u8> {
         let prompt = self.get_prompt();
-        output.extend(prompt.as_bytes());
-        
-        // Get highlighted version of input
         let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
-        output.extend(highlighted.as_bytes());
-
-        // Position cursor correctly
-        let move_back = self.input_buffer.len() - self.cursor_pos;
-        if move_back > 0 {
-            output.extend(format!("\x1b[{}D", move_back).as_bytes());
-        }
-
-        // Reset the UI lines tracking
-        self.history_search_ui_lines = 0;
-
-        output
+        picker::clear_picker_ui(
+            ui_lines,
+            &prompt,
+            &highlighted,
+            self.input_buffer.len(),
+            self.cursor_pos,
+        )
     }
 
     /// Execute the current command and return output bytes.

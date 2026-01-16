@@ -53,6 +53,7 @@ impl SyntaxHandler {
     ///
     /// Returns (completion_text, replace_start, replace_end, is_partial).
     /// If is_partial is false, the caller should add a trailing space.
+    #[allow(dead_code)]
     pub fn complete(
         &mut self,
         input: &str,
@@ -85,6 +86,36 @@ impl SyntaxHandler {
             .into_iter()
             .map(|c| c.text)
             .collect()
+    }
+
+    /// Get all completions with full metadata at cursor position.
+    /// Returns (completions, replace_start, replace_end) or None if no completions.
+    pub fn completions_full(
+        &mut self,
+        input: &str,
+        cursor_pos: usize,
+        cwd: &PathBuf,
+    ) -> Option<(Vec<(String, String)>, usize, usize)> {
+        self.maybe_refresh_path();
+        self.syntax.update(input);
+
+        let context = self.build_context(cwd);
+        let completions = self.syntax.completions(cursor_pos, &context);
+        
+        if completions.is_empty() {
+            return None;
+        }
+
+        // All completions share the same replace range
+        let replace_start = completions[0].replace_start;
+        let replace_end = completions[0].replace_end;
+
+        let items: Vec<(String, String)> = completions
+            .into_iter()
+            .map(|c| (c.display, c.text))
+            .collect();
+
+        Some((items, replace_start, replace_end))
     }
 
     /// Check if current input has syntax errors.
