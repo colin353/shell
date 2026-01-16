@@ -107,72 +107,19 @@ impl PtyProcess {
         // Some programs also check COLORTERM for true color support detection
         std::env::set_var("COLORTERM", "truecolor");
 
-        // Parse the command into program and arguments
-        // This is a simple parser that handles:
-        // - Whitespace-separated arguments
-        // - Single and double quoted strings
-        let parts = Self::parse_command(command);
-
-        if parts.is_empty() {
+        if command.trim().is_empty() {
             eprintln!("Empty command");
             std::process::exit(1);
         }
 
-        let program = CString::new(parts[0].as_str()).unwrap();
-        let c_args: Vec<CString> = parts
-            .iter()
-            .map(|s| CString::new(s.as_str()).unwrap())
-            .collect();
-        let c_arg_refs: Vec<&std::ffi::CStr> = c_args.iter().map(|s| s.as_c_str()).collect();
+        // Execute via bash to get shell features (variable expansion, pipes, etc.)
+        let bash = CString::new("bash").unwrap();
+        let c_flag = CString::new("-c").unwrap();
+        let c_command = CString::new(command).unwrap();
+        let args: Vec<&std::ffi::CStr> = vec![bash.as_c_str(), c_flag.as_c_str(), c_command.as_c_str()];
 
-        // Execute the program directly - this makes the program the direct child
-        // of the PTY, so isatty() will work correctly
-        execvp(&program, &c_arg_refs).expect("execvp failed");
+        execvp(&bash, &args).expect("execvp failed");
         unreachable!()
-    }
-
-    /// Parse a command string into arguments, handling quotes
-    fn parse_command(command: &str) -> Vec<String> {
-        let mut args = Vec::new();
-        let mut current = String::new();
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-        let mut escape_next = false;
-
-        for c in command.chars() {
-            if escape_next {
-                current.push(c);
-                escape_next = false;
-                continue;
-            }
-
-            match c {
-                '\\' if !in_single_quote => {
-                    escape_next = true;
-                }
-                '\'' if !in_double_quote => {
-                    in_single_quote = !in_single_quote;
-                }
-                '"' if !in_single_quote => {
-                    in_double_quote = !in_double_quote;
-                }
-                ' ' | '\t' if !in_single_quote && !in_double_quote => {
-                    if !current.is_empty() {
-                        args.push(current.clone());
-                        current.clear();
-                    }
-                }
-                _ => {
-                    current.push(c);
-                }
-            }
-        }
-
-        if !current.is_empty() {
-            args.push(current);
-        }
-
-        args
     }
 
     /// Read available output from the PTY (non-blocking)
@@ -354,5 +301,32 @@ mod tests {
         let pty = PtyProcess::spawn("exit 0", 80, 24).unwrap();
         thread::sleep(Duration::from_millis(100));
         assert!(!pty.is_running());
+    }
+
+    #[test]
+    fn test_env_var_expansion() {
+        // Test that shell features like variable expansion work
+        let pty = PtyProcess::spawn("echo $TERM", 80, 24).unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+
+        let mut buf = [0u8; 1024];
+        let mut output = Vec::new();
+
+        for _ in 0..10 {
+            if let Ok(Some(n)) = pty.read(&mut buf) {
+                output.extend_from_slice(&buf[..n]);
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let output_str = String::from_utf8_lossy(&output);
+        // TERM is set to xterm-256color in exec_command
+        assert!(
+            output_str.contains("xterm-256color"),
+            "Expected 'xterm-256color' in output (env var should be expanded): {}",
+            output_str
+        );
     }
 }

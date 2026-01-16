@@ -1520,17 +1520,7 @@ impl Shell {
                 self.refresh_history_cache();
                 output.extend(self.get_prompt().as_bytes());
             }
-            "echo" => {
-                output.extend(format!("{}\r\n", parts[1..].join(" ")).as_bytes());
 
-                // Record exit for builtin
-                if let Some(id) = history_id {
-                    let _ = self.core.record_exit(&id, 0, 0);
-                }
-
-                self.refresh_history_cache();
-                output.extend(self.get_prompt().as_bytes());
-            }
             "history" => {
                 // Show recent history
                 let limit = parts
