@@ -135,6 +135,21 @@ pub enum ShellAction {
 
     /// Shell wants to exit.
     Exit,
+
+    /// Shell wants to edit the current input in an external editor.
+    ///
+    /// The compositor should:
+    /// 1. Write `output` to the terminal first
+    /// 2. Spawn the editor with the temp file
+    /// 3. When editor exits, call `Shell::editor_exited()` with the temp file path
+    EditInEditor {
+        /// Output to write to terminal before spawning editor
+        output: Vec<u8>,
+        /// Path to the temporary file containing the input
+        temp_file: std::path::PathBuf,
+        /// The editor command to run
+        editor: String,
+    },
 }
 
 /// Shared shell state that can be accessed across threads
@@ -315,6 +330,9 @@ pub struct Shell {
     // --- Syntax highlighting and completion ---
     /// Syntax highlighter and completion engine
     syntax_handler: syntax::SyntaxHandler,
+
+    /// Whether we're waiting for CTRL+E after CTRL+X (for edit-in-editor)
+    waiting_for_ctrl_x_combo: bool,
 }
 
 impl Shell {
@@ -366,6 +384,8 @@ impl Shell {
             saved_cursor_pos: None,
             // Syntax highlighting
             syntax_handler: syntax::SyntaxHandler::new(),
+            // CTRL+X combo state
+            waiting_for_ctrl_x_combo: false,
         };
 
         let prompt = shell.get_prompt();
@@ -431,6 +451,17 @@ impl Shell {
                     }
                     ShellAction::RenameWindow { output: _, name } => {
                         return ShellAction::RenameWindow { output, name };
+                    }
+                    ShellAction::EditInEditor {
+                        output: _,
+                        temp_file,
+                        editor,
+                    } => {
+                        return ShellAction::EditInEditor {
+                            output,
+                            temp_file,
+                            editor,
+                        };
                     }
                     other => return other,
                 }
@@ -507,6 +538,67 @@ impl Shell {
         output
     }
 
+    /// Notify the shell that an external editor session has exited.
+    ///
+    /// Call this when an editor spawned via `ShellAction::EditInEditor` has
+    /// terminated. The shell reads the temp file and replaces the input buffer.
+    ///
+    /// Returns output to write to the terminal (the new prompt with input).
+    pub fn editor_exited(&mut self, temp_file: &std::path::Path) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        // Read the edited content from the temp file
+        match std::fs::read_to_string(temp_file) {
+            Ok(content) => {
+                // Trim trailing newlines that editors typically add
+                let content = content.trim_end_matches('\n').trim_end_matches('\r');
+                self.input_buffer = content.to_string();
+                self.cursor_pos = self.input_buffer.len();
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to read temp file: {}", e);
+                // Keep existing input buffer
+            }
+        }
+
+        // Clean up the temp file
+        let _ = std::fs::remove_file(temp_file);
+
+        // Re-render prompt with the (possibly new) input
+        output.extend(self.get_prompt().as_bytes());
+        let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
+        output.extend(highlighted.as_bytes());
+        output
+    }
+
+    /// Start editing the current input in an external editor (CTRL+X CTRL+E).
+    fn edit_in_external_editor(&mut self) -> Option<Vec<u8>> {
+        // Get the editor from $EDITOR, $VISUAL, or default to vim
+        let editor = std::env::var("EDITOR")
+            .or_else(|_| std::env::var("VISUAL"))
+            .unwrap_or_else(|_| "vim".to_string());
+
+        // Create a temporary file with the current input
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("shell_edit_{}.sh", std::process::id()));
+
+        // Write current input to the temp file
+        if let Err(e) = std::fs::write(&temp_file, &self.input_buffer) {
+            eprintln!("Warning: failed to create temp file: {}", e);
+            return None;
+        }
+
+        // Set the pending action to spawn the editor
+        self.pending_action = Some(ShellAction::EditInEditor {
+            output: vec![],
+            temp_file,
+            editor,
+        });
+
+        // Clear the current line and move to new line before spawning editor
+        Some(b"\r\n".to_vec())
+    }
+
     /// Resize the shell's terminal dimensions.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols;
@@ -562,6 +654,16 @@ impl Shell {
         // If in picker mode, route to picker input handler
         if self.picker_state.is_some() {
             return self.process_picker_input_byte(byte);
+        }
+
+        // Handle CTRL+X combo: if waiting for second key after CTRL+X
+        if self.waiting_for_ctrl_x_combo {
+            self.waiting_for_ctrl_x_combo = false;
+            if byte == 0x05 {
+                // CTRL+X CTRL+E - edit in external editor
+                return self.edit_in_external_editor();
+            }
+            // Any other key cancels the combo - continue processing normally
         }
 
         // Handle escape sequences
@@ -637,6 +739,11 @@ impl Shell {
             0x01 => self.cursor_home(),
             // Ctrl+E - move to end of line
             0x05 => self.cursor_end(),
+            // Ctrl+X - start of CTRL+X combo (wait for next key)
+            0x18 => {
+                self.waiting_for_ctrl_x_combo = true;
+                None
+            }
             // Ctrl+W - delete word before cursor
             0x17 => self.delete_word_backward(),
             // Ctrl+K - kill to end of line

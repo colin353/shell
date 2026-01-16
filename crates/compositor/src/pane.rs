@@ -147,6 +147,8 @@ pub struct Pane {
     pub subprocess: Option<pty::PtyProcess>,
     /// Whether we sent SIGINT to the subprocess (to display CTRL+C instead of exit code)
     pub sent_sigint: bool,
+    /// Temp file for edit-in-editor feature (CTRL+X CTRL+E)
+    pub edit_temp_file: Option<std::path::PathBuf>,
     pub read_buffer: [u8; 4096],
     /// Whether the pane is in scrollback mode
     pub scrollback_mode: bool,
@@ -187,6 +189,7 @@ impl Pane {
             shell,
             subprocess: None,
             sent_sigint: false,
+            edit_temp_file: None,
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -219,6 +222,7 @@ impl Pane {
             shell,
             subprocess: None,
             sent_sigint: false,
+            edit_temp_file: None,
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -305,6 +309,39 @@ impl Pane {
                     self.terminal_emulator.process(prompt.as_bytes());
                     PaneInputResult::RenameWindow(name)
                 }
+                libshell::ShellAction::EditInEditor {
+                    output,
+                    temp_file,
+                    editor,
+                } => {
+                    // Write any pending output
+                    if !output.is_empty() {
+                        self.terminal_emulator.process(&output);
+                    }
+
+                    // Spawn the editor as a subprocess with the temp file as argument
+                    let width = self.terminal_emulator.grid().cols as u16;
+                    let height = self.terminal_emulator.grid().rows as u16;
+                    let full_command = format!("{} {}", editor, temp_file.display());
+
+                    match pty::PtyProcess::spawn(&full_command, width, height) {
+                        Ok(proc) => {
+                            self.subprocess = Some(proc);
+                            // Store the temp file path so we can read it when editor exits
+                            self.edit_temp_file = Some(temp_file);
+                        }
+                        Err(e) => {
+                            // Failed to spawn editor - show error and prompt
+                            let error_msg = format!("editor error: {}\r\n", e);
+                            self.terminal_emulator.process(error_msg.as_bytes());
+                            // Clean up temp file
+                            let _ = std::fs::remove_file(&temp_file);
+                            let prompt = self.shell.get_prompt();
+                            self.terminal_emulator.process(prompt.as_bytes());
+                        }
+                    }
+                    PaneInputResult::Rerender
+                }
                 libshell::ShellAction::Exit => {
                     // Shell wants to exit - could close the pane
                     // For now, just show a message
@@ -356,16 +393,22 @@ impl Pane {
                 // Subprocess exited - clean up
                 drop(self.subprocess.take());
 
-                // Check if we sent SIGINT (CTRL+C) - if so, use subprocess_killed
-                // Exit code 130 = 128 + 2 (SIGINT)
-                let output = if self.sent_sigint && exit_code == 130 {
+                // Check if this was an edit-in-editor session
+                if let Some(temp_file) = self.edit_temp_file.take() {
+                    // Editor exited - read the temp file and replace input
+                    let output = self.shell.editor_exited(&temp_file);
+                    self.terminal_emulator.process(&output);
+                } else if self.sent_sigint && exit_code == 130 {
+                    // Check if we sent SIGINT (CTRL+C) - if so, use subprocess_killed
+                    // Exit code 130 = 128 + 2 (SIGINT)
                     self.sent_sigint = false;
-                    self.shell.subprocess_killed()
+                    let output = self.shell.subprocess_killed();
+                    self.terminal_emulator.process(&output);
                 } else {
                     self.sent_sigint = false;
-                    self.shell.subprocess_exited(exit_code)
-                };
-                self.terminal_emulator.process(&output);
+                    let output = self.shell.subprocess_exited(exit_code);
+                    self.terminal_emulator.process(&output);
+                }
             }
         }
     }
