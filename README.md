@@ -5,6 +5,7 @@ http://google.com
 Things to do:
 
  - [x] CTRL+P for fuzzy file selection
+ - [ ] Support `CTRL+B z` for temporary pane fullscreen toggle
  - [ ] Change the directory name in the prompt to a tasteful color
  - [ ] Tilde is not expanded into $HOME, env vars are not expanded during completions/fuzzy finding
  - [ ] Environment variable configuration
