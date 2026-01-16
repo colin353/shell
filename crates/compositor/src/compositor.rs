@@ -676,7 +676,7 @@ impl Compositor {
     /// Handle CTRL+C with cascading behavior.
     ///
     /// The behavior depends on the current state:
-    /// 1. If a subprocess is running → send SIGINT to it
+    /// 1. If a subprocess is running → forward CTRL+C to it via PTY (letting it decide how to handle)
     /// 2. If the shell has input → clear the input  
     /// 3. If input is already empty → close the focused pane
     /// 4. If there are no other panes → return true to signal the entire app should exit

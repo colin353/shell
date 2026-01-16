@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 /// Result of handling CTRL+C on a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtrlCResult {
-    /// Sent SIGINT to a running subprocess
+    /// Forwarded CTRL+C to a running subprocess (via PTY, letting it decide how to handle)
     KilledSubprocess,
     /// Cleared the shell input buffer
     ClearedInput,
@@ -393,6 +393,9 @@ impl Pane {
                 // Subprocess exited - clean up
                 drop(self.subprocess.take());
 
+                // Reset cursor visibility - subprocess may have hidden it
+                self.terminal_emulator.grid_mut().cursor_visible = true;
+
                 // Check if this was an edit-in-editor session
                 if let Some(temp_file) = self.edit_temp_file.take() {
                     // Editor exited - read the temp file and replace input
@@ -427,12 +430,14 @@ impl Pane {
     /// Handle CTRL+C with cascading logic.
     ///
     /// Returns a `CtrlCResult` indicating what action was taken:
-    /// - `KilledSubprocess`: Sent SIGINT to the running subprocess
+    /// - `KilledSubprocess`: Forwarded CTRL+C to the running subprocess
     /// - `ClearedInput`: Cleared the shell input buffer (or showed ^C on empty line)
     pub fn handle_ctrl_c(&mut self) -> CtrlCResult {
-        if let Some(ref proc) = self.subprocess {
-            // CTRL+C - send SIGINT to subprocess
-            let _ = proc.signal(nix::sys::signal::Signal::SIGINT);
+        if let Some(ref mut proc) = self.subprocess {
+            // CTRL+C - forward to subprocess via PTY
+            // The TTY driver will handle SIGINT generation based on terminal settings
+            // This allows programs that intercept CTRL+C to handle it themselves
+            let _ = proc.write(&[0x03]);
             self.sent_sigint = true;
             CtrlCResult::KilledSubprocess
         } else {
