@@ -1,6 +1,6 @@
 use crate::border::{get_border_char, BorderDirections};
 use crate::error::CompositorError;
-use crate::pane::{CtrlCResult, Pane};
+use crate::pane::{CtrlCResult, Pane, PaneInputResult};
 use crate::types::{Direction, SplitDirection};
 
 /// A cell in the pane tree, which can be a single pane or a split.
@@ -22,8 +22,8 @@ pub enum PaneCellInner {
 
 impl PaneCell {
     /// Handle keyboard input by routing it to the focused pane.
-    /// Returns `true` if a rerender is needed.
-    pub fn handle_input(&mut self, input: &[u8]) -> bool {
+    /// Returns a `PaneInputResult` indicating what action should be taken.
+    pub fn handle_input(&mut self, input: &[u8]) -> PaneInputResult {
         match &mut self.inner {
             PaneCellInner::Pane(pane) => pane.handle_input(input),
             PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
@@ -32,7 +32,7 @@ impl PaneCell {
                         return cell.handle_input(input);
                     }
                 }
-                false
+                PaneInputResult::None
             }
         }
     }

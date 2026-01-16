@@ -124,6 +124,14 @@ pub enum ShellAction {
         history_id: Option<EntryId>,
     },
 
+    /// Shell wants to rename the current window/tab.
+    RenameWindow {
+        /// Output to write to terminal (e.g., newline after the command)
+        output: Vec<u8>,
+        /// The new name for the window
+        name: String,
+    },
+
     /// Shell wants to exit.
     Exit,
 }
@@ -394,7 +402,7 @@ impl Shell {
 
             // Check if command execution produced a spawn request
             if let Some(action) = self.pending_action.take() {
-                // Combine output with the spawn action
+                // Combine output with the action
                 match action {
                     ShellAction::SpawnSubprocess {
                         output: _,
@@ -412,6 +420,9 @@ impl Shell {
                             cwd,
                             history_id,
                         };
+                    }
+                    ShellAction::RenameWindow { output: _, name } => {
+                        return ShellAction::RenameWindow { output, name };
                     }
                     other => return other,
                 }
@@ -1550,6 +1561,29 @@ impl Shell {
                 }
 
                 self.should_exit = true;
+            }
+            "rename-window" => {
+                let name = parts[1..].join(" ");
+                if name.is_empty() {
+                    output.extend(b"rename-window: missing name argument\r\n");
+                    // Record exit for builtin with error
+                    if let Some(id) = history_id {
+                        let _ = self.core.record_exit(&id, 1, 0);
+                    }
+                    self.refresh_history_cache();
+                    output.extend(self.get_prompt().as_bytes());
+                } else {
+                    // Record exit for builtin
+                    if let Some(id) = history_id {
+                        let _ = self.core.record_exit(&id, 0, 0);
+                    }
+                    self.refresh_history_cache();
+                    // Output will be combined with this action in handle_input
+                    self.pending_action = Some(ShellAction::RenameWindow {
+                        output: vec![],
+                        name,
+                    });
+                }
             }
             _ => {
                 // External command - request subprocess spawn

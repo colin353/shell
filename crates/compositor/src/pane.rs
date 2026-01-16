@@ -13,6 +13,17 @@ pub enum CtrlCResult {
     ClosePane,
 }
 
+/// Result of handling input on a pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneInputResult {
+    /// No changes, no rerender needed
+    None,
+    /// Content changed, rerender needed
+    Rerender,
+    /// Request to rename the containing window/tab
+    RenameWindow(String),
+}
+
 /// Regex pattern for matching URLs (based on Alacritty's approach)
 /// Matches common URL schemes followed by valid URL characters
 static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -228,20 +239,20 @@ impl Pane {
     /// If a subprocess is running, input goes to it.
     /// Otherwise, input goes to the shell.
     ///
-    /// Returns `true` if the terminal content changed and a rerender is needed.
-    pub fn handle_input(&mut self, input: &[u8]) -> bool {
+    /// Returns a `PaneInputResult` indicating what action the compositor should take.
+    pub fn handle_input(&mut self, input: &[u8]) -> PaneInputResult {
         if let Some(ref mut proc) = self.subprocess {
             // Subprocess is active - send input directly to it
             let _ = proc.write(input);
             // Subprocess output will trigger rerender via poll
-            false
+            PaneInputResult::None
         } else {
             // Shell is active - process input and handle actions
             match self.shell.handle_input(input) {
-                libshell::ShellAction::None => false,
+                libshell::ShellAction::None => PaneInputResult::None,
                 libshell::ShellAction::Output(data) => {
                     self.terminal_emulator.process(&data);
-                    true // Content changed, need rerender
+                    PaneInputResult::Rerender
                 }
                 libshell::ShellAction::SpawnSubprocess {
                     output,
@@ -282,13 +293,23 @@ impl Pane {
                             self.terminal_emulator.process(&prompt);
                         }
                     }
-                    true // Content changed (at least the newline), need rerender
+                    PaneInputResult::Rerender
+                }
+                libshell::ShellAction::RenameWindow { output, name } => {
+                    // Write any pending output (e.g., the newline after the command)
+                    if !output.is_empty() {
+                        self.terminal_emulator.process(&output);
+                    }
+                    // Show the prompt
+                    let prompt = self.shell.get_prompt();
+                    self.terminal_emulator.process(prompt.as_bytes());
+                    PaneInputResult::RenameWindow(name)
                 }
                 libshell::ShellAction::Exit => {
                     // Shell wants to exit - could close the pane
                     // For now, just show a message
                     self.terminal_emulator.process(b"[shell exited]\r\n");
-                    true // Content changed, need rerender
+                    PaneInputResult::Rerender
                 }
             }
         }

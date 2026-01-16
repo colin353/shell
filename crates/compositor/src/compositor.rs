@@ -1,5 +1,5 @@
 use crate::error::CompositorError;
-use crate::pane::{CtrlCResult, Pane};
+use crate::pane::{CtrlCResult, Pane, PaneInputResult};
 use crate::pane_cell::PaneCell;
 use crate::tab::Tab;
 use crate::types::{Direction, SplitDirection};
@@ -230,9 +230,8 @@ impl Compositor {
                     }
                     0x02 => {
                         // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
-                        if self.active_tab_mut().root.handle_input(&[0x02]) {
-                            self.render();
-                        }
+                        let result = self.active_tab_mut().root.handle_input(&[0x02]);
+                        self.handle_pane_input_result(result);
                         return false;
                     }
                     _ => {
@@ -291,10 +290,21 @@ impl Compositor {
                 _ => {}
             }
         }
-        if self.active_tab_mut().root.handle_input(input) {
-            self.render();
-        }
+        let result = self.active_tab_mut().root.handle_input(input);
+        self.handle_pane_input_result(result);
         false
+    }
+
+    /// Handle the result of pane input processing
+    fn handle_pane_input_result(&mut self, result: PaneInputResult) {
+        match result {
+            PaneInputResult::None => {}
+            PaneInputResult::Rerender => self.render(),
+            PaneInputResult::RenameWindow(name) => {
+                self.tabs[self.active_tab].name = name;
+                self.render();
+            }
+        }
     }
 
     /// Handle input while in scrollback mode.
@@ -900,8 +910,14 @@ impl Compositor {
 
         let mut needs_render = false;
         for input in inputs {
-            if self.active_tab_mut().root.handle_input(&input) {
-                needs_render = true;
+            let result = self.active_tab_mut().root.handle_input(&input);
+            match result {
+                PaneInputResult::None => {}
+                PaneInputResult::Rerender => needs_render = true,
+                PaneInputResult::RenameWindow(name) => {
+                    self.tabs[self.active_tab].name = name;
+                    needs_render = true;
+                }
             }
         }
         needs_render

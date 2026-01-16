@@ -76,6 +76,8 @@ pub const BUILTINS: &[&str] = &[
     "getopts",
     "shift",
     "shopt",
+    // Custom shell builtins
+    "rename-window",
 ];
 
 /// Check if a command name is a shell builtin.
