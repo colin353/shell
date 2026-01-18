@@ -1,4 +1,4 @@
-    cd /Users/colinwm/Documents/code/agent-platform && cargo test -p mosaic ti. 
+    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
     {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
     cargo build -p types                                                        
     {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
@@ -6,18 +6,18 @@
     {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
     {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
     {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
-  ✗ git push origin main                                                        
-    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
-    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
+    git add .                                                                   
     git push -u origin                                                          
     git push                                                                    
     git commit -m frontend-progress                                             
-    git add .                                                                   
+    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
     {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
     git commit -m timestamp                                                     
+    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
+  ✗ git push origin main                                                        
   ✓ git commit -m 'Initial commit'                                              
-> ✓ git status                                                                  
-  ✓ git log --oneline                                                           
+> ✓ git log --oneline                                                           
+    git status                                                                  
 (reverse-i-search)`git' [2/20]                                                  
 compositor ➜ git                                                                
                                                                                 

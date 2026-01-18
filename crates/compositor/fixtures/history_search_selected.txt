@@ -1,4 +1,4 @@
-compositor ➜ git status                                                         
+compositor ➜ git log --oneline                                                  
                                                                                 
                                                                                 
                                                                                 

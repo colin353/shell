@@ -152,12 +152,34 @@ pub struct SearchResult {
     pub score: i64,
 }
 
+/// Breakdown of the scoring components for a search result
+#[derive(Debug, Clone, Default)]
+pub struct ScoreBreakdown {
+    /// Score from the fuzzy matcher (normalized to 0-100)
+    pub match_score: i64,
+    /// Bonus for successful exit code (0)
+    pub exit_code_bonus: i64,
+    /// Bonus based on how many times this command has been run
+    pub frequency_bonus: i64,
+    /// Bonus based on how recently the command was last run
+    pub recency_bonus: i64,
+}
+
+impl ScoreBreakdown {
+    /// Calculate the total score from all components
+    pub fn total(&self) -> i64 {
+        self.match_score + self.exit_code_bonus + self.frequency_bonus + self.recency_bonus
+    }
+}
+
 /// Search result with match indices for highlighting
 #[derive(Debug, Clone)]
 pub struct HistorySearchResult {
     pub entry: HistoryEntry,
-    /// Base fuzzy match score
+    /// Total computed score (for sorting)
     pub score: i64,
+    /// Breakdown of individual score components
+    pub score_breakdown: ScoreBreakdown,
     /// Character indices that matched the query (for highlighting)
     pub match_indices: Vec<usize>,
 }
@@ -588,35 +610,84 @@ impl ShellHistory {
     ///
     /// This method performs fuzzy search and returns results with:
     /// - Match indices for highlighting matched characters
-    /// - Enhanced scoring that prioritizes:
-    ///   - Better fuzzy match scores
-    ///   - Commands with exit_code = 0 (successful commands)
-    ///   - Commands typed by humans (not AI-generated)
-    ///   - More recent commands (slight recency bonus)
+    /// - Enhanced scoring that combines multiple factors:
+    ///   - **Frequency bonus** (most important): Commands run many times score higher
+    ///   - **Match score**: Quality of the fuzzy match (normalized)
+    ///   - **Exit code bonus**: Successful commands (exit_code = 0) score higher
+    ///   - **Recency bonus**: More recently executed commands score higher
     ///
-    /// If query is empty, returns most recent commands.
+    /// Results are deduplicated by command text, keeping the most recent entry
+    /// for each unique command (which also has the best recency).
+    ///
+    /// If query is empty, returns most recent unique commands.
     pub fn search_with_indices(&self, query: &str, limit: usize) -> Vec<HistorySearchResult> {
         let entries = self.entries.read().unwrap();
         let order = self.entry_order.read().unwrap();
 
-        // Scoring bonuses
-        const EXIT_SUCCESS_BONUS: i64 = 50;
-        const HUMAN_SOURCE_BONUS: i64 = 30;
-        const MAX_RECENCY_BONUS: i64 = 20;
+        // Scoring weights - frequency is most important
+        const MAX_FREQUENCY_BONUS: i64 = 100; // Dominates other factors
+        const MAX_MATCH_SCORE: i64 = 50; // Normalized match quality
+        const MAX_EXIT_CODE_BONUS: i64 = 25; // Prefer successful commands
+        const MAX_RECENCY_BONUS: i64 = 25; // Prefer recent commands
+
+        // Pre-compute command statistics: (execution_count, most_recent_index, had_success)
+        struct CommandStats {
+            count: usize,
+            most_recent_idx: usize,
+            had_success: bool,
+        }
+        let mut command_stats: HashMap<&str, CommandStats> = HashMap::new();
+        let mut max_count: usize = 1;
+
+        for (idx, id) in order.iter().enumerate() {
+            if let Some(entry) = entries.get(id) {
+                let stats = command_stats
+                    .entry(&entry.command)
+                    .or_insert(CommandStats {
+                        count: 0,
+                        most_recent_idx: idx,
+                        had_success: false,
+                    });
+                stats.count += 1;
+                stats.most_recent_idx = idx; // Last one wins (order is chronological)
+                if entry.exit_code == Some(0) {
+                    stats.had_success = true;
+                }
+                max_count = max_count.max(stats.count);
+            }
+        }
 
         let total_entries = order.len();
 
         if query.is_empty() {
             // Return most recent unique commands when query is empty
+            // Still apply scoring for frequency and exit code
             let mut seen_commands = std::collections::HashSet::new();
             let mut results = Vec::new();
             for id in order.iter().rev() {
                 if let Some(entry) = entries.get(id) {
-                    // Deduplicate by command text
                     if seen_commands.insert(entry.command.clone()) {
+                        let stats = command_stats.get(entry.command.as_str());
+                        let mut breakdown = ScoreBreakdown::default();
+
+                        if let Some(stats) = stats {
+                            // Frequency bonus (log scale to avoid extreme dominance)
+                            let freq_factor =
+                                (stats.count as f64).ln_1p() / (max_count as f64).ln_1p();
+                            breakdown.frequency_bonus =
+                                (freq_factor * MAX_FREQUENCY_BONUS as f64) as i64;
+
+                            // Exit code bonus
+                            if stats.had_success {
+                                breakdown.exit_code_bonus = MAX_EXIT_CODE_BONUS;
+                            }
+                        }
+
+                        let score = breakdown.total();
                         results.push(HistorySearchResult {
                             entry: entry.clone(),
-                            score: 0,
+                            score,
+                            score_breakdown: breakdown,
                             match_indices: Vec::new(),
                         });
                         if results.len() >= limit {
@@ -628,36 +699,54 @@ impl ShellHistory {
             return results;
         }
 
-        let mut results: Vec<HistorySearchResult> = order
+        // Find the max fuzzy score for normalization
+        let mut max_fuzzy_score: i64 = 1;
+        let matches: Vec<_> = order
             .iter()
-            .enumerate()
-            .filter_map(|(idx, id)| {
+            .filter_map(|id| {
                 let entry = entries.get(id)?;
-                let (base_score, indices) = self.matcher.fuzzy_indices(&entry.command, query)?;
+                let (score, indices) = self.matcher.fuzzy_indices(&entry.command, query)?;
+                Some((id, entry, score, indices))
+            })
+            .collect();
 
-                // Calculate enhanced score with bonuses
-                let mut score = base_score;
+        for (_, _, score, _) in &matches {
+            max_fuzzy_score = max_fuzzy_score.max(*score);
+        }
 
-                // Bonus for successful commands (exit_code == 0)
-                if entry.exit_code == Some(0) {
-                    score += EXIT_SUCCESS_BONUS;
+        // Build results with composite scoring
+        let mut results: Vec<HistorySearchResult> = matches
+            .into_iter()
+            .filter_map(|(_, entry, fuzzy_score, indices)| {
+                let stats = command_stats.get(entry.command.as_str())?;
+
+                let mut breakdown = ScoreBreakdown::default();
+
+                // Match score (normalized to MAX_MATCH_SCORE)
+                let match_factor = fuzzy_score as f64 / max_fuzzy_score as f64;
+                breakdown.match_score = (match_factor * MAX_MATCH_SCORE as f64) as i64;
+
+                // Frequency bonus (log scale to smooth out extreme counts)
+                let freq_factor = (stats.count as f64).ln_1p() / (max_count as f64).ln_1p();
+                breakdown.frequency_bonus = (freq_factor * MAX_FREQUENCY_BONUS as f64) as i64;
+
+                // Exit code bonus (if this command ever succeeded)
+                if stats.had_success {
+                    breakdown.exit_code_bonus = MAX_EXIT_CODE_BONUS;
                 }
 
-                // Bonus for human-typed commands
-                if entry.source == CommandSource::Human {
-                    score += HUMAN_SOURCE_BONUS;
-                }
-
-                // Small recency bonus (more recent = higher index in order)
-                // Scale: 0 for oldest, MAX_RECENCY_BONUS for newest
+                // Recency bonus (based on most recent execution of this command)
                 if total_entries > 1 {
-                    let recency_factor = idx as f64 / (total_entries - 1) as f64;
-                    score += (recency_factor * MAX_RECENCY_BONUS as f64) as i64;
+                    let recency_factor =
+                        stats.most_recent_idx as f64 / (total_entries - 1) as f64;
+                    breakdown.recency_bonus = (recency_factor * MAX_RECENCY_BONUS as f64) as i64;
                 }
 
+                let score = breakdown.total();
                 Some(HistorySearchResult {
                     entry: entry.clone(),
                     score,
+                    score_breakdown: breakdown,
                     match_indices: indices,
                 })
             })
@@ -1101,6 +1190,78 @@ mod tests {
         assert_eq!(empty_results.len(), 3);
         // Most recent should be first (git status was last recorded)
         assert_eq!(empty_results[0].entry.command, "git status");
+    }
+
+    #[test]
+    fn test_search_frequency_ranking() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("history.log");
+
+        let history = ShellHistory::new(&log_path).unwrap();
+
+        // Record "git status" 5 times (frequently used command)
+        for _ in 0..5 {
+            let id = history
+                .record_command("git status".to_string(), CommandSource::Human)
+                .unwrap();
+            history.record_exit(&id, 0, 50).unwrap();
+        }
+
+        // Record "git stash" once (less frequently used)
+        let id = history
+            .record_command("git stash".to_string(), CommandSource::Human)
+            .unwrap();
+        history.record_exit(&id, 0, 50).unwrap();
+
+        // Search for "git st" - both match, but "git status" should rank higher due to frequency
+        let results = history.search_with_indices("git st", 10);
+        assert_eq!(results.len(), 2);
+
+        // "git status" should be first due to higher frequency
+        assert_eq!(results[0].entry.command, "git status");
+        assert_eq!(results[1].entry.command, "git stash");
+
+        // Verify frequency bonus is reflected in score breakdown
+        assert!(results[0].score_breakdown.frequency_bonus > results[1].score_breakdown.frequency_bonus);
+    }
+
+    #[test]
+    fn test_search_score_breakdown() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("history.log");
+
+        let history = ShellHistory::new(&log_path).unwrap();
+
+        // Record a command that succeeded
+        let id = history
+            .record_command("cargo build".to_string(), CommandSource::Human)
+            .unwrap();
+        history.record_exit(&id, 0, 100).unwrap();
+
+        // Record a command that failed
+        let id = history
+            .record_command("cargo bild".to_string(), CommandSource::Human)
+            .unwrap();
+        history.record_exit(&id, 1, 50).unwrap();
+
+        let results = history.search_with_indices("cargo b", 10);
+        assert_eq!(results.len(), 2);
+
+        // Find the successful command
+        let successful = results.iter().find(|r| r.entry.command == "cargo build").unwrap();
+        let failed = results.iter().find(|r| r.entry.command == "cargo bild").unwrap();
+
+        // Successful command should have exit code bonus
+        assert!(successful.score_breakdown.exit_code_bonus > 0);
+        assert_eq!(failed.score_breakdown.exit_code_bonus, 0);
+
+        // Both should have non-zero match scores
+        assert!(successful.score_breakdown.match_score > 0);
+        assert!(failed.score_breakdown.match_score > 0);
+
+        // Total should equal sum of components
+        assert_eq!(successful.score, successful.score_breakdown.total());
+        assert_eq!(failed.score, failed.score_breakdown.total());
     }
 }
 

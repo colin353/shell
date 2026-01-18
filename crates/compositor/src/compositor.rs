@@ -228,6 +228,19 @@ impl Compositor {
                         self.render();
                         return false;
                     }
+                    b'z' => {
+                        // Ctrl+b z - toggle zoom (temporary fullscreen) for focused pane
+                        let was_zoomed = self.active_tab().zoomed;
+                        let width = self.width;
+                        let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+                        self.active_tab_mut().toggle_zoom();
+                        // If we're exiting zoom mode, restore the original pane layout
+                        if was_zoomed && !self.active_tab().zoomed {
+                            self.active_tab_mut().resize(width, pane_height);
+                        }
+                        self.render();
+                        return false;
+                    }
                     0x02 => {
                         // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
                         let result = self.active_tab_mut().root.handle_input(&[0x02]);
@@ -724,8 +737,16 @@ impl Compositor {
                         false
                     }
                 } else {
-                    // Close just the focused pane
+                    // Close just the focused pane and exit zoom mode
+                    let was_zoomed = self.active_tab().zoomed;
+                    let width = self.width;
+                    let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+                    self.active_tab_mut().exit_zoom();
                     self.active_tab_mut().root.close_focused_pane();
+                    // If we were zoomed, restore the pane layout
+                    if was_zoomed {
+                        self.active_tab_mut().resize(width, pane_height);
+                    }
                     self.render();
                     false
                 }
@@ -932,21 +953,58 @@ impl Compositor {
         let (cols, rows) = self.global_emulator.dimensions();
         self.global_emulator = emulator::TerminalEmulator::new(cols, rows);
 
+        // Calculate pane area (excluding status bar)
+        let pane_height = rows.saturating_sub(STATUS_BAR_HEIGHT);
+
         // Composite the active tab's panes into the global emulator
-        self.tabs[self.active_tab]
-            .root
-            .composite_into(&mut self.global_emulator);
+        let tab = &mut self.tabs[self.active_tab];
+        if tab.zoomed {
+            // Zoom mode: temporarily resize the focused cell to fill the screen,
+            // render it, then restore its original dimensions
+            if let Some(cell) = tab.root.get_focused_cell_mut() {
+                // Save original dimensions
+                let orig_pos_x = cell.pos_x;
+                let orig_pos_y = cell.pos_y;
+                let orig_width = cell.width;
+                let orig_height = cell.height;
+
+                // Temporarily set zoom dimensions
+                cell.resize(0, 0, cols, pane_height);
+
+                // Composite just this cell
+                cell.composite_into(&mut self.global_emulator);
+
+                // Restore original dimensions
+                cell.resize(orig_pos_x, orig_pos_y, orig_width, orig_height);
+            }
+        } else {
+            // Normal mode: render all panes with borders
+            tab.root.composite_into(&mut self.global_emulator);
+        }
 
         // Render the status bar at the bottom
         self.render_status_bar();
 
         // Set the cursor position and visibility from the focused pane
+        // (cursor info uses the cell's stored pos_x/pos_y, which we've restored above)
         if let Some((cursor_x, cursor_y, cursor_visible)) =
             self.tabs[self.active_tab].root.get_focused_cursor_info()
         {
             let grid = self.global_emulator.grid_mut();
-            grid.cursor_x = cursor_x;
-            grid.cursor_y = cursor_y;
+            // In zoom mode, cursor should be at (0,0) offset since pane fills screen
+            if self.tabs[self.active_tab].zoomed {
+                // Subtract the pane's stored position to get position relative to (0,0)
+                if let Some(cell) = self.tabs[self.active_tab].root.get_focused_cell_mut() {
+                    grid.cursor_x = cursor_x.saturating_sub(cell.pos_x);
+                    grid.cursor_y = cursor_y.saturating_sub(cell.pos_y);
+                } else {
+                    grid.cursor_x = cursor_x;
+                    grid.cursor_y = cursor_y;
+                }
+            } else {
+                grid.cursor_x = cursor_x;
+                grid.cursor_y = cursor_y;
+            }
             grid.cursor_visible = cursor_visible;
         }
 
@@ -1009,7 +1067,9 @@ impl Compositor {
         // Render tabs on the left side of the first status bar row
         let mut x_pos = 0;
         for (i, tab) in self.tabs.iter().enumerate() {
-            let tab_text = format!(" {} {} ", i, tab.name);
+            // Add 'Z' suffix if tab is zoomed
+            let zoom_indicator = if tab.zoomed { "Z" } else { "" };
+            let tab_text = format!(" {} {}{} ", i, tab.name, zoom_indicator);
             let attrs = if i == self.active_tab {
                 active_tab_attrs.clone()
             } else {

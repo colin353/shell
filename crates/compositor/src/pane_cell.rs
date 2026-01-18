@@ -99,6 +99,31 @@ impl PaneCell {
         }
     }
 
+    /// Get a mutable reference to the focused PaneCell (the leaf cell containing the focused pane).
+    pub fn get_focused_cell_mut(&mut self) -> Option<&mut PaneCell> {
+        if !self.focus {
+            return None;
+        }
+        // Check if this is a leaf pane - if so, return self
+        // Otherwise, recurse into children
+        let is_pane = matches!(&self.inner, PaneCellInner::Pane(_));
+        if is_pane {
+            return Some(self);
+        }
+
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => unreachable!(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_focused_cell_mut();
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Handle CTRL+C on the focused pane.
     ///
     /// Returns the result of the CTRL+C action. The caller should handle
