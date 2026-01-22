@@ -488,4 +488,24 @@ mod tests {
 
         assert!(!compositor.root().is_in_scrollback_mode());
     }
+
+    #[test]
+    fn test_prefix_mode_force_redraw() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output.clone()).unwrap();
+
+        // Send Ctrl+b r to trigger force full redraw
+        compositor.handle_input(&[0x02]); // Ctrl+b
+        compositor.handle_input(&[b'r']); // r
+
+        // Check that clear screen sequence was sent
+        let output_data = output.lock().unwrap();
+        let output_str = String::from_utf8_lossy(&output_data);
+
+        // Should contain clear screen escape sequence (ESC[2J)
+        assert!(
+            output_str.contains("\x1b[2J"),
+            "Expected clear screen sequence in output"
+        );
+    }
 }

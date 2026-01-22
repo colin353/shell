@@ -155,8 +155,10 @@ pub struct SearchResult {
 /// Breakdown of the scoring components for a search result
 #[derive(Debug, Clone, Default)]
 pub struct ScoreBreakdown {
-    /// Score from the fuzzy matcher (normalized to 0-100)
+    /// Score from the fuzzy matcher (normalized)
     pub match_score: i64,
+    /// Bonus for match density (matched chars / command length)
+    pub density_bonus: i64,
     /// Bonus for successful exit code (0)
     pub exit_code_bonus: i64,
     /// Bonus based on how many times this command has been run
@@ -168,7 +170,11 @@ pub struct ScoreBreakdown {
 impl ScoreBreakdown {
     /// Calculate the total score from all components
     pub fn total(&self) -> i64 {
-        self.match_score + self.exit_code_bonus + self.frequency_bonus + self.recency_bonus
+        self.match_score
+            + self.density_bonus
+            + self.exit_code_bonus
+            + self.frequency_bonus
+            + self.recency_bonus
     }
 }
 
@@ -299,7 +305,15 @@ impl ShellHistory {
 
         for line in reader.lines() {
             let line = line?;
-            if line.trim().is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Skip lines that don't look like JSON objects
+            if !trimmed.starts_with('{') {
+                eprintln!("Warning: skipping non-JSON history line: {}", 
+                    if trimmed.len() > 50 { &trimmed[..50] } else { trimmed });
                 continue;
             }
 
@@ -624,11 +638,18 @@ impl ShellHistory {
         let entries = self.entries.read().unwrap();
         let order = self.entry_order.read().unwrap();
 
-        // Scoring weights - frequency is most important
+        // Scoring weights:
+        // - Frequency is most important (commands you run often are likely what you want)
+        // - Match quality + density together determine how well the query fits
+        // - Recency is a tiebreaker (prefer recently used commands)
+        // - Exit code is a minor bonus (success is nice but shouldn't override match quality)
         const MAX_FREQUENCY_BONUS: i64 = 100; // Dominates other factors
-        const MAX_MATCH_SCORE: i64 = 50; // Normalized match quality
-        const MAX_EXIT_CODE_BONUS: i64 = 25; // Prefer successful commands
-        const MAX_RECENCY_BONUS: i64 = 25; // Prefer recent commands
+        const MAX_MATCH_SCORE: i64 = 50; // Fuzzy match quality
+        const MAX_DENSITY_BONUS: i64 = 40; // Reward concentrated matches (query_len / cmd_len)
+        const MAX_RECENCY_BONUS: i64 = 20; // Mild recency preference
+        const MAX_EXIT_CODE_BONUS: i64 = 10; // Minor tiebreaker for successful commands
+
+        let query_len = query.chars().count();
 
         // Pre-compute command statistics: (execution_count, most_recent_index, had_success)
         struct CommandStats {
@@ -725,6 +746,15 @@ impl ShellHistory {
                 // Match score (normalized to MAX_MATCH_SCORE)
                 let match_factor = fuzzy_score as f64 / max_fuzzy_score as f64;
                 breakdown.match_score = (match_factor * MAX_MATCH_SCORE as f64) as i64;
+
+                // Density bonus: query_len / command_len
+                // A 7-char query matching a 10-char command = 0.7 density (high)
+                // A 7-char query matching a 100-char command = 0.07 density (low)
+                let cmd_len = entry.command.chars().count().max(1);
+                let density = query_len as f64 / cmd_len as f64;
+                // Clamp to 1.0 (in case query is longer than command, though unlikely)
+                let density = density.min(1.0);
+                breakdown.density_bonus = (density * MAX_DENSITY_BONUS as f64) as i64;
 
                 // Frequency bonus (log scale to smooth out extreme counts)
                 let freq_factor = (stats.count as f64).ln_1p() / (max_count as f64).ln_1p();

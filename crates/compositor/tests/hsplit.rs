@@ -825,11 +825,14 @@ fn test_multiline_command_with_backslash_continuation() -> Result<(), Compositor
     compositor.render_to_vec();
 
     let after_continuation_lines = compositor.get_text_lines();
-    save_fixture("multiline_after_continuation.txt", &after_continuation_lines);
+    save_fixture(
+        "multiline_after_continuation.txt",
+        &after_continuation_lines,
+    );
 
     // The output should show both lines of the multi-line command
     let text: String = after_continuation_lines.join("\n");
-    
+
     // Verify that the continuation line shows the input
     assert!(
         text.contains("-lah"),
@@ -854,7 +857,7 @@ fn test_multiline_command_with_backslash_continuation() -> Result<(), Compositor
 
     // The command should have executed and we should see a new prompt
     let executed_text: String = after_execute_lines.join("\n");
-    
+
     // Verify we see the continuation line with -lah before execution
     // and a new prompt after (the command ran)
     assert!(
@@ -937,7 +940,7 @@ fn test_multiline_backspace_across_newline() -> Result<(), CompositorError> {
 
     // The output should now show just "echo " on a single line (back to first line)
     let text_after: String = after_backspace_lines.join("\n");
-    
+
     // Verify that "hello" is gone
     assert!(
         !text_after.contains("hello"),
@@ -1001,7 +1004,7 @@ fn test_cd_tilde_expansion() -> Result<(), CompositorError> {
 
     let lines_after_cd_home = compositor.get_text_lines();
     let text = lines_after_cd_home.join("\n");
-    
+
     // Should see ~ in the prompt (which is how home dir is displayed)
     assert!(
         text.contains("~ "),
@@ -1104,7 +1107,9 @@ fn test_ctrl_x_ctrl_e_edit_multiline_command() -> Result<(), CompositorError> {
 
     // Now simulate the editor exiting by directly calling the shell's editor_exited
     // Get mutable access to the pane's shell
-    let pane = compositor.get_focused_pane_mut().expect("Expected focused pane");
+    let pane = compositor
+        .get_focused_pane_mut()
+        .expect("Expected focused pane");
     let output = pane.shell.editor_exited(&temp_file);
     pane.terminal_emulator.process(&output);
 
@@ -1136,6 +1141,57 @@ fn test_ctrl_x_ctrl_e_edit_multiline_command() -> Result<(), CompositorError> {
     // Clean up
     let _ = std::fs::remove_file(&history_path);
     let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+#[test]
+fn test_hsplit_history_ctrl_a() -> Result<(), CompositorError> {
+    // Test that using up arrow to recall history and Ctrl+A to jump to start of line
+    // works correctly with bash connected to the terminal.
+    //
+    // Bug: After recalling a command with up arrow and pressing Ctrl+A, inserting text
+    // at the beginning of the line should show the inserted text followed by the
+    // original command. The display should show "asdfecho hello world".
+
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+
+    compositor.handle_input(b"bash\n");
+    wait_for_output(&mut compositor, 500);
+
+    // Type "echo hello world" and press enter
+    compositor.handle_input(b"echo hello world\n");
+    wait_for_output(&mut compositor, 500);
+
+    // Press up arrow to recall the previous command
+    compositor.handle_input(&[0x1b, b'[', b'A']); // Up arrow
+    wait_for_output(&mut compositor, 200);
+
+    // Press Ctrl+A to jump to start of line
+    compositor.handle_input(&[0x01]); // Ctrl+A
+    wait_for_output(&mut compositor, 200);
+
+    // Type "asdf" at the beginning
+    compositor.handle_input(b"asdf");
+    wait_for_output(&mut compositor, 200);
+
+    // Render to update the global emulator
+    compositor.render_to_vec();
+
+    // Get the text lines
+    let lines = compositor.get_text_lines();
+    let bottom_text: String = lines.join("\n");
+
+    // The line should now show "asdfecho hello world"
+    assert!(
+        bottom_text.contains("asdfecho hello world"),
+        "Expected 'asdfecho hello world' in bottom pane after Ctrl+A insert. Got:\n{}",
+        bottom_text
+    );
 
     Ok(())
 }

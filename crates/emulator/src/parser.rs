@@ -306,6 +306,16 @@ impl<'a> Perform for GridPerformer<'a> {
                     _ => {}
                 }
             }
+            // ICH - Insert Character(s)
+            '@' => {
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.grid.insert_chars(n);
+            }
+            // DCH - Delete Character(s)
+            'P' => {
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.grid.delete_chars(n);
+            }
             _ => {
                 // Unknown CSI sequence
             }

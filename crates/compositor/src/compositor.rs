@@ -168,6 +168,7 @@ impl Compositor {
     /// - Ctrl+b c : Create new tab
     /// - Ctrl+b 1-9 : Switch to tab 1-9
     /// - Ctrl+b [ : Enter scrollback mode
+    /// - Ctrl+b r : Force full screen redraw
     ///
     /// Returns `true` if the compositor should exit, `false` otherwise.
     pub fn handle_input(&mut self, input: &[u8]) -> bool {
@@ -239,6 +240,11 @@ impl Compositor {
                             self.active_tab_mut().resize(width, pane_height);
                         }
                         self.render();
+                        return false;
+                    }
+                    b'r' => {
+                        // Ctrl+b r - force full screen redraw
+                        self.force_full_redraw();
                         return false;
                     }
                     0x02 => {
@@ -1387,6 +1393,30 @@ impl Compositor {
     /// This should be called after resize or when you need to redraw the entire screen.
     /// It composites all panes and outputs the result to the terminal.
     pub fn force_render(&mut self) {
+        self.render();
+    }
+
+    /// Force a complete screen clear and full redraw.
+    ///
+    /// This clears the terminal screen, resets the previous frame state, and
+    /// performs a full render. Use this when the screen gets out of sync
+    /// (e.g., after graphical glitches or escape code issues).
+    ///
+    /// Triggered by Ctrl+b r.
+    pub fn force_full_redraw(&mut self) {
+        let (cols, rows) = self.global_emulator.dimensions();
+
+        // Clear the screen by sending clear escape sequence
+        if let Ok(mut output) = self.output.lock() {
+            // Clear screen and move cursor to home
+            let _ = output.write_all(b"\x1b[2J\x1b[H");
+            let _ = output.flush();
+        }
+
+        // Reset prev_frame to blank so next render outputs everything
+        self.prev_frame = emulator::TerminalGrid::new(cols, rows);
+
+        // Perform a full render
         self.render();
     }
 

@@ -659,6 +659,41 @@ impl TerminalGrid {
         }
     }
 
+    /// Insert n blank characters at cursor, shifting existing characters right.
+    /// Characters shifted past the right margin are lost.
+    pub fn insert_chars(&mut self, n: usize) {
+        let row = &mut self.cells[self.cursor_y];
+        let start = self.cursor_x;
+
+        // Shift characters to the right
+        for x in (start..self.cols).rev() {
+            if x + n < self.cols {
+                row[x + n] = row[x].clone();
+            }
+        }
+
+        // Fill the gap with blank cells
+        for x in start..(start + n).min(self.cols) {
+            row[x] = Cell::empty();
+        }
+    }
+
+    /// Delete n characters at cursor, shifting remaining characters left.
+    /// Blank characters are inserted at the right margin.
+    pub fn delete_chars(&mut self, n: usize) {
+        let row = &mut self.cells[self.cursor_y];
+        let start = self.cursor_x;
+
+        // Shift characters to the left
+        for x in start..self.cols {
+            if x + n < self.cols {
+                row[x] = row[x + n].clone();
+            } else {
+                row[x] = Cell::empty();
+            }
+        }
+    }
+
     /// Insert n blank lines at cursor, scrolling down
     pub fn insert_lines(&mut self, n: usize) {
         for _ in 0..n {

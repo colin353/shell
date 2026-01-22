@@ -1163,3 +1163,176 @@ fn test_compositor_delta_flow() {
         panic!("Compositor delta flow failed after Ctrl+D: {}", msg);
     }
 }
+
+#[test]
+fn test_delta_history_ctrl_a() {
+    // Test that recalling history with up arrow and pressing Ctrl+A to jump to start of line,
+    // then inserting text, produces correct delta rendering.
+    //
+    // Bug: After recalling a command with up arrow and pressing Ctrl+A, inserting text
+    // at the beginning of the line may not render correctly to the real terminal.
+    test_pty_delta_transition(
+        "bash",
+        80,
+        24,
+        &[b"echo hello world\n"], // Execute a command
+        &[
+            &[0x1b, b'[', b'A'], // Up arrow to recall command
+            &[0x01],             // Ctrl+A to go to start of line
+            b"asdf",             // Type at beginning
+        ],
+    );
+}
+
+#[test]
+fn test_compositor_delta_flow_ctrl_a() {
+    // Test the compositor delta flow with the Ctrl+A scenario.
+    // This simulates exactly what happens in the compositor:
+    // 1. Run bash with keyboard input
+    // 2. Compute delta from prev frame to current frame
+    // 3. Apply delta to a "real terminal" emulator
+    // 4. Verify real terminal matches the pane emulator
+
+    let cols = 80;
+    let rows = 24;
+
+    let pty = PtyProcess::spawn("bash", cols as u16, rows as u16).expect("Failed to spawn bash");
+
+    // The pane's terminal emulator (like in compositor)
+    let mut pane_emulator = TerminalEmulator::new(cols, rows);
+
+    // The "real terminal" - what actually displays on screen
+    let mut real_terminal = TerminalEmulator::new(cols, rows);
+
+    // Previous frame for delta computation
+    let mut prev_frame = TerminalGrid::new(cols, rows);
+
+    let mut buf = [0u8; 8192];
+
+    let drain_and_process = |pty: &PtyProcess, pane_emu: &mut TerminalEmulator, buf: &mut [u8]| loop {
+        match pty.read(buf) {
+            Ok(Some(n)) if n > 0 => {
+                pane_emu.process(&buf[..n]);
+                for response in pane_emu.drain_responses() {
+                    let _ = pty.write(&response);
+                }
+            }
+            _ => break,
+        }
+    };
+
+    // Simulate compositor's render cycle
+    let render_and_apply = |pane_emu: &TerminalEmulator,
+                            prev_frame: &mut TerminalGrid,
+                            real_terminal: &mut TerminalEmulator| {
+        // Create fresh global emulator (like compositor does)
+        let mut global_emulator = TerminalEmulator::new(cols, rows);
+
+        // Blit pane cells into global emulator
+        global_emulator.blit_from(pane_emu, 0, 0, 0, 0, cols, rows);
+
+        // Copy cursor info
+        {
+            let (cx, cy) = pane_emu.cursor_position();
+            let pane_grid = pane_emu.grid();
+            let global_grid = global_emulator.grid_mut();
+            global_grid.cursor_x = cx;
+            global_grid.cursor_y = cy;
+            global_grid.cursor_visible = pane_grid.cursor_visible;
+        }
+
+        // Compute delta from prev_frame to global_emulator
+        let delta = compute_delta(prev_frame, global_emulator.grid());
+
+        // Apply delta to real terminal
+        real_terminal.process(&delta);
+
+        // Save current frame as prev_frame
+        *prev_frame = global_emulator.grid().clone();
+
+        delta
+    };
+
+    // Wait for bash to start
+    for _ in 0..30 {
+        thread::sleep(Duration::from_millis(20));
+        drain_and_process(&pty, &mut pane_emulator, &mut buf);
+    }
+
+    // Initial render
+    render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
+
+    // Verify initial match
+    if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
+        panic!("Initial state mismatch: {}", msg);
+    }
+
+    // Step 1: Type "echo hello world" and press enter
+    pty.write(b"echo hello world\n").expect("Failed to write");
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(20));
+        drain_and_process(&pty, &mut pane_emulator, &mut buf);
+    }
+    render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
+
+    if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
+        panic!("Mismatch after 'echo hello world': {}", msg);
+    }
+
+    // Step 2: Press up arrow to recall command
+    pty.write(&[0x1b, b'[', b'A']).expect("Failed to write up arrow");
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(20));
+        drain_and_process(&pty, &mut pane_emulator, &mut buf);
+    }
+    render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
+
+    if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
+        panic!("Mismatch after up arrow: {}", msg);
+    }
+
+    // Step 3: Press Ctrl+A to go to start of line
+    pty.write(&[0x01]).expect("Failed to write Ctrl+A");
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(20));
+        drain_and_process(&pty, &mut pane_emulator, &mut buf);
+    }
+    let delta_after_ctrl_a = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
+
+    if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
+        eprintln!("=== Delta after Ctrl+A ({} bytes): {:?} ===", 
+            delta_after_ctrl_a.len(), 
+            String::from_utf8_lossy(&delta_after_ctrl_a));
+        eprintln!("=== Pane emulator cursor: ({}, {}) ===",
+            pane_emulator.grid().cursor_x, pane_emulator.grid().cursor_y);
+        eprintln!("=== Real terminal cursor: ({}, {}) ===",
+            real_terminal.grid().cursor_x, real_terminal.grid().cursor_y);
+        panic!("Mismatch after Ctrl+A: {}", msg);
+    }
+
+    // Step 4: Type "asdf" at the beginning
+    pty.write(b"asdf").expect("Failed to write 'asdf'");
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(20));
+        drain_and_process(&pty, &mut pane_emulator, &mut buf);
+    }
+    let delta_after_insert = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
+
+    if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
+        eprintln!("=== Delta after insert ({} bytes): {:?} ===", 
+            delta_after_insert.len(), 
+            String::from_utf8_lossy(&delta_after_insert));
+        eprintln!("=== Pane emulator state ===");
+        for y in 0..5 {
+            eprintln!("  {}", pane_emulator.grid().get_line_text(y));
+        }
+        eprintln!("=== Real terminal state ===");
+        for y in 0..5 {
+            eprintln!("  {}", real_terminal.grid().get_line_text(y));
+        }
+        eprintln!("=== Pane cursor: ({}, {}), Real cursor: ({}, {}) ===",
+            pane_emulator.grid().cursor_x, pane_emulator.grid().cursor_y,
+            real_terminal.grid().cursor_x, real_terminal.grid().cursor_y);
+        panic!("Mismatch after typing 'asdf': {}", msg);
+    }
+}

@@ -5,14 +5,14 @@ http://google.com
 Things to do:
 
  - [x] CTRL+P for fuzzy file selection
- - [ ] Support `CTRL+B z` for temporary pane fullscreen toggle
+ - [x] Support `CTRL+B z` for temporary pane fullscreen toggle
  - [x] Change the directory name in the prompt to a tasteful color
  - [x] Tilde is not expanded into $HOME, env vars are not expanded during completions/fuzzy finding
  - [ ] Environment variable configuration
  - [x] Pressing CTRL+C immediately kills a process but should actually send sigterm and wait instead
  - [x] Seems to be a bug with losing track of cursor highlighting occasionally (with copilot-cli)
  - [ ] Seems to be possible to desync the terminal state with fuzzy finder occasionally (hard to reproduce)
- - [ ] The history search should strongly prioritize commands which have been run many times and commands which have been run recently (right now, shorter commands are preferred by the ranking)
+ - [x] The history search should strongly prioritize commands which have been run many times and commands which have been run recently (right now, shorter commands are preferred by the ranking)
  - [ ] Remote connection plan/design
  - [ ] Integrated agent?
 
