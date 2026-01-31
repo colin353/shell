@@ -1,5 +1,3 @@
-    reset                                                                       
-    vim                                                                         
     less Cargo.toml                                                             
     vim Cargo.toml                                                              
     pwd                                                                         
@@ -12,6 +10,8 @@
     vim --clean                                                                 
     vim crates/libvim/fixtures/test_code.rs                                     
     echo hello world                                                            
+    asdf hello world                                                            
+    asdfecho hello world                                                        
   ✓ git status                                                                  
   ✓ git commit -m 'Initial commit'                                              
   ✗ git push origin main                                                        

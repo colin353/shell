@@ -235,8 +235,14 @@ impl Compositor {
                         let width = self.width;
                         let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
                         self.active_tab_mut().toggle_zoom();
-                        // If we're exiting zoom mode, restore the original pane layout
-                        if was_zoomed && !self.active_tab().zoomed {
+                        let is_zoomed = self.active_tab().zoomed;
+                        if is_zoomed && !was_zoomed {
+                            // Entering zoom mode: resize focused pane's PTY to fullscreen
+                            self.active_tab_mut()
+                                .root
+                                .resize_focused_pty(width, pane_height);
+                        } else if was_zoomed && !is_zoomed {
+                            // Exiting zoom mode: restore the original pane layout
                             self.active_tab_mut().resize(width, pane_height);
                         }
                         self.render();
@@ -965,23 +971,10 @@ impl Compositor {
         // Composite the active tab's panes into the global emulator
         let tab = &mut self.tabs[self.active_tab];
         if tab.zoomed {
-            // Zoom mode: temporarily resize the focused cell to fill the screen,
-            // render it, then restore its original dimensions
+            // Zoom mode: composite the focused cell at fullscreen position
+            // The PTY has already been resized to fullscreen when entering zoom mode
             if let Some(cell) = tab.root.get_focused_cell_mut() {
-                // Save original dimensions
-                let orig_pos_x = cell.pos_x;
-                let orig_pos_y = cell.pos_y;
-                let orig_width = cell.width;
-                let orig_height = cell.height;
-
-                // Temporarily set zoom dimensions
-                cell.resize(0, 0, cols, pane_height);
-
-                // Composite just this cell
-                cell.composite_into(&mut self.global_emulator);
-
-                // Restore original dimensions
-                cell.resize(orig_pos_x, orig_pos_y, orig_width, orig_height);
+                cell.composite_into_at(&mut self.global_emulator, 0, 0, cols, pane_height);
             }
         } else {
             // Normal mode: render all panes with borders
@@ -992,14 +985,14 @@ impl Compositor {
         self.render_status_bar();
 
         // Set the cursor position and visibility from the focused pane
-        // (cursor info uses the cell's stored pos_x/pos_y, which we've restored above)
         if let Some((cursor_x, cursor_y, cursor_visible)) =
             self.tabs[self.active_tab].root.get_focused_cursor_info()
         {
             let grid = self.global_emulator.grid_mut();
             // In zoom mode, cursor should be at (0,0) offset since pane fills screen
+            // get_focused_cursor_info returns global coords (pos_x + cursor_x),
+            // so we need to subtract the cell's position to get the screen position
             if self.tabs[self.active_tab].zoomed {
-                // Subtract the pane's stored position to get position relative to (0,0)
                 if let Some(cell) = self.tabs[self.active_tab].root.get_focused_cell_mut() {
                     grid.cursor_x = cursor_x.saturating_sub(cell.pos_x);
                     grid.cursor_y = cursor_y.saturating_sub(cell.pos_y);
@@ -1385,6 +1378,10 @@ impl Compositor {
         // Recursively resize all tabs
         for tab in &mut self.tabs {
             tab.resize(width, pane_height);
+            // If this tab is zoomed, also resize the focused pane's PTY to fullscreen
+            if tab.zoomed {
+                tab.root.resize_focused_pty(width, pane_height);
+            }
         }
     }
 

@@ -1522,4 +1522,224 @@ impl PaneCell {
             }
         }
     }
+
+    /// Resize only the terminal emulator and PTY of the focused pane without changing
+    /// the layout dimensions. Used for zoom mode to give the child process the correct
+    /// terminal size while keeping the layout intact for unzooming.
+    pub fn resize_focused_pty(&mut self, width: usize, height: usize) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                if self.focus {
+                    pane.terminal_emulator.resize(width, height);
+                    pane.shell.resize(width as u16, height as u16);
+                    if let Some(ref proc) = pane.subprocess {
+                        let _ = proc.resize(width as u16, height as u16);
+                    }
+                }
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        cell.resize_focused_pty(width, height);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Composite this pane cell into the global emulator at a custom position and size.
+    /// Used for zoom mode to render the focused pane at fullscreen position without
+    /// changing the cell's stored dimensions.
+    pub fn composite_into_at(
+        &self,
+        dest: &mut emulator::TerminalEmulator,
+        dest_x: usize,
+        dest_y: usize,
+        render_width: usize,
+        render_height: usize,
+    ) {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => {
+                let grid = pane.terminal_emulator.grid();
+                let scrollback_len = grid.scrollback_len();
+
+                // Build a helper to check if a position matches a search result
+                let is_match = |line_index: isize, col: usize| -> Option<bool> {
+                    if !pane.search_mode || pane.search_matches.is_empty() {
+                        return None;
+                    }
+                    for (i, m) in pane.search_matches.iter().enumerate() {
+                        if m.line_index == line_index && col >= m.start_col && col < m.end_col {
+                            let is_current = Some(i) == pane.current_match_index;
+                            return Some(is_current);
+                        }
+                    }
+                    None
+                };
+
+                // Build a helper to check if a position matches a URL
+                let is_url_match = |line_index: isize, col: usize| -> Option<bool> {
+                    if !pane.url_mode || pane.url_matches.is_empty() {
+                        return None;
+                    }
+                    for (i, m) in pane.url_matches.iter().enumerate() {
+                        if m.line_index == line_index && col >= m.start_col && col < m.end_col {
+                            let is_current = Some(i) == pane.current_url_index;
+                            return Some(is_current);
+                        }
+                    }
+                    None
+                };
+
+                // Build a helper to check if a position is in vim visual selection
+                let is_in_selection = |abs_line: usize, col: usize| -> bool {
+                    if !pane.scrollback_mode || pane.vim_engine.mode == libvim::Mode::Normal {
+                        return false;
+                    }
+                    let start = pane.vim_engine.selection_start;
+                    let end = pane.vim_engine.selection_end;
+
+                    match pane.vim_engine.mode {
+                        libvim::Mode::Visual => {
+                            if abs_line < start.row || abs_line > end.row {
+                                return false;
+                            }
+                            if abs_line == start.row && abs_line == end.row {
+                                col >= start.col && col <= end.col
+                            } else if abs_line == start.row {
+                                col >= start.col
+                            } else if abs_line == end.row {
+                                col <= end.col
+                            } else {
+                                true
+                            }
+                        }
+                        libvim::Mode::VisualLine => {
+                            abs_line >= start.row && abs_line <= end.row
+                        }
+                        libvim::Mode::Normal => false,
+                    }
+                };
+
+                let vim_cursor_viewport = pane.get_vim_cursor_info();
+
+                if pane.scrollback_mode {
+                    // In scrollback mode - composite with vim cursor and selection
+                    for row in 0..render_height {
+                        let dst_y_pos = dest_y + row;
+                        let first_visible_line = scrollback_len.saturating_sub(pane.scroll_offset);
+                        let abs_line = first_visible_line + row;
+
+                        let source_line = if abs_line < scrollback_len {
+                            let line_index = (abs_line as isize) - (scrollback_len as isize);
+                            Some((true, abs_line, line_index))
+                        } else {
+                            let grid_row = abs_line - scrollback_len;
+                            if grid_row < grid.rows {
+                                Some((false, grid_row, grid_row as isize))
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some((is_scrollback, line_idx, line_index)) = source_line {
+                            let source_row = if is_scrollback {
+                                grid.get_scrollback_row(line_idx)
+                            } else {
+                                grid.get_row(line_idx)
+                            };
+
+                            if let Some(cells) = source_row {
+                                for col in 0..render_width {
+                                    let dst_x_pos = dest_x + col;
+                                    let (dest_cols, dest_rows) = dest.dimensions();
+                                    if dst_x_pos < dest_cols && dst_y_pos < dest_rows {
+                                        let mut cell = if col < cells.len() {
+                                            cells[col].clone()
+                                        } else {
+                                            emulator::Cell::new(
+                                                ' ',
+                                                emulator::CellAttributes::default(),
+                                            )
+                                        };
+
+                                        // Apply search highlighting
+                                        if let Some(is_current) = is_match(line_index, col) {
+                                            if is_current {
+                                                cell.attrs.bg_color =
+                                                    Some(emulator::Color::Magenta);
+                                                cell.attrs.fg_color = Some(emulator::Color::White);
+                                                cell.attrs.bold = true;
+                                            } else {
+                                                cell.attrs.bg_color = Some(emulator::Color::Yellow);
+                                                cell.attrs.fg_color = Some(emulator::Color::Black);
+                                            }
+                                        } else if let Some(is_current) = is_url_match(line_index, col)
+                                        {
+                                            if is_current {
+                                                cell.attrs.underline = true;
+                                                cell.attrs.fg_color = Some(emulator::Color::Cyan);
+                                                cell.attrs.bold = true;
+                                            } else {
+                                                cell.attrs.underline = true;
+                                                cell.attrs.fg_color = Some(emulator::Color::Blue);
+                                            }
+                                        }
+
+                                        let abs_for_selection = if is_scrollback {
+                                            line_idx
+                                        } else {
+                                            scrollback_len + line_idx
+                                        };
+                                        if is_in_selection(abs_for_selection, col) {
+                                            cell.attrs.inverse = true;
+                                        }
+
+                                        if let Some((vim_col, vim_row, visible)) =
+                                            vim_cursor_viewport
+                                        {
+                                            if visible && col == vim_col && row == vim_row {
+                                                cell.attrs.inverse = !cell.attrs.inverse;
+                                            }
+                                        }
+
+                                        dest.grid_mut().set_cell(dst_x_pos, dst_y_pos, cell);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Normal mode - direct composite
+                    for row in 0..render_height {
+                        let dst_y_pos = dest_y + row;
+                        let source_row = grid.get_row(row);
+
+                        if let Some(cells) = source_row {
+                            for col in 0..render_width {
+                                let dst_x_pos = dest_x + col;
+                                let (dest_cols, dest_rows) = dest.dimensions();
+                                if dst_x_pos < dest_cols && dst_y_pos < dest_rows {
+                                    let cell = if col < cells.len() {
+                                        cells[col].clone()
+                                    } else {
+                                        emulator::Cell::new(
+                                            ' ',
+                                            emulator::CellAttributes::default(),
+                                        )
+                                    };
+                                    dest.grid_mut().set_cell(dst_x_pos, dst_y_pos, cell);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            PaneCellInner::VSplit(_) | PaneCellInner::HSplit(_) => {
+                // For splits, this should only be called on the focused cell
+                // which will be a leaf pane, so this branch shouldn't be reached
+            }
+        }
+    }
 }

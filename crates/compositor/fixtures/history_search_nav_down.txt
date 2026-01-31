@@ -1,4 +1,4 @@
-    {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
+    cd /Users/colinwm/Documents/code/agent-platform && cargo test -p mosaic ti. 
     cargo test -p mosaic timestamp_test                                         
     {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
     {                 echo ___BEGIN___COMMAND_OUTPUT_MARKER___;               . 
