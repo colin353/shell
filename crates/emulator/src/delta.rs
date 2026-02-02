@@ -207,9 +207,9 @@ fn emit_cell_batch(
     for (i, cell) in cells.iter().enumerate() {
         // Skip wide char spacers - these are the second half of double-width chars
         // The terminal will automatically handle the second column when we emit the
-        // leading wide character
+        // leading wide character. We DON'T advance cursor_x here because the cursor
+        // already advanced when we emitted the wide character.
         if cell.is_wide_char_spacer {
-            *cursor_x += 1; // Still advance cursor for positioning
             continue;
         }
 

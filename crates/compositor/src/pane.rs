@@ -355,12 +355,28 @@ impl Pane {
     /// Read available data from the subprocess and process it through the emulator.
     /// Also checks if the subprocess has exited and returns control to the shell.
     pub fn read_and_process(&mut self) {
+        // Check for DEBUG_PTY env var for debugging
+        let debug = std::env::var("DEBUG_PTY").is_ok();
+        self.read_and_process_internal(debug)
+    }
+
+    /// Read and process with optional debug output
+    #[allow(dead_code)]
+    pub fn read_and_process_debug(&mut self) {
+        self.read_and_process_internal(true)
+    }
+
+    fn read_and_process_internal(&mut self, debug: bool) {
         if let Some(ref proc) = self.subprocess {
             // Read all available data from subprocess
             loop {
                 match proc.read(&mut self.read_buffer) {
                     Ok(Some(0)) => break, // EOF
                     Ok(Some(n)) => {
+                        if debug {
+                            eprintln!("PTY read {} bytes: {:?}", n, String::from_utf8_lossy(&self.read_buffer[..n]));
+                            eprintln!("  Raw bytes: {:02x?}", &self.read_buffer[..n]);
+                        }
                         // Process through terminal emulator
                         self.terminal_emulator.process(&self.read_buffer[..n]);
 

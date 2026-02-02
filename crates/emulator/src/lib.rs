@@ -277,6 +277,11 @@ impl TerminalEmulator {
         self.inner.drain_responses()
     }
 
+    /// Get access to the underlying AlacrittyEmulator for debugging
+    pub fn inner(&self) -> &AlacrittyEmulator {
+        &self.inner
+    }
+
     /// Blit a rectangular region from another terminal emulator into this one.
     pub fn blit_from(
         &mut self,
@@ -365,5 +370,137 @@ mod tests {
 
         assert!(emu.grid().get_cell(0, 0).attrs.bold);
         assert!(!emu.grid().get_cell(5, 0).attrs.bold);
+    }
+
+    /// Test that incremental delta computation works correctly with CJK characters
+    #[test]
+    fn test_incremental_cjk_delta() {
+        let mut emu = TerminalEmulator::new(80, 24);
+        
+        // Initial state: empty terminal
+        let prev1 = emu.grid().clone();
+        
+        // Type some ASCII first
+        emu.process(b"echo ");
+        let grid1 = emu.grid().clone();
+        
+        // Compute delta and verify it's reasonable
+        let delta1 = compute_delta(&prev1, &grid1);
+        
+        // Now add CJK character
+        emu.process("日".as_bytes());
+        let grid2 = emu.grid().clone();
+        
+        // Compute delta from grid1 to grid2
+        let delta2 = compute_delta(&grid1, &grid2);
+        
+        // Apply delta2 to grid1 through a simulated terminal and verify result
+        // For now, just verify the text is correct
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("echo 日"), "Expected 'echo 日', got '{}'", line);
+        
+        // Verify cursor position is correct
+        let (cx, cy) = emu.cursor_position();
+        // "echo " is 5 chars, "日" is 2 columns wide, so cursor should be at column 7
+        assert_eq!(cx, 7, "Cursor should be at column 7, got {}", cx);
+        assert_eq!(cy, 0, "Cursor should be at row 0, got {}", cy);
+        
+        // Add more CJK
+        emu.process("本".as_bytes());
+        let grid3 = emu.grid().clone();
+        
+        // Compute delta from grid2 to grid3
+        let delta3 = compute_delta(&grid2, &grid3);
+        
+        // Verify the text
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("echo 日本"), "Expected 'echo 日本', got '{}'", line);
+        
+        // Cursor should now be at column 9 (5 + 2 + 2)
+        let (cx, _) = emu.cursor_position();
+        assert_eq!(cx, 9, "Cursor should be at column 9, got {}", cx);
+        
+        // Now let's test applying deltas to a separate emulator to simulate
+        // what the compositor does
+        let mut display_emu = TerminalEmulator::new(80, 24);
+        
+        // Apply delta1 
+        display_emu.process(&delta1);
+        let display_line = display_emu.grid().get_line_text(0);
+        assert!(display_line.starts_with("echo "), 
+            "After delta1, expected 'echo ', got '{}'", display_line);
+        
+        // Apply delta2
+        display_emu.process(&delta2);
+        let display_line = display_emu.grid().get_line_text(0);
+        assert!(display_line.starts_with("echo 日"), 
+            "After delta2, expected 'echo 日', got '{}'", display_line);
+        
+        // Apply delta3
+        display_emu.process(&delta3);
+        let display_line = display_emu.grid().get_line_text(0);
+        assert!(display_line.starts_with("echo 日本"), 
+            "After delta3, expected 'echo 日本', got '{}'", display_line);
+    }
+
+    /// Test that simulates bash-style echo where chars are typed one at a time
+    /// and the terminal receives them with possible cursor movements
+    #[test]
+    fn test_bash_style_incremental_echo() {
+        let mut emu = TerminalEmulator::new(80, 24);
+        
+        // Simulate what bash does: for each keystroke, it echoes the char
+        // at the current cursor position and advances the cursor.
+        // This simulates typing "echo '日本'"
+        
+        // Type "e" - bash echoes "e"
+        emu.process(b"e");
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("e"), "After 'e', got '{}'", line);
+        let (cx, _) = emu.cursor_position();
+        assert_eq!(cx, 1, "Cursor should be at 1 after 'e'");
+        
+        // Type "c" - bash echoes "c"
+        emu.process(b"c");
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("ec"), "After 'c', got '{}'", line);
+        let (cx, _) = emu.cursor_position();
+        assert_eq!(cx, 2, "Cursor should be at 2 after 'c'");
+        
+        // Type "h" - bash echoes "h"
+        emu.process(b"h");
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("ech"), "After 'h', got '{}'", line);
+        
+        // Type "o" - bash echoes "o"
+        emu.process(b"o");
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("echo"), "After 'o', got '{}'", line);
+        
+        // Type " " - bash echoes " "
+        emu.process(b" ");
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("echo "), "After ' ', got '{}'", line);
+        
+        // Type "'" - bash echoes "'"
+        emu.process(b"'");
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("echo '"), "After \"'\", got '{}'", line);
+        let (cx, _) = emu.cursor_position();
+        assert_eq!(cx, 6, "Cursor should be at 6 after \"'\"");
+        
+        // Type "日" (CJK char - 3 bytes UTF-8, 2 columns wide) - bash echoes it
+        emu.process("日".as_bytes());
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("echo '日"), "After '日', got '{}'", line);
+        let (cx, _) = emu.cursor_position();
+        assert_eq!(cx, 8, "Cursor should be at 8 after '日' (wide char)");
+        
+        // Type "本" (another CJK char)
+        emu.process("本".as_bytes());
+        let line = emu.grid().get_line_text(0);
+        assert!(line.starts_with("echo '日本"), "After '本', got '{}'", line);
+        let (cx, _) = emu.cursor_position();
+        assert_eq!(cx, 10, "Cursor should be at 10 after '本' (another wide char)");
     }
 }

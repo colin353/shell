@@ -1,24 +1,24 @@
-cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/lorem_ipsum.t
-cat /Users/colinwm/Documents/code/shell/crates/compositor/fixtures/lorem_ipsum.t
-xt                                                                              
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor i
-ncididunt ut labore et dolore magna aliqua.                                     
-Line 2: Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi 
-ut aliquip ex ea commodo consequat.                                             
-Line 3: Duis aute irure dolor in reprehenderit in voluptate velit esse cillum do
-lore eu fugiat nulla pariatur.                                                  
-Line 4: Excepteur sint occaecat cupidatat non proident, sunt in culpa qui offici
-a deserunt mollit anim id est laborum.                                          
-Line 5: Curabitur pretium tincidunt lacus. Nulla gravida orci a odio. Nullam var
-ius, turpis et commodo pharetra.                                                
-Line 6: Est eros bibendum elit, nec luctus magna felis sollicitudin mauris. Inte
-ger in mauris eu nibh euismod gravida.                                          
-Line 7: Duis ac tellus et risus vulputate vehicula. Donec lobortis risus a elit.
- Etiam tempor ultrices.                                                         
-Line 8: Ut ullamcorper, ligula eu tempor congue, eros est euismod turpis, id tin
-cidunt sapien risus a quam.                                                     
-Line 9: Maecenas fermentum consequat mi. Donec fermentum. Pellentesque malesuada
- nulla a mi.                                                                    
-Line 10: Duis sapien sem, aliquet sed, vulputate eget, feugiat sit amet, eros. D
-uis sapien sem.                                                                 
- 0 bash                                                             SCROLL 0/95 
+Line 50: Donec enim diam vulputate ut pharetra sit amet aliquam id diam maecenas
+ ultricies mi eget.                                                             
+Line 51: Mauris pellentesque pulvinar pellentesque habitant morbi tristique sene
+ctus et netus et malesuada.                                                     
+Line 52: Fames ac turpis egestas maecenas pharetra convallis posuere morbi leo u
+rna molestie at elementum.                                                      
+Line 53: Eu facilisis sed odio morbi quis commodo odio aenean sed adipiscing dia
+m donec adipiscing.                                                             
+Line 54: Tristique risus nec feugiat in fermentum posuere urna nec tincidunt pra
+esent semper feugiat nibh.                                                      
+Line 55: Sed risus pretium quam vulputate dignissim suspendisse in est ante in n
+ibh mauris cursus mattis.                                                       
+Line 56: Molestie a iaculis at erat pellentesque adipiscing commodo elit at impe
+rdiet dui accumsan sit amet.                                                    
+Line 57: Nulla facilisi nullam vehicula ipsum a arcu cursus vitae congue mauris 
+rhoncus aenean vel elit.                                                        
+Line 58: Scelerisque mauris pellentesque pulvinar pellentesque habitant morbi tr
+istique senectus et netus.                                                      
+Line 59: Et malesuada fames ac turpis egestas integer eget aliquet nibh praesent
+ tristique magna sit amet.                                                      
+Line 60: BOTTOM_MARKER - This is the final line of the fixture and should be vis
+ible without scrolling.                                                         
+compositor ➜                                                                    
+ 0 bash                                                              SCROLL 0/0 

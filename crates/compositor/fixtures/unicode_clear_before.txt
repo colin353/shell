@@ -10,15 +10,15 @@ compositor ➜
                                                                                 
                                                                                 
 ────────────────────────────────────────────────────────────────────────────────
-compositor ➜ eecechechoecho echo 'echo '日echo '日echo '日本echo '日本語漢字中国語
-echo '日本語echo '日本語echo '日本語漢echo '日本語漢echo '日本語漢字中国語韓国語台
-echo '日本語漢字echo '日本語漢字中echo '日本語漢字中echo '日本語漢字中国語韓国語 
-echo '日本語漢字中国echo '日本語漢字中国語echo '日本語漢字中国語韓国語台湾語香港 
-echo '日本語漢字中国語韓echo '日本語漢字中国語韓echo '日本語漢字中国語韓国語台湾 
-echo '日本語漢字中国語韓国語台湾語香港語新加坡語馬來西亞'                       
+compositor ➜ echo '日本語漢字中国語韓国語台湾語香港語新加坡語馬來西亞'          
 日本語漢字中国語韓国語台湾語香港語新加坡語馬來西亞                              
 compositor ➜ hello world                                                        
 bash: hello: command not found                                                  
  exit 127                                                                       
 compositor ➜                                                                    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
  0 bash                                                        2025-01-01 12:00 

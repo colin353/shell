@@ -361,4 +361,98 @@ mod tests {
         let cell = emu.get_cell(0, 0);
         assert_eq!(cell.character, '日');
     }
+
+    #[test]
+    fn test_unicode_cursor_position() {
+        let mut emu = AlacrittyEmulator::new(80, 24);
+        emu.process("日本語".as_bytes());
+
+        // 3 CJK chars, each 2 columns wide = 6 columns
+        let (x, y) = emu.cursor_position();
+        assert_eq!(x, 6, "Cursor should be at column 6 after 3 CJK chars");
+        assert_eq!(y, 0);
+
+        // Text extraction should give us the 3 chars without spacers
+        let text = emu.get_line_text(0);
+        assert!(text.starts_with("日本語"), "Text should be '日本語', got: {}", text);
+    }
+
+    #[test]
+    fn test_unicode_incremental_echo() {
+        // Simulate incremental typing with local echo
+        let mut emu = AlacrittyEmulator::new(80, 24);
+        
+        // Type 'a' and cursor should be at 1
+        emu.process(b"a");
+        let (x, _) = emu.cursor_position();
+        assert_eq!(x, 1, "After 'a', cursor at 1");
+
+        // Type '日' (3 UTF-8 bytes: e6 97 a5) and cursor should be at 3 (1 + 2)
+        emu.process("日".as_bytes());
+        let (x, _) = emu.cursor_position();
+        assert_eq!(x, 3, "After 'a日', cursor at 3 (1 + 2 width)");
+
+        // Type 'b' and cursor should be at 4
+        emu.process(b"b");
+        let (x, _) = emu.cursor_position();
+        assert_eq!(x, 4, "After 'a日b', cursor at 4");
+
+        // Check the line content
+        let text = emu.get_line_text(0);
+        assert!(text.starts_with("a日b"), "Text should be 'a日b', got: {}", text);
+    }
+
+    #[test]
+    fn test_pty_style_echo_simulation() {
+        // This simulates what bash might output when typing "echo '日'"
+        // Bash typically just echoes the character at the cursor position
+        let mut emu = AlacrittyEmulator::new(80, 24);
+        
+        // Start with a prompt
+        emu.process(b"$ ");
+        assert_eq!(emu.cursor_position().0, 2, "Cursor at 2 after prompt");
+        
+        // Type 'e' - bash echoes 'e'
+        emu.process(b"e");
+        let line = emu.get_line_text(0);
+        assert!(line.starts_with("$ e"), "After 'e', got '{}'", line);
+        assert_eq!(emu.cursor_position().0, 3);
+        
+        // Type 'c' - bash echoes 'c'  
+        emu.process(b"c");
+        let line = emu.get_line_text(0);
+        assert!(line.starts_with("$ ec"), "After 'c', got '{}'", line);
+        assert_eq!(emu.cursor_position().0, 4);
+        
+        // Type 'h' - bash echoes 'h'
+        emu.process(b"h");
+        let line = emu.get_line_text(0);
+        assert!(line.starts_with("$ ech"), "After 'h', got '{}'", line);
+        
+        // Type 'o' - bash echoes 'o'
+        emu.process(b"o");
+        let line = emu.get_line_text(0);
+        assert!(line.starts_with("$ echo"), "After 'o', got '{}'", line);
+        
+        // Type ' ' and "'"
+        emu.process(b" '");
+        let line = emu.get_line_text(0);
+        assert!(line.starts_with("$ echo '"), "After \" '\", got '{}'", line);
+        // "$ echo '" = 8 chars
+        assert_eq!(emu.cursor_position().0, 8);
+        
+        // Type CJK char - 日 (wide, 2 columns)
+        emu.process("日".as_bytes());
+        let line = emu.get_line_text(0);
+        assert!(line.starts_with("$ echo '日"), "After '日', got '{}'", line);
+        // 8 + 2 = 10
+        assert_eq!(emu.cursor_position().0, 10, "Cursor at 10 after wide char");
+        
+        // Type CJK char - 本 (wide, 2 columns)
+        emu.process("本".as_bytes());
+        let line = emu.get_line_text(0);
+        assert!(line.starts_with("$ echo '日本"), "After '本', got '{}'", line);
+        // 10 + 2 = 12
+        assert_eq!(emu.cursor_position().0, 12, "Cursor at 12 after second wide char");
+    }
 }

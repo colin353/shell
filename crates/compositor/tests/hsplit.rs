@@ -29,6 +29,11 @@ impl MemoryWriter {
             buffer: Arc::new(Mutex::new(Vec::new())),
         }
     }
+
+    #[allow(dead_code)]
+    fn get_buffer(&self) -> Vec<u8> {
+        self.buffer.lock().unwrap().clone()
+    }
 }
 
 impl Write for MemoryWriter {
@@ -2340,4 +2345,117 @@ fn test_wide_char_clear_delta() {
             x, cell.character
         );
     }
+}
+
+/// Test echo of CJK characters - reproduces corruption bug
+#[test]
+fn test_cjk_echo_corruption() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+    
+    // Check pane's terminal state BEFORE typing
+    {
+        let pane = compositor.get_focused_pane_mut().unwrap();
+        // Check both grid_cache and inner alacritty state
+        let cache_line = pane.terminal_emulator.grid().get_line_text(0);
+        let inner_line = pane.terminal_emulator.inner().get_line_text(0);
+        eprintln!("BEFORE typing:");
+        eprintln!("  Cache line 0: {}", cache_line);
+        eprintln!("  Inner line 0: {}", inner_line);
+    }
+
+    // Echo CJK characters
+    compositor.handle_input(b"echo '\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe6\xbc\xa2\xe5\xad\x97\xe4\xb8\xad\xe5\x9b\xbd\xe8\xaa\x9e\xe9\x9f\x93\xe5\x9b\xbd\xe8\xaa\x9e\xe5\x8f\xb0\xe6\xb9\xbe'\n");
+    wait_for_output(&mut compositor, 500);
+    
+    // Check pane's terminal state AFTER typing - compare cache vs inner
+    {
+        let pane = compositor.get_focused_pane_mut().unwrap();
+        let cache_line0 = pane.terminal_emulator.grid().get_line_text(0);
+        let cache_line1 = pane.terminal_emulator.grid().get_line_text(1);
+        let inner_line0 = pane.terminal_emulator.inner().get_line_text(0);
+        let inner_line1 = pane.terminal_emulator.inner().get_line_text(1);
+        eprintln!("AFTER typing - Pane terminal state:");
+        eprintln!("  Cache line 0: {}", cache_line0);
+        eprintln!("  Cache line 1: {}", cache_line1);
+        eprintln!("  Inner line 0: {}", inner_line0);
+        eprintln!("  Inner line 1: {}", inner_line1);
+    }
+
+    // Get terminal state
+    let lines = compositor.get_text_lines();
+    let line0 = &lines[0];
+
+    eprintln!("GLOBAL emulator state after echo:");
+    for (i, line) in lines.iter().enumerate().take(5) {
+        eprintln!("  Line {}: {}", i, line);
+    }
+
+    // The first line should NOT have repeated echo fragments like "eecechechoecho"
+    // This pattern indicates keystroke echo corruption
+    // Note: "echo" legitimately contains "ech", so we check for the repeated patterns only
+    assert!(
+        !line0.contains("eec") && !line0.contains("echoecho"),
+        "Line 0 should not have corrupted echo fragments. Got:\n{}",
+        line0
+    );
+
+    // The first line should be something like "compositor ➜ echo '日本語漢字中国語韓国語台湾'"
+    // (the prompt followed by the command we typed)
+    assert!(
+        line0.contains("echo '") || line0.contains("echo \""),
+        "Line 0 should contain the echo command. Got:\n{}",
+        line0
+    );
+    
+    // Verify the CJK characters are present
+    assert!(
+        line0.contains("日本語") && line0.contains("韓国語"),
+        "Line 0 should contain CJK characters. Got:\n{}",
+        line0
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_cjk_with_cat() -> Result<(), CompositorError> {
+    // This test uses cat to see simple echo behavior
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.set_fixed_time(fixed_test_time());
+    wait_for_output(&mut compositor, 500);
+    
+    // Run cat as a subprocess
+    compositor.handle_input(b"cat\n");
+    wait_for_output(&mut compositor, 300);
+    
+    // Type some CJK characters
+    compositor.handle_input("日本語\n".as_bytes());
+    wait_for_output(&mut compositor, 300);
+    
+    // Check pane state
+    {
+        let pane = compositor.get_focused_pane_mut().unwrap();
+        let inner_line0 = pane.terminal_emulator.inner().get_line_text(0);
+        let inner_line1 = pane.terminal_emulator.inner().get_line_text(1);
+        let inner_line2 = pane.terminal_emulator.inner().get_line_text(2);
+        eprintln!("After cat with CJK:");
+        eprintln!("  Inner line 0: {}", inner_line0);
+        eprintln!("  Inner line 1: {}", inner_line1);
+        eprintln!("  Inner line 2: {}", inner_line2);
+    }
+    
+    // Exit cat
+    compositor.handle_input(b"\x04"); // Ctrl+D
+    wait_for_output(&mut compositor, 300);
+    
+    Ok(())
 }

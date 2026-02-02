@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use unicode_width::UnicodeWidthChar;
 
 pub mod file_finder;
 pub mod history;
@@ -801,6 +802,11 @@ impl Shell {
                 if self.cursor_pos > 0 {
                     let old_pos = self.cursor_pos;
                     let char_to_delete = self.input_buffer.chars().nth(self.cursor_pos - 1);
+                    
+                    // Compute display width of cursor position BEFORE delete
+                    // This is the width we need to move back to get to start of input
+                    let old_display_width = self.display_width_of_chars(&self.input_buffer, old_pos);
+                    
                     self.cursor_pos -= 1;
                     // cursor_pos is a character index, convert to byte offset for remove
                     let byte_pos = self
@@ -817,8 +823,8 @@ impl Shell {
                         Some(self.render_after_newline_delete(old_pos))
                     } else {
                         // Re-render the entire line with syntax highlighting
-                        // Terminal cursor was at old_pos before this operation
-                        Some(self.render_highlighted_input_from(old_pos))
+                        // Use the pre-computed display width
+                        Some(self.render_highlighted_input_with_display_width(old_display_width))
                     }
                 } else {
                     None
@@ -851,9 +857,10 @@ impl Shell {
                 output.extend(self.get_prompt().as_bytes());
                 let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
                 output.extend(highlighted.as_bytes());
-                // Position cursor correctly
-                let char_count = self.input_buffer.chars().count();
-                let move_back = char_count - self.cursor_pos;
+                // Position cursor correctly using display width
+                let total_display_width = self.display_width(&self.input_buffer);
+                let cursor_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+                let move_back = total_display_width.saturating_sub(cursor_display_width);
                 if move_back > 0 {
                     output.extend(format!("\x1b[{}D", move_back).as_bytes());
                 }
@@ -1134,8 +1141,18 @@ impl Shell {
     fn cursor_right(&mut self) -> Option<Vec<u8>> {
         let char_count = self.input_buffer.chars().count();
         if self.cursor_pos < char_count {
+            // Get the character at current position to determine its width
+            let char_at_cursor = self.input_buffer.chars().nth(self.cursor_pos);
+            let width = char_at_cursor
+                .and_then(|c| c.width())
+                .unwrap_or(1);
             self.cursor_pos += 1;
-            Some(b"\x1b[C".to_vec())
+            // Move cursor by the character's display width
+            if width > 1 {
+                Some(format!("\x1b[{}C", width).into_bytes())
+            } else {
+                Some(b"\x1b[C".to_vec())
+            }
         } else {
             None
         }
@@ -1144,8 +1161,18 @@ impl Shell {
     /// Move cursor left
     fn cursor_left(&mut self) -> Option<Vec<u8>> {
         if self.cursor_pos > 0 {
+            // Get the character we're moving past to determine its width
+            let char_before_cursor = self.input_buffer.chars().nth(self.cursor_pos - 1);
+            let width = char_before_cursor
+                .and_then(|c| c.width())
+                .unwrap_or(1);
             self.cursor_pos -= 1;
-            Some(b"\x1b[D".to_vec())
+            // Move cursor by the character's display width
+            if width > 1 {
+                Some(format!("\x1b[{}D", width).into_bytes())
+            } else {
+                Some(b"\x1b[D".to_vec())
+            }
         } else {
             None
         }
@@ -1154,9 +1181,14 @@ impl Shell {
     /// Move cursor to start of line
     fn cursor_home(&mut self) -> Option<Vec<u8>> {
         if self.cursor_pos > 0 {
-            let output = format!("\x1b[{}D", self.cursor_pos).into_bytes();
+            // Move by display width, not character count
+            let display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
             self.cursor_pos = 0;
-            Some(output)
+            if display_width > 0 {
+                Some(format!("\x1b[{}D", display_width).into_bytes())
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -1165,11 +1197,17 @@ impl Shell {
     /// Move cursor to end of line
     fn cursor_end(&mut self) -> Option<Vec<u8>> {
         let char_count = self.input_buffer.chars().count();
-        let remaining = char_count - self.cursor_pos;
-        if remaining > 0 {
-            let output = format!("\x1b[{}C", remaining).into_bytes();
+        if self.cursor_pos < char_count {
+            // Calculate display width from cursor to end
+            let current_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            let total_display_width = self.display_width(&self.input_buffer);
+            let remaining_width = total_display_width.saturating_sub(current_display_width);
             self.cursor_pos = char_count;
-            Some(output)
+            if remaining_width > 0 {
+                Some(format!("\x1b[{}C", remaining_width).into_bytes())
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -1286,14 +1324,14 @@ impl Shell {
             let current_line_start = last_newline + 1;
             let current_line = &self.input_buffer[current_line_start..];
             
-            // Calculate cursor position within the current line
+            // Calculate cursor position within the current line (in characters)
             let cursor_in_current_line = if self.cursor_pos > current_line_start {
                 self.cursor_pos - current_line_start
             } else {
                 0
             };
             
-            // Calculate old cursor position within the current line
+            // Calculate old cursor position within the current line (in characters)
             let old_cursor_in_current_line = if old_cursor_pos > current_line_start {
                 old_cursor_pos - current_line_start
             } else {
@@ -1301,8 +1339,10 @@ impl Shell {
             };
             
             // Move cursor to start of current line (after continuation prompt)
-            if old_cursor_in_current_line > 0 {
-                output.extend(format!("\x1b[{}D", old_cursor_in_current_line).as_bytes());
+            // Need to move by display width (columns), not character count
+            let old_cursor_display_width = self.display_width_of_chars(current_line, old_cursor_in_current_line);
+            if old_cursor_display_width > 0 {
+                output.extend(format!("\x1b[{}D", old_cursor_display_width).as_bytes());
             }
             
             // Clear from cursor to end of line
@@ -1313,15 +1353,20 @@ impl Shell {
             output.extend(highlighted.as_bytes());
             
             // Move cursor back to correct position within current line
-            let move_back = current_line.len() - cursor_in_current_line;
-            if move_back > 0 {
-                output.extend(format!("\x1b[{}D", move_back).as_bytes());
+            // Calculate display width from cursor to end of line
+            let total_display_width = self.display_width(current_line);
+            let cursor_display_width = self.display_width_of_chars(current_line, cursor_in_current_line);
+            let move_back_columns = total_display_width.saturating_sub(cursor_display_width);
+            if move_back_columns > 0 {
+                output.extend(format!("\x1b[{}D", move_back_columns).as_bytes());
             }
         } else {
             // Single-line input: original behavior
             // Move cursor to start of input area (after prompt)
-            if old_cursor_pos > 0 {
-                output.extend(format!("\x1b[{}D", old_cursor_pos).as_bytes());
+            // Need to move by display width (columns), not character count
+            let old_cursor_display_width = self.display_width_of_chars(&self.input_buffer, old_cursor_pos);
+            if old_cursor_display_width > 0 {
+                output.extend(format!("\x1b[{}D", old_cursor_display_width).as_bytes());
             }
 
             // Clear from cursor to end of line
@@ -1334,10 +1379,12 @@ impl Shell {
             output.extend(highlighted.as_bytes());
 
             // Move cursor back to correct position
-            let char_count = self.input_buffer.chars().count();
-            let move_back = char_count - self.cursor_pos;
-            if move_back > 0 {
-                output.extend(format!("\x1b[{}D", move_back).as_bytes());
+            // Calculate display width from cursor to end of buffer
+            let total_display_width = self.display_width(&self.input_buffer);
+            let cursor_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            let move_back_columns = total_display_width.saturating_sub(cursor_display_width);
+            if move_back_columns > 0 {
+                output.extend(format!("\x1b[{}D", move_back_columns).as_bytes());
             }
         }
 
@@ -1349,6 +1396,52 @@ impl Shell {
     fn render_highlighted_input(&mut self) -> Vec<u8> {
         let pos = self.cursor_pos;
         self.render_highlighted_input_from(pos)
+    }
+
+    /// Render the current input line with syntax highlighting, using a pre-computed display width.
+    /// Used after backspace when the buffer has already been modified.
+    fn render_highlighted_input_with_display_width(&mut self, old_cursor_display_width: usize) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        // For single-line input (no multi-line support in this variant for now)
+        // Move cursor to start of input area (after prompt)
+        if old_cursor_display_width > 0 {
+            output.extend(format!("\x1b[{}D", old_cursor_display_width).as_bytes());
+        }
+
+        // Clear from cursor to end of line
+        output.extend(b"\x1b[K");
+
+        // Get highlighted version of input
+        let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
+
+        // Write the highlighted input
+        output.extend(highlighted.as_bytes());
+
+        // Move cursor back to correct position
+        // Calculate display width from cursor to end of buffer
+        let total_display_width = self.display_width(&self.input_buffer);
+        let cursor_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+        let move_back_columns = total_display_width.saturating_sub(cursor_display_width);
+        if move_back_columns > 0 {
+            output.extend(format!("\x1b[{}D", move_back_columns).as_bytes());
+        }
+
+        output
+    }
+
+    /// Calculate the display width (in terminal columns) of the first `char_count` characters.
+    /// Wide characters (CJK, emoji) count as 2 columns.
+    fn display_width_of_chars(&self, text: &str, char_count: usize) -> usize {
+        text.chars()
+            .take(char_count)
+            .map(|c| c.width().unwrap_or(0))
+            .sum()
+    }
+
+    /// Calculate the total display width (in terminal columns) of a string.
+    fn display_width(&self, text: &str) -> usize {
+        text.chars().map(|c| c.width().unwrap_or(0)).sum()
     }
 
     /// Render after deleting a newline character.

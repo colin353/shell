@@ -445,6 +445,7 @@ dependencies = [
  "serde_json",
  "shell-syntax",
  "tempfile",
+ "unicode-width",
  "uuid",
 ]
 

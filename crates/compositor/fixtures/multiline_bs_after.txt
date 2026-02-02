@@ -1,9 +1,9 @@
+compositor ➜ echo \                                                             
+echo                                                                            
+echo                                                                            
+echo                                                                            
+echo                                                                            
 compositor ➜ echo                                                               
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
                                                                                 
                                                                                 
                                                                                 

@@ -1,24 +1,24 @@
-m pellentesque.                                                                 
-Line 21: Quisque porta volutpat erat. Quisque erat eros, viverra eget, congue eg
-et, semper rutrum, nulla.                                                       
-Line 22: Nunc purus. Phasellus in felis. Donec semper sapien a libero. Nam dui. 
-Line 23: Proin leo odio, porttitor id, consequat in, consequat ut, nulla. Sed ac
-cumsan felis.                                                                   
-Line 24: Ut at dolor quis odio consequat varius. Integer ac leo. Pellentesque ul
-trices mattis odio.                                                             
-Line 25: Donec vitae nisi. Nam ultrices, libero non mattis pulvinar, nulla pede 
-ullamcorper augue.                                                              
-Line 26: A suscipit nulla elit ac nulla. Sed vel enim sit amet nunc viverra dapi
-bus.                                                                            
-Line 27: Nulla suscipit ligula in lacus. Curabitur at ipsum ac tellus semper int
-erdum.                                                                          
-Line 28: Mauris ullamcorper felis vitae erat. Proin feugiat, augue non elementum
- posuere.                                                                       
-Line 29: Metus urna a urna, eu vehicula enim lorem quis eros. Vivamus lacinia.  
-Line 30: SCROLLBACK_VISIBLE_LINE - This should be visible when scrolled back.   
-Line 31: Pellentesque habitant morbi tristique senectus et netus et malesuada fa
-mes ac turpis egestas.                                                          
-Line 32: Proin pharetra nonummy pede. Mauris et orci. Aenean nec lorem. In portt
-itor.                                                                           
-Line 33: Donec laoreet nonummy augue. Suspendisse dui purus, scelerisque at, vul
- 0 bash                                                            SCROLL 40/95 
+Line 50: Donec enim diam vulputate ut pharetra sit amet aliquam id diam maecenas
+ ultricies mi eget.                                                             
+Line 51: Mauris pellentesque pulvinar pellentesque habitant morbi tristique sene
+ctus et netus et malesuada.                                                     
+Line 52: Fames ac turpis egestas maecenas pharetra convallis posuere morbi leo u
+rna molestie at elementum.                                                      
+Line 53: Eu facilisis sed odio morbi quis commodo odio aenean sed adipiscing dia
+m donec adipiscing.                                                             
+Line 54: Tristique risus nec feugiat in fermentum posuere urna nec tincidunt pra
+esent semper feugiat nibh.                                                      
+Line 55: Sed risus pretium quam vulputate dignissim suspendisse in est ante in n
+ibh mauris cursus mattis.                                                       
+Line 56: Molestie a iaculis at erat pellentesque adipiscing commodo elit at impe
+rdiet dui accumsan sit amet.                                                    
+Line 57: Nulla facilisi nullam vehicula ipsum a arcu cursus vitae congue mauris 
+rhoncus aenean vel elit.                                                        
+Line 58: Scelerisque mauris pellentesque pulvinar pellentesque habitant morbi tr
+istique senectus et netus.                                                      
+Line 59: Et malesuada fames ac turpis egestas integer eget aliquet nibh praesent
+ tristique magna sit amet.                                                      
+Line 60: BOTTOM_MARKER - This is the final line of the fixture and should be vis
+ible without scrolling.                                                         
+compositor ➜                                                                    
+ 0 bash                                                              SCROLL 0/0 
