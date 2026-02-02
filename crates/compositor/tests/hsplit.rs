@@ -1195,3 +1195,1149 @@ fn test_hsplit_history_ctrl_a() -> Result<(), CompositorError> {
 
     Ok(())
 }
+
+/// Test that unicode characters render correctly in a horizontal split.
+///
+/// This tests that various unicode characters (CJK, emoji, symbols) are
+/// properly rendered and that the incremental delta rendering produces
+/// output that matches a full redraw.
+#[test]
+fn test_hsplit_unicode_rendering() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    // Create a temporary directory for the test history file
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_unicode_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    // Create a ShellCore with our custom history path
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    // Create a compositor with the custom core (using embedded shell, not bash)
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Render initial state
+    compositor.render_to_vec();
+
+    // Create horizontal split with Ctrl+b "
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+    compositor.render_to_vec();
+
+    // Switch to top pane
+    compositor.handle_input(&[0x0b]); // Ctrl+k - move focus up
+    compositor.render_to_vec();
+
+    // Echo a string with various unicode characters:
+    // - Basic ASCII
+    // - CJK characters (wide - 2 columns each)
+    // - Emoji (various widths)
+    // - Mathematical symbols
+    // - Box drawing characters
+    let unicode_string = "echo 'Hello 你好 こんにちは 🎉🚀 α β γ ∞ ≠ ≈ ┌─┐'";
+    compositor.handle_input(unicode_string.as_bytes());
+    compositor.handle_input(b"\r");
+    compositor.render_to_vec();
+
+    // Get the compositor's internal state
+    let compositor_lines = compositor.get_text_lines();
+    let compositor_text: String = compositor_lines.join("\n");
+
+    // Verify the unicode content is present in the compositor state
+    assert!(
+        compositor_text.contains("Hello"),
+        "Expected 'Hello' in output. Got:\n{}",
+        compositor_text
+    );
+    assert!(
+        compositor_text.contains("你好"),
+        "Expected Chinese '你好' in output. Got:\n{}",
+        compositor_text
+    );
+    assert!(
+        compositor_text.contains("こんにちは"),
+        "Expected Japanese 'こんにちは' in output. Got:\n{}",
+        compositor_text
+    );
+    assert!(
+        compositor_text.contains("🎉"),
+        "Expected emoji '🎉' in output. Got:\n{}",
+        compositor_text
+    );
+    assert!(
+        compositor_text.contains("∞"),
+        "Expected infinity symbol '∞' in output. Got:\n{}",
+        compositor_text
+    );
+
+    // Now test that the render output can be replayed to produce the same state
+    let render_output = compositor.render_to_vec();
+
+    // Create a fresh emulator and replay the render output
+    let mut replay_emulator = emulator::TerminalEmulator::new(80, 24);
+    replay_emulator.process(&render_output);
+
+    // Get text from both
+    let replay_lines: Vec<String> = (0..24)
+        .map(|y| replay_emulator.grid().get_line_text(y))
+        .collect();
+    let replay_text: String = replay_lines.join("\n");
+
+    // The replay should contain the same unicode content
+    assert!(
+        replay_text.contains("Hello"),
+        "Replay should contain 'Hello'.\nReplay:\n{}\nCompositor:\n{}",
+        replay_text,
+        compositor_text
+    );
+    assert!(
+        replay_text.contains("你好"),
+        "Replay should contain Chinese '你好'.\nReplay:\n{}\nCompositor:\n{}",
+        replay_text,
+        compositor_text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+/// Test unicode rendering in a vertical split to stress column positioning.
+///
+/// Vertical splits are more sensitive to column width issues because the
+/// panes are side by side, and wide characters that span columns can cause
+/// rendering artifacts at the split border.
+#[test]
+fn test_vsplit_unicode_rendering() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    // Create a temporary directory for the test history file
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_unicode_vsplit_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    // Create a ShellCore with our custom history path
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    // Create a compositor with the custom core
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Render initial state
+    compositor.render_to_vec();
+
+    // Create vertical split with Ctrl+b %
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'%']); // %
+    compositor.render_to_vec();
+
+    // Switch to left pane
+    compositor.handle_input(&[0x08]); // Ctrl+h - move focus left
+    compositor.render_to_vec();
+
+    // Echo CJK characters (each should be 2 columns wide)
+    compositor.handle_input(b"echo '\xe4\xb8\xad\xe6\x96\x87\xe5\xad\x97\xe7\xac\xa6'");  // 中文字符
+    compositor.handle_input(b"\r");
+    compositor.render_to_vec();
+
+    // Get the compositor's internal state
+    let compositor_lines = compositor.get_text_lines();
+    let compositor_text: String = compositor_lines.join("\n");
+
+    // Verify the CJK content is present
+    assert!(
+        compositor_text.contains("中文字符"),
+        "Expected CJK '中文字符' in output. Got:\n{}",
+        compositor_text
+    );
+
+    // Switch to right pane and add more unicode
+    compositor.handle_input(&[0x0c]); // Ctrl+l - move focus right
+    compositor.render_to_vec();
+
+    compositor.handle_input(b"echo '\xce\xb1\xce\xb2\xce\xb3'");  // αβγ
+    compositor.handle_input(b"\r");
+    compositor.render_to_vec();
+
+    let compositor_lines = compositor.get_text_lines();
+    let compositor_text: String = compositor_lines.join("\n");
+
+    // Both panes should show their content
+    assert!(
+        compositor_text.contains("中文字符"),
+        "Left pane should still contain CJK. Got:\n{}",
+        compositor_text
+    );
+    assert!(
+        compositor_text.contains("αβγ"),
+        "Right pane should contain Greek letters. Got:\n{}",
+        compositor_text
+    );
+
+    // Test replay of the delta render
+    let render_output = compositor.render_to_vec();
+    let mut replay_emulator = emulator::TerminalEmulator::new(80, 24);
+    replay_emulator.process(&render_output);
+
+    let replay_lines: Vec<String> = (0..24)
+        .map(|y| replay_emulator.grid().get_line_text(y))
+        .collect();
+    let replay_text: String = replay_lines.join("\n");
+
+    assert!(
+        replay_text.contains("中文字符"),
+        "Replay should contain CJK content. Replay:\n{}",
+        replay_text
+    );
+    assert!(
+        replay_text.contains("αβγ"),
+        "Replay should contain Greek letters. Replay:\n{}",
+        replay_text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+/// Test that incremental rendering produces the same result as a full redraw
+/// when unicode characters are involved.
+///
+/// This test specifically exercises the bug where incremental delta rendering
+/// may produce artifacts with unicode characters, but Ctrl+B r (full redraw)
+/// produces correct output.
+#[test]
+fn test_unicode_incremental_vs_full_redraw() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_unicode_redraw_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Create horizontal split
+    compositor.render_to_vec();
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+    compositor.render_to_vec();
+
+    // Print a mix of narrow and wide characters
+    // This sequence is designed to stress-test column tracking:
+    // - ASCII (1 column each)
+    // - CJK (2 columns each)
+    // - Emoji (varies, often 2 columns)
+    // - Combining characters
+    let test_strings = [
+        "echo 'a中b国c人d'",          // Interleaved ASCII and CJK
+        "echo '→←↑↓'",               // Arrows
+        "echo '①②③④⑤'",             // Circled numbers (narrow)
+        "echo '🇺🇸🇬🇧'",               // Flag emoji (complex graphemes)
+        "echo 'café résumé naïve'",   // Latin with diacritics
+    ];
+
+    for s in &test_strings {
+        compositor.handle_input(s.as_bytes());
+        compositor.handle_input(b"\r");
+        compositor.render_to_vec();
+    }
+
+    // Get the state after incremental rendering
+    let incremental_lines = compositor.get_text_lines();
+    let incremental_text: String = incremental_lines.join("\n");
+
+    // Now force a full redraw (simulating Ctrl+B r)
+    compositor.force_full_redraw();
+
+    // Get the state after full redraw
+    let full_redraw_lines = compositor.get_text_lines();
+    let full_redraw_text: String = full_redraw_lines.join("\n");
+
+    // The text content should be identical
+    assert_eq!(
+        incremental_text, full_redraw_text,
+        "Incremental render should match full redraw.\nIncremental:\n{}\n\nFull redraw:\n{}",
+        incremental_text, full_redraw_text
+    );
+
+    // Also verify specific content
+    assert!(
+        full_redraw_text.contains("中") && full_redraw_text.contains("国"),
+        "Should contain CJK characters. Got:\n{}",
+        full_redraw_text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+/// Test rendering of a dense block of CJK text that fills most of the terminal width.
+///
+/// This exercises edge cases where wide characters might extend past the
+/// expected column boundaries or cause off-by-one errors in cursor positioning.
+#[test]
+fn test_dense_cjk_rendering() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_dense_cjk_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+    compositor.set_fixed_time(fixed_test_time());
+    compositor.render_to_vec();
+
+    // Create a horizontal split
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+    compositor.render_to_vec();
+
+    // Echo a long string of CJK characters
+    // 20 CJK characters = 40 columns (should fit in 80-column terminal)
+    let cjk_text = "日本語漢字中国語韓国語台湾語香港語新加坡語馬來西亞";
+    let cmd = format!("echo '{}'", cjk_text);
+    compositor.handle_input(cmd.as_bytes());
+    compositor.handle_input(b"\r");
+    compositor.render_to_vec();
+
+    let compositor_lines = compositor.get_text_lines();
+    let compositor_text: String = compositor_lines.join("\n");
+
+    // Verify the CJK text appears correctly
+    assert!(
+        compositor_text.contains("日本語"),
+        "Should contain Japanese. Got:\n{}",
+        compositor_text
+    );
+    assert!(
+        compositor_text.contains("中国語"),
+        "Should contain Chinese. Got:\n{}",
+        compositor_text
+    );
+
+    // Test replay
+    let render_output = compositor.render_to_vec();
+    let mut replay_emulator = emulator::TerminalEmulator::new(80, 24);
+    replay_emulator.process(&render_output);
+
+    let replay_lines: Vec<String> = (0..24)
+        .map(|y| replay_emulator.grid().get_line_text(y))
+        .collect();
+    let replay_text: String = replay_lines.join("\n");
+
+    assert!(
+        replay_text.contains("日本語"),
+        "Replay should contain Japanese.\nReplay:\n{}\nCompositor:\n{}",
+        replay_text,
+        compositor_text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+/// Test that emoji sequences render correctly in splits.
+///
+/// Emoji can be particularly tricky because:
+/// - Some emoji are 2 columns wide
+/// - Some are sequences of multiple codepoints (ZWJ sequences)
+/// - Skin tone modifiers add complexity
+#[test]
+fn test_emoji_rendering_in_split() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_emoji_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+    compositor.set_fixed_time(fixed_test_time());
+    compositor.render_to_vec();
+
+    // Create horizontal split
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+    compositor.render_to_vec();
+
+    // Test simple emoji first
+    compositor.handle_input("echo '😀😃😄😁😆'".as_bytes());
+    compositor.handle_input(b"\r");
+    compositor.render_to_vec();
+
+    let lines = compositor.get_text_lines();
+    let text: String = lines.join("\n");
+
+    // Verify the emoji appears in output (either in command echo or as typed)
+    assert!(
+        text.contains("😀"),
+        "Expected '😀' in output. Got:\n{}",
+        text
+    );
+
+    // Verify delta render matches compositor state
+    let render_output = compositor.render_to_vec();
+    let mut replay_emulator = emulator::TerminalEmulator::new(80, 24);
+    replay_emulator.process(&render_output);
+
+    let _compositor_lines = compositor.get_text_lines();
+    let replay_lines: Vec<String> = (0..24)
+        .map(|y| replay_emulator.grid().get_line_text(y))
+        .collect();
+
+    // At least check that some emoji made it through
+    let replay_text: String = replay_lines.join("\n");
+    assert!(
+        replay_text.contains("😀") || replay_text.contains("👍") || replay_text.contains("🔴"),
+        "Replay should contain at least some emoji. Got:\n{}",
+        replay_text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+/// Test unicode rendering with bash subprocess in a horizontal split.
+///
+/// This test uses the bash subprocess (not the embedded shell) to print
+/// unicode characters, which tests the terminal emulation and incremental
+/// rendering path without going through the embedded shell's input handling.
+///
+/// The user reported that Ctrl+B r (force redraw) clears rendering artifacts,
+/// which suggests the terminal emulation is correct but incremental drawing
+/// to the real terminal has issues with unicode character widths.
+#[test]
+fn test_hsplit_unicode_via_bash() -> Result<(), CompositorError> {
+    // Use bash subprocess instead of embedded shell
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    // Set fixed time to avoid fixture churn
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Wait for bash to initialize
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+
+    // Wait for the new pane's bash to start
+    wait_for_output(&mut compositor, 500);
+
+    // Switch to top pane
+    compositor.handle_input(&[0x0b]); // Ctrl+k
+
+    // Use printf to output unicode via bash - this bypasses the embedded shell's
+    // input handling and tests pure terminal emulation
+    compositor.handle_input(b"printf '\\xe4\\xb8\\xad\\xe6\\x96\\x87\\n'\n");  // 中文 in UTF-8
+    wait_for_output(&mut compositor, 300);
+
+    // Also print some box drawing and symbols
+    compositor.handle_input(b"printf '\\xe2\\x94\\x8c\\xe2\\x94\\x80\\xe2\\x94\\x90\\n'\n");  // ┌─┐
+    wait_for_output(&mut compositor, 300);
+
+    // Get compositor state after incremental rendering
+    compositor.render_to_vec();
+    let compositor_lines = compositor.get_text_lines();
+    let compositor_text = compositor_lines.join("\n");
+
+    // The compositor should contain the CJK characters
+    assert!(
+        compositor_text.contains("中文"),
+        "Compositor should contain CJK '中文' from bash printf. Got:\n{}",
+        compositor_text
+    );
+
+    // Now test the delta rendering by replaying to a fresh emulator
+    let render_output = compositor.render_to_vec();
+    let mut replay_emulator = emulator::TerminalEmulator::new(80, 24);
+    replay_emulator.process(&render_output);
+
+    let replay_lines: Vec<String> = (0..24)
+        .map(|y| replay_emulator.grid().get_line_text(y))
+        .collect();
+    let replay_text = replay_lines.join("\n");
+
+    // Replay should also contain the CJK characters
+    assert!(
+        replay_text.contains("中文"),
+        "Replay should contain CJK '中文'.\nReplay:\n{}\nCompositor:\n{}",
+        replay_text,
+        compositor_text
+    );
+
+    // Box drawing should also work
+    assert!(
+        replay_text.contains("┌") || compositor_text.contains("┌"),
+        "Should contain box drawing character.\nReplay:\n{}\nCompositor:\n{}",
+        replay_text,
+        compositor_text
+    );
+
+    Ok(())
+}
+
+/// Test that dense wide characters in vertical split don't cause rendering artifacts.
+///
+/// Vertical splits are especially prone to issues because:
+/// 1. Panes are side-by-side with precise column boundaries
+/// 2. Wide characters (2 columns) can extend past the expected column
+/// 3. The border between panes must be drawn precisely
+#[test]
+fn test_vsplit_dense_unicode_via_bash() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.set_fixed_time(fixed_test_time());
+    wait_for_output(&mut compositor, 500);
+
+    // Create vertical split
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'%']); // %
+
+    wait_for_output(&mut compositor, 500);
+
+    // Switch to left pane
+    compositor.handle_input(&[0x08]); // Ctrl+h
+
+    // Print a line of CJK characters near the border
+    // In a 80-column terminal split vertically, each pane is ~39 columns
+    // 15 CJK chars = 30 columns, should fit but tests width calculation
+    compositor.handle_input(b"printf '\\xe6\\x97\\xa5\\xe6\\x9c\\xac\\xe8\\xaa\\x9e\\xe4\\xb8\\xad\\xe5\\x9b\\xbd\\xe8\\xaa\\x9e\\xe9\\x9f\\x93\\xe5\\x9b\\xbd\\xe8\\xaa\\x9e\\n'\n");  // 日本語中国語韓国語
+    wait_for_output(&mut compositor, 300);
+
+    compositor.render_to_vec();
+    let compositor_lines = compositor.get_text_lines();
+    let compositor_text = compositor_lines.join("\n");
+
+    // Verify CJK rendered in left pane
+    assert!(
+        compositor_text.contains("日本語") || compositor_text.contains("中国語"),
+        "Left pane should contain CJK. Got:\n{}",
+        compositor_text
+    );
+
+    // Switch to right pane and print different content
+    compositor.handle_input(&[0x0c]); // Ctrl+l
+    compositor.handle_input(b"printf 'RIGHT_PANE\\n'\n");
+    wait_for_output(&mut compositor, 300);
+
+    compositor.render_to_vec();
+    let compositor_lines = compositor.get_text_lines();
+    let compositor_text = compositor_lines.join("\n");
+
+    // Both panes should show their content
+    assert!(
+        compositor_text.contains("RIGHT_PANE"),
+        "Right pane should contain marker. Got:\n{}",
+        compositor_text
+    );
+
+    // Test incremental vs full redraw
+    let incremental_lines = compositor.get_text_lines();
+    let incremental_text = incremental_lines.join("\n");
+
+    compositor.force_full_redraw();
+
+    let full_redraw_lines = compositor.get_text_lines();
+    let full_redraw_text = full_redraw_lines.join("\n");
+
+    // Content should be identical after both render methods
+    assert_eq!(
+        incremental_text, full_redraw_text,
+        "Incremental and full redraw should match.\nIncremental:\n{}\n\nFull:\n{}",
+        incremental_text, full_redraw_text
+    );
+
+    Ok(())
+}
+
+/// Test vim Ctrl+D scroll behavior in a split.
+///
+/// This tests that after opening vim and pressing Ctrl+D (scroll down half page),
+/// the terminal state is rendered correctly without corruption.
+///
+/// There's a known bug where the status line gets corrupted after Ctrl+D,
+/// showing something like: `#[cfg(test)]im/fixtures/test_code.rs" 84L, 2343B`
+/// which is a mix of file content and vim's status line.
+#[test]
+fn test_vim_ctrl_d_scroll() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.set_fixed_time(fixed_test_time());
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+    wait_for_output(&mut compositor, 500);
+
+    // Get absolute path to the test file using workspace root
+    // CARGO_MANIFEST_DIR points to crates/compositor, go up to workspace root
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = std::path::Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+    let test_file = workspace_root.join("crates/libvim/fixtures/test_code.rs");
+    
+    // Open vim on the test file
+    let vim_cmd = format!("vim {}\n", test_file.display());
+    compositor.handle_input(vim_cmd.as_bytes());
+    wait_for_output(&mut compositor, 1000);
+
+    // Get initial state before Ctrl+D
+    compositor.render_to_vec();
+    let initial_lines = compositor.get_text_lines();
+    let initial_text = initial_lines.join("\n");
+
+    // Verify vim opened the file (should see file content)
+    assert!(
+        initial_text.contains("emit_charset_designation") || initial_text.contains("fn "),
+        "Vim should display file content. Got:\n{}",
+        initial_text
+    );
+
+    // Press Ctrl+D to scroll down half a page
+    compositor.handle_input(&[0x04]); // Ctrl+D
+    wait_for_output(&mut compositor, 500);
+
+    // Render and capture state
+    compositor.render_to_vec();
+    let after_ctrl_d_lines = compositor.get_text_lines();
+    save_fixture("vim_ctrl_d_fixture.txt", &after_ctrl_d_lines);
+
+    let after_ctrl_d_text = after_ctrl_d_lines.join("\n");
+
+    // Look for corruption patterns: file content mixed with status line
+    // The corrupted line might look like:
+    // - `#[cfg(test)]im/fixtures/test_code.rs" 84L, 2343B`
+    // - `<ocuments/code/shell/crates/libvim/fixtures/test_code.rs" 84L, 2343B`
+    // - Other patterns where vim status line gets mixed with code
+    let has_corruption = after_ctrl_d_text.contains("#[cfg(test)]im/fixtures")
+        || after_ctrl_d_text.contains("]im/fixtures/test_code.rs")
+        || after_ctrl_d_text.contains("<ocuments/code")
+        || after_ctrl_d_text.contains("cuments/code/shell");
+
+    // For now, just document the corruption - this test demonstrates the bug
+    if has_corruption {
+        eprintln!("DETECTED CORRUPTION: Status line mixed with file content");
+        eprintln!("Output:\n{}", after_ctrl_d_text);
+    }
+
+    // The status line should NOT contain file content mixed in
+    // This assertion will fail if the bug exists
+    assert!(
+        !has_corruption,
+        "Status line should not be corrupted with file content. Got:\n{}",
+        after_ctrl_d_text
+    );
+
+    // Quit vim
+    compositor.handle_input(b":q!\n");
+    wait_for_output(&mut compositor, 300);
+
+    Ok(())
+}
+
+/// Test that unicode characters are properly cleared from the terminal.
+///
+/// This test demonstrates a bug where delta rendering fails to properly clear
+/// wide unicode characters. After echoing CJK text, typing more text, and
+/// running `clear`, the screen should be blank but unicode artifacts remain.
+#[test]
+fn test_unicode_clear_bug() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.set_fixed_time(fixed_test_time());
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+    wait_for_output(&mut compositor, 500);
+
+    // Echo a string with lots of CJK characters (each is 2 columns wide)
+    compositor.handle_input(b"echo '\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe6\xbc\xa2\xe5\xad\x97\xe4\xb8\xad\xe5\x9b\xbd\xe8\xaa\x9e\xe9\x9f\x93\xe5\x9b\xbd\xe8\xaa\x9e\xe5\x8f\xb0\xe6\xb9\xbe\xe8\xaa\x9e\xe9\xa6\x99\xe6\xb8\xaf\xe8\xaa\x9e\xe6\x96\xb0\xe5\x8a\xa0\xe5\x9d\xa1\xe8\xaa\x9e\xe9\xa6\xac\xe4\xbe\x86\xe8\xa5\xbf\xe4\xba\x9e'\n");
+    // This is: 日本語漢字中国語韓国語台湾語香港語新加坡語馬來西亞
+    wait_for_output(&mut compositor, 500);
+
+    // Render after echo
+    compositor.render_to_vec();
+    let after_echo_lines = compositor.get_text_lines();
+    let after_echo_text = after_echo_lines.join("\n");
+
+    // Verify the CJK text appeared
+    assert!(
+        after_echo_text.contains("日本語") || after_echo_text.contains("中国語"),
+        "Should contain CJK text after echo. Got:\n{}",
+        after_echo_text
+    );
+
+    // Type hello world and press enter
+    compositor.handle_input(b"hello world\n");
+    wait_for_output(&mut compositor, 300);
+
+    // Render and snapshot the "garbled" state
+    compositor.render_to_vec();
+    let garbled_lines = compositor.get_text_lines();
+    save_fixture("unicode_clear_before.txt", &garbled_lines);
+
+    // Now run clear to clear the screen
+    compositor.handle_input(b"clear\n");
+    wait_for_output(&mut compositor, 500);
+
+    // Render after clear
+    compositor.render_to_vec();
+    let after_clear_lines = compositor.get_text_lines();
+    save_fixture("unicode_clear_after.txt", &after_clear_lines);
+
+    let after_clear_text = after_clear_lines.join("\n");
+
+    // The screen should NOT contain any CJK characters after clear
+    let has_cjk_artifacts = after_clear_text.contains("日")
+        || after_clear_text.contains("本")
+        || after_clear_text.contains("語")
+        || after_clear_text.contains("漢")
+        || after_clear_text.contains("中")
+        || after_clear_text.contains("国");
+
+    if has_cjk_artifacts {
+        eprintln!("DETECTED UNICODE CLEAR BUG: CJK characters remain after clear");
+        eprintln!("After clear:\n{}", after_clear_text);
+    }
+
+    // This assertion will fail if the bug exists
+    assert!(
+        !has_cjk_artifacts,
+        "Screen should be clear of CJK characters after `clear`. Got:\n{}",
+        after_clear_text
+    );
+
+    Ok(())
+}
+
+/// Test that delta rendering properly clears unicode characters.
+///
+/// This test uses bash subprocess to echo unicode characters, then runs `clear`
+/// to clear the screen, verifying that no unicode artifacts remain.
+#[test]
+fn test_unicode_delta_clear() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Wait for bash to start
+    wait_for_output(&mut compositor, 500);
+
+    // Create horizontal split
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+    wait_for_output(&mut compositor, 500);
+
+    // Echo CJK characters using printf (bash)
+    compositor.handle_input(b"printf '\\xe6\\x97\\xa5\\xe6\\x9c\\xac\\xe8\\xaa\\x9e\\xe6\\xbc\\xa2\\xe5\\xad\\x97\\xe4\\xb8\\xad\\xe5\\x9b\\xbd\\xe8\\xaa\\x9e\\n'\n");
+    wait_for_output(&mut compositor, 500);
+
+    compositor.render_to_vec();
+    let after_echo_lines = compositor.get_text_lines();
+    let after_echo_text = after_echo_lines.join("\n");
+    save_fixture("unicode_delta_after_echo.txt", &after_echo_lines);
+
+    // Verify CJK appeared
+    assert!(
+        after_echo_text.contains("日本語") || after_echo_text.contains("中国語"),
+        "Should contain CJK after printf. Got:\n{}",
+        after_echo_text
+    );
+
+    // Type hello world
+    compositor.handle_input(b"echo 'hello world'\n");
+    wait_for_output(&mut compositor, 300);
+
+    compositor.render_to_vec();
+    let after_hello_lines = compositor.get_text_lines();
+    save_fixture("unicode_delta_after_hello.txt", &after_hello_lines);
+
+    // Run clear command
+    compositor.handle_input(b"clear\n");
+    wait_for_output(&mut compositor, 500);
+
+    compositor.render_to_vec();
+    let after_clear_lines = compositor.get_text_lines();
+    save_fixture("unicode_delta_after_clear.txt", &after_clear_lines);
+
+    let after_clear_text = after_clear_lines.join("\n");
+
+    // Check for CJK artifacts
+    let has_cjk = after_clear_text.contains("日")
+        || after_clear_text.contains("本")
+        || after_clear_text.contains("語")
+        || after_clear_text.contains("漢")
+        || after_clear_text.contains("中")
+        || after_clear_text.contains("国");
+
+    if has_cjk {
+        eprintln!("DETECTED UNICODE DELTA CLEAR BUG");
+        eprintln!("After clear:\n{}", after_clear_text);
+    }
+
+    assert!(
+        !has_cjk,
+        "Screen should be clear after `clear` command. Got:\n{}",
+        after_clear_text
+    );
+
+    // Test what the delta renderer produces
+    // Create a fresh emulator and apply the delta
+    let delta = compositor.render_to_vec();
+    let mut replay_emulator = emulator::TerminalEmulator::new(80, 24);
+    replay_emulator.process(&delta);
+
+    let replay_lines: Vec<String> = (0..24)
+        .map(|y| replay_emulator.grid().get_line_text(y))
+        .collect();
+    let replay_text = replay_lines.join("\n");
+
+    let replay_has_cjk = replay_text.contains("日")
+        || replay_text.contains("本")
+        || replay_text.contains("語");
+
+    assert!(
+        !replay_has_cjk,
+        "Replay of delta should not contain CJK after clear. Got:\n{}",
+        replay_text
+    );
+
+    Ok(())
+}
+
+/// Test that delta rendering properly clears wide unicode characters.
+///
+/// This is a unit test for the delta rendering logic. When we transition from
+/// a grid with wide characters to a grid with spaces, the delta must output
+/// enough spaces to cover the full width of the previous characters.
+#[test]
+fn test_delta_render_clears_wide_chars() {
+    // Create an emulator and write some wide CJK characters
+    let mut emu_with_cjk = emulator::TerminalEmulator::new(80, 24);
+    // Write CJK characters - each is 2 columns wide
+    emu_with_cjk.process("日本語中国語".as_bytes());
+    
+    // Create a blank emulator (simulating cleared screen)
+    let blank_emu = emulator::TerminalEmulator::new(80, 24);
+    
+    // Compute delta from CJK grid to blank grid
+    let delta = emulator::compute_delta(emu_with_cjk.grid(), blank_emu.grid());
+    
+    // Apply the delta to the CJK emulator
+    emu_with_cjk.process(&delta);
+    
+    // Get the text from the first line
+    let line_text = emu_with_cjk.grid().get_line_text(0);
+    
+    // The line should be blank (no CJK characters)
+    let has_cjk = line_text.contains("日") 
+        || line_text.contains("本")
+        || line_text.contains("語")
+        || line_text.contains("中")
+        || line_text.contains("国");
+    
+    assert!(
+        !has_cjk,
+        "After applying delta to blank, line should not contain CJK. Got: '{}'",
+        line_text
+    );
+    
+    // The line should be all spaces or empty
+    assert!(
+        line_text.trim().is_empty(),
+        "Line should be blank after clearing. Got: '{}'",
+        line_text
+    );
+}
+
+/// Test delta rendering with a more complex scenario: wide chars followed by narrow.
+#[test]
+fn test_delta_render_wide_to_narrow() {
+    // Emulator with wide CJK characters
+    let mut emu1 = emulator::TerminalEmulator::new(80, 24);
+    emu1.process("日本語中".as_bytes()); // 4 chars = 8 columns
+    
+    // Emulator with narrow ASCII characters
+    let mut emu2 = emulator::TerminalEmulator::new(80, 24);
+    emu2.process(b"ABCDEFGH"); // 8 chars = 8 columns
+    
+    // Compute delta
+    let delta = emulator::compute_delta(emu1.grid(), emu2.grid());
+    
+    // Apply delta to emu1
+    emu1.process(&delta);
+    
+    // Get the text
+    let line_text = emu1.grid().get_line_text(0);
+    
+    // Should contain the ASCII text, not CJK
+    assert!(
+        line_text.starts_with("ABCDEFGH"),
+        "Should contain 'ABCDEFGH' after delta. Got: '{}'",
+        line_text
+    );
+    
+    // Should NOT contain any CJK
+    let has_cjk = line_text.contains("日") || line_text.contains("本");
+    assert!(
+        !has_cjk,
+        "Should not contain CJK after replacing with ASCII. Got: '{}'",
+        line_text
+    );
+}
+
+/// Test that replacing wide chars with narrow chars at same position works correctly.
+#[test]
+fn test_delta_overwrite_wide_char() {
+    // Emulator with a wide character at position 0
+    let mut emu1 = emulator::TerminalEmulator::new(80, 24);
+    emu1.process("日".as_bytes()); // 1 wide char = 2 columns
+    
+    // Emulator with two narrow characters at positions 0 and 1
+    let mut emu2 = emulator::TerminalEmulator::new(80, 24);
+    emu2.process(b"AB"); // 2 chars = 2 columns
+    
+    // Compute delta
+    let delta = emulator::compute_delta(emu1.grid(), emu2.grid());
+    
+    // Apply delta to emu1
+    emu1.process(&delta);
+    
+    // Get cell contents
+    let cell0 = emu1.grid().get_cell(0, 0).character;
+    let cell1 = emu1.grid().get_cell(1, 0).character;
+    
+    // Both cells should now be A and B
+    assert_eq!(cell0, 'A', "Cell 0 should be 'A', got '{}'", cell0);
+    assert_eq!(cell1, 'B', "Cell 1 should be 'B', got '{}'", cell1);
+}
+
+/// Test that Ctrl+W (delete word backward) works correctly with unicode characters.
+///
+/// This test reproduces a crash where:
+/// 1. Type `echo 日本語漢字`
+/// 2. Press Ctrl+E (move to end of line)
+/// 3. Press Ctrl+W (delete word backward)
+/// The shell should not crash when deleting unicode words.
+#[test]
+fn test_ctrl_w_unicode_crash() -> Result<(), CompositorError> {
+    use std::sync::Arc;
+
+    let unique_id = format!(
+        "{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let temp_dir = std::env::temp_dir().join(format!("shell_test_ctrlw_unicode_{}", unique_id));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let history_path = temp_dir.join("test_history.log");
+
+    let core = Arc::new(
+        libshell::ShellCore::with_history_path(history_path.clone())
+            .expect("Failed to create ShellCore"),
+    );
+
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), core)?;
+    compositor.set_fixed_time(fixed_test_time());
+
+    // Initial render
+    compositor.render_to_vec();
+
+    // Create horizontal split
+    compositor.handle_input(&[0x02]); // Ctrl+b
+    compositor.handle_input(&[b'"']); // "
+    compositor.render_to_vec();
+
+    // Type echo with CJK characters
+    compositor.handle_input("echo 日本語漢字".as_bytes());
+    compositor.render_to_vec();
+
+    let before_lines = compositor.get_text_lines();
+    let before_text = before_lines.join("\n");
+
+    // Verify the CJK text was typed
+    assert!(
+        before_text.contains("日本語漢字"),
+        "Should contain CJK text before Ctrl+W. Got:\n{}",
+        before_text
+    );
+
+    // Press Ctrl+E to move to end of line
+    compositor.handle_input(&[0x05]); // Ctrl+E
+    compositor.render_to_vec();
+
+    // Press Ctrl+W to delete word backward - this should NOT crash
+    compositor.handle_input(&[0x17]); // Ctrl+W
+    compositor.render_to_vec();
+
+    let after_lines = compositor.get_text_lines();
+    let after_text = after_lines.join("\n");
+
+    // After Ctrl+W, the CJK word should be deleted
+    // The line should now just show "echo " or similar
+    assert!(
+        !after_text.contains("日本語漢字"),
+        "CJK text should be deleted after Ctrl+W. Got:\n{}",
+        after_text
+    );
+
+    // "echo " should still be present
+    assert!(
+        after_text.contains("echo"),
+        "'echo' should still be present after Ctrl+W. Got:\n{}",
+        after_text
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&history_path);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(())
+}
+
+/// Test that clearing wide CJK characters works correctly with delta rendering.
+///
+/// This reproduces the bug where after running `clear`, only half of each CJK
+/// character is cleared because the delta renderer was not accounting for
+/// wide character widths.
+#[test]
+fn test_wide_char_clear_delta() {
+    // Create an emulator and write CJK characters
+    let mut emu = emulator::TerminalEmulator::new(80, 24);
+    // Write a line of CJK characters (each is 2 columns wide)
+    emu.process("日本語漢字中国語\n".as_bytes());
+    
+    // Now create a "cleared" state - all spaces
+    let cleared = emulator::TerminalEmulator::new(80, 24);
+    
+    // Compute the delta from CJK-filled to cleared
+    let delta = emulator::compute_delta(emu.grid(), cleared.grid());
+    
+    // Apply the delta to the CJK emulator
+    emu.process(&delta);
+    
+    // Get the first line's text
+    let line0 = emu.grid().get_line_text(0);
+    let line1 = emu.grid().get_line_text(1);
+    
+    // Both lines should be blank - no CJK remnants
+    let has_cjk_line0 = line0.contains("日") || line0.contains("本") || line0.contains("語");
+    let has_cjk_line1 = line1.contains("日") || line1.contains("本") || line1.contains("語");
+    
+    assert!(
+        !has_cjk_line0,
+        "Line 0 should be cleared of CJK. Got: '{}'",
+        line0
+    );
+    
+    assert!(
+        !has_cjk_line1,
+        "Line 1 should be cleared of CJK. Got: '{}'",
+        line1
+    );
+    
+    // All cells in the first row should be spaces
+    for x in 0..20 {
+        let cell = emu.grid().get_cell(x, 0);
+        assert_eq!(
+            cell.character, ' ',
+            "Cell at ({}, 0) should be space, got '{}'",
+            x, cell.character
+        );
+    }
+}

@@ -18,7 +18,7 @@ fn emit_charset_designation(output: &mut Vec<u8>, g: u8, charset: crate::grid::C
 
     output.push(0x1b);
     output.push(designator);
-    output.push(charset_char);
+    output.push(charset_ctar);
 }
 
 #[cfg(test)]
@@ -69,7 +69,8 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_visibility() { // `Special comment 7 with backticks`
+    fn test_cursor_visibility() {
+        // `Special comment 7 with backticks`
         let grid1 = TerminalGrid::new(80, 24);
         let mut grid2 = TerminalGrid::new(80, 24);
 

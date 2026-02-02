@@ -5,6 +5,7 @@
 
 use crate::cell::{Cell, CellAttributes, Color};
 use crate::grid::TerminalGrid;
+use unicode_width::UnicodeWidthChar;
 
 /// Compute the minimal sequence of terminal commands to transition from `prev` to `next`.
 ///
@@ -28,17 +29,44 @@ pub fn compute_delta(prev: &TerminalGrid, next: &TerminalGrid) -> Vec<u8> {
         // Track if we have pending changes on this line
         let mut line_start: Option<usize> = None;
         let mut pending_cells: Vec<&Cell> = Vec::new();
+        let mut skip_next = false;
 
         for x in 0..cols {
+            // If we marked the previous iteration to skip this cell (because it's the
+            // second half of a wide character we already handled), skip it
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+
             let prev_cell = prev.get_cell(x, y);
             let next_cell = next.get_cell(x, y);
 
-            if prev_cell != next_cell {
+            // Check if previous cell was a wide character
+            let prev_width = prev_cell.character.width().unwrap_or(1);
+            let next_width = next_cell.character.width().unwrap_or(1);
+
+            // Cell needs update if content differs
+            let needs_update = prev_cell != next_cell;
+            
+            // Also need to update if a wide char is being replaced by narrow
+            // (to clear the second column) or vice versa
+            let width_changed = prev_width != next_width;
+
+            if needs_update || width_changed {
                 // Cell differs - we need to update it
                 if line_start.is_none() {
                     line_start = Some(x);
                 }
                 pending_cells.push(next_cell);
+
+                // If we're replacing a wide char with something narrower,
+                // we need to also include the next cell to clear the second half
+                if prev_width == 2 && next_width == 1 && x + 1 < cols {
+                    // Also add the next cell (which should be a space to clear the 2nd half)
+                    pending_cells.push(next.get_cell(x + 1, y));
+                    skip_next = true;
+                }
             } else if !pending_cells.is_empty() {
                 // Cell is same but we have pending changes - flush them
                 emit_cell_batch(
@@ -195,7 +223,11 @@ fn emit_cell_batch(
         let mut buf = [0u8; 4];
         let s = cell.character.encode_utf8(&mut buf);
         output.extend_from_slice(s.as_bytes());
-        *cursor_x += 1;
+        
+        // Advance cursor by the character's display width
+        // Wide characters (CJK, emoji, etc.) are 2 columns wide
+        let char_width = cell.character.width().unwrap_or(1);
+        *cursor_x += char_width;
 
         // Re-enable autowrap if we disabled it
         if is_last_cell && autowrap {

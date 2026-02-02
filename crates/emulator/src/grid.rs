@@ -694,26 +694,42 @@ impl TerminalGrid {
         }
     }
 
-    /// Insert n blank lines at cursor, scrolling down
+    /// Insert n blank lines at cursor, scrolling down within scroll region
     pub fn insert_lines(&mut self, n: usize) {
+        // IL only works if cursor is within the scroll region
+        if self.cursor_y < self.scroll_top || self.cursor_y > self.scroll_bottom {
+            return;
+        }
+
         for _ in 0..n {
-            if self.cursor_y < self.rows {
-                self.cells.remove(self.rows - 1);
-                self.cells.insert(
-                    self.cursor_y,
-                    (0..self.cols).map(|_| Cell::empty()).collect(),
-                );
+            // Remove the line at the bottom of the scroll region
+            if self.scroll_bottom < self.cells.len() {
+                self.cells.remove(self.scroll_bottom);
             }
+            // Insert a new empty line at the cursor position
+            self.cells.insert(
+                self.cursor_y,
+                (0..self.cols).map(|_| Cell::empty()).collect(),
+            );
         }
     }
 
-    /// Delete n lines at cursor, scrolling up
+    /// Delete n lines at cursor, scrolling up within scroll region
     pub fn delete_lines(&mut self, n: usize) {
+        // DL only works if cursor is within the scroll region
+        if self.cursor_y < self.scroll_top || self.cursor_y > self.scroll_bottom {
+            return;
+        }
+
         for _ in 0..n {
-            if self.cursor_y < self.rows {
+            // Remove the line at the cursor position
+            if self.cursor_y < self.cells.len() {
                 self.cells.remove(self.cursor_y);
-                self.cells
-                    .push((0..self.cols).map(|_| Cell::empty()).collect());
+                // Insert a new empty line at the bottom of the scroll region
+                self.cells.insert(
+                    self.scroll_bottom,
+                    (0..self.cols).map(|_| Cell::empty()).collect(),
+                );
             }
         }
     }

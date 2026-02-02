@@ -404,6 +404,9 @@ pub struct Shell {
 
     /// Whether we're waiting for CTRL+E after CTRL+X (for edit-in-editor)
     waiting_for_ctrl_x_combo: bool,
+
+    /// Buffer for accumulating UTF-8 multi-byte sequences
+    utf8_buffer: Vec<u8>,
 }
 
 impl Shell {
@@ -457,6 +460,8 @@ impl Shell {
             syntax_handler: syntax::SyntaxHandler::new(),
             // CTRL+X combo state
             waiting_for_ctrl_x_combo: false,
+            // UTF-8 multi-byte sequence buffer
+            utf8_buffer: Vec::new(),
         };
 
         let prompt = shell.get_prompt();
@@ -624,7 +629,7 @@ impl Shell {
                 // Trim trailing newlines that editors typically add
                 let content = content.trim_end_matches('\n').trim_end_matches('\r');
                 self.input_buffer = content.to_string();
-                self.cursor_pos = self.input_buffer.len();
+                self.cursor_pos = self.input_buffer.chars().count();
             }
             Err(e) => {
                 eprintln!("Warning: failed to read temp file: {}", e);
@@ -779,7 +784,7 @@ impl Shell {
                     // Remove the trailing backslash and add a newline to the input buffer
                     self.input_buffer.pop();
                     self.input_buffer.push('\n');
-                    self.cursor_pos = self.input_buffer.len();
+                    self.cursor_pos = self.input_buffer.chars().count();
                     
                     // Move to next line and show continuation prompt
                     let mut output = vec![b'\r', b'\n'];
@@ -797,7 +802,14 @@ impl Shell {
                     let old_pos = self.cursor_pos;
                     let char_to_delete = self.input_buffer.chars().nth(self.cursor_pos - 1);
                     self.cursor_pos -= 1;
-                    self.input_buffer.remove(self.cursor_pos);
+                    // cursor_pos is a character index, convert to byte offset for remove
+                    let byte_pos = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(self.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input_buffer.len());
+                    self.input_buffer.remove(byte_pos);
 
                     // Check if we deleted a newline - need special handling
                     if char_to_delete == Some('\n') {
@@ -840,7 +852,8 @@ impl Shell {
                 let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
                 output.extend(highlighted.as_bytes());
                 // Position cursor correctly
-                let move_back = self.input_buffer.len() - self.cursor_pos;
+                let char_count = self.input_buffer.chars().count();
+                let move_back = char_count - self.cursor_pos;
                 if move_back > 0 {
                     output.extend(format!("\x1b[{}D", move_back).as_bytes());
                 }
@@ -863,18 +876,96 @@ impl Shell {
             0x15 => self.kill_to_beginning(),
             // Tab - completion
             0x09 => self.handle_tab_completion(),
-            // Regular printable character
+            // Regular printable ASCII character
             0x20..=0x7e => {
                 let old_pos = self.cursor_pos;
-                self.input_buffer.insert(self.cursor_pos, byte as char);
+                // cursor_pos is a character index, convert to byte offset
+                let byte_pos = self
+                    .input_buffer
+                    .char_indices()
+                    .nth(self.cursor_pos)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.input_buffer.len());
+                self.input_buffer.insert(byte_pos, byte as char);
                 self.cursor_pos += 1;
 
                 // Re-render the entire line with syntax highlighting
                 // Use old_pos since terminal cursor hasn't moved yet
                 Some(self.render_highlighted_input_from(old_pos))
             }
-            // TODO: Handle escape sequences for arrow keys, etc.
+            // UTF-8 multi-byte sequence handling
+            // UTF-8 leading bytes: 0xC0-0xDF (2-byte), 0xE0-0xEF (3-byte), 0xF0-0xF7 (4-byte)
+            // UTF-8 continuation bytes: 0x80-0xBF
+            0x80..=0xBF => {
+                // Continuation byte - add to buffer if we're accumulating
+                if !self.utf8_buffer.is_empty() {
+                    self.utf8_buffer.push(byte);
+                    self.try_complete_utf8_char()
+                } else {
+                    // Stray continuation byte, ignore
+                    None
+                }
+            }
+            0xC0..=0xF7 => {
+                // Leading byte of a multi-byte sequence
+                self.utf8_buffer.clear();
+                self.utf8_buffer.push(byte);
+                self.try_complete_utf8_char()
+            }
+            // Invalid UTF-8 bytes or other control characters
             _ => None,
+        }
+    }
+
+    /// Try to complete a UTF-8 character from the buffer.
+    /// Returns Some(output) if a complete character was formed, None if more bytes needed.
+    fn try_complete_utf8_char(&mut self) -> Option<Vec<u8>> {
+        if self.utf8_buffer.is_empty() {
+            return None;
+        }
+
+        // Determine expected length from first byte
+        let first = self.utf8_buffer[0];
+        let expected_len = if first & 0b1111_1000 == 0b1111_0000 {
+            4 // 4-byte sequence (0xF0-0xF7)
+        } else if first & 0b1111_0000 == 0b1110_0000 {
+            3 // 3-byte sequence (0xE0-0xEF)
+        } else if first & 0b1110_0000 == 0b1100_0000 {
+            2 // 2-byte sequence (0xC0-0xDF)
+        } else {
+            // Invalid leading byte, clear buffer
+            self.utf8_buffer.clear();
+            return None;
+        };
+
+        if self.utf8_buffer.len() < expected_len {
+            // Need more bytes
+            return None;
+        }
+
+        // We have enough bytes, try to decode
+        let bytes: Vec<u8> = self.utf8_buffer.drain(..).collect();
+        match std::str::from_utf8(&bytes) {
+            Ok(s) => {
+                // Valid UTF-8 - insert the character(s)
+                let old_pos = self.cursor_pos;
+                for c in s.chars() {
+                    // cursor_pos is a character index, need to find byte offset
+                    let byte_pos = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(self.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input_buffer.len());
+                    self.input_buffer.insert(byte_pos, c);
+                    self.cursor_pos += 1;
+                }
+                Some(self.render_highlighted_input_from(old_pos))
+            }
+            Err(_) => {
+                // Invalid UTF-8, discard
+                None
+            }
         }
     }
 
@@ -1032,7 +1123,7 @@ impl Shell {
         
         // Update state first
         self.input_buffer = new_content.to_string();
-        self.cursor_pos = self.input_buffer.len();
+        self.cursor_pos = self.input_buffer.chars().count();
 
         // Re-render with syntax highlighting
         // Terminal cursor was at old_pos before this operation
@@ -1041,7 +1132,8 @@ impl Shell {
 
     /// Move cursor right
     fn cursor_right(&mut self) -> Option<Vec<u8>> {
-        if self.cursor_pos < self.input_buffer.len() {
+        let char_count = self.input_buffer.chars().count();
+        if self.cursor_pos < char_count {
             self.cursor_pos += 1;
             Some(b"\x1b[C".to_vec())
         } else {
@@ -1072,10 +1164,11 @@ impl Shell {
 
     /// Move cursor to end of line
     fn cursor_end(&mut self) -> Option<Vec<u8>> {
-        let remaining = self.input_buffer.len() - self.cursor_pos;
+        let char_count = self.input_buffer.chars().count();
+        let remaining = char_count - self.cursor_pos;
         if remaining > 0 {
             let output = format!("\x1b[{}C", remaining).into_bytes();
-            self.cursor_pos = self.input_buffer.len();
+            self.cursor_pos = char_count;
             Some(output)
         } else {
             None
@@ -1241,7 +1334,8 @@ impl Shell {
             output.extend(highlighted.as_bytes());
 
             // Move cursor back to correct position
-            let move_back = self.input_buffer.len() - self.cursor_pos;
+            let char_count = self.input_buffer.chars().count();
+            let move_back = char_count - self.cursor_pos;
             if move_back > 0 {
                 output.extend(format!("\x1b[{}D", move_back).as_bytes());
             }
@@ -1350,7 +1444,20 @@ impl Shell {
         }
 
         if new_pos < self.cursor_pos {
-            self.input_buffer.drain(new_pos..self.cursor_pos);
+            // Convert character indices to byte indices for drain
+            let byte_start = self
+                .input_buffer
+                .char_indices()
+                .nth(new_pos)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let byte_end = self
+                .input_buffer
+                .char_indices()
+                .nth(self.cursor_pos)
+                .map(|(i, _)| i)
+                .unwrap_or(self.input_buffer.len());
+            self.input_buffer.drain(byte_start..byte_end);
             self.cursor_pos = new_pos;
 
             // Re-render with syntax highlighting
@@ -1381,7 +1488,20 @@ impl Shell {
         }
 
         if end > start {
-            self.input_buffer.drain(start..end);
+            // Convert character indices to byte indices for drain
+            let byte_start = self
+                .input_buffer
+                .char_indices()
+                .nth(start)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let byte_end = self
+                .input_buffer
+                .char_indices()
+                .nth(end)
+                .map(|(i, _)| i)
+                .unwrap_or(self.input_buffer.len());
+            self.input_buffer.drain(byte_start..byte_end);
 
             // Re-render with syntax highlighting
             Some(self.render_highlighted_input())
@@ -1392,8 +1512,16 @@ impl Shell {
 
     /// Kill (delete) from cursor to end of line (Ctrl+K)
     fn kill_to_end(&mut self) -> Option<Vec<u8>> {
-        if self.cursor_pos < self.input_buffer.len() {
-            self.input_buffer.truncate(self.cursor_pos);
+        let char_count = self.input_buffer.chars().count();
+        if self.cursor_pos < char_count {
+            // Find byte position from character position
+            let byte_pos = self
+                .input_buffer
+                .char_indices()
+                .nth(self.cursor_pos)
+                .map(|(i, _)| i)
+                .unwrap_or(self.input_buffer.len());
+            self.input_buffer.truncate(byte_pos);
             Some(b"\x1b[K".to_vec()) // Clear to end of line
         } else {
             None
@@ -1404,7 +1532,14 @@ impl Shell {
     fn kill_to_beginning(&mut self) -> Option<Vec<u8>> {
         if self.cursor_pos > 0 {
             let old_pos = self.cursor_pos;
-            self.input_buffer.drain(0..self.cursor_pos);
+            // Convert character position to byte position
+            let byte_pos = self
+                .input_buffer
+                .char_indices()
+                .nth(self.cursor_pos)
+                .map(|(i, _)| i)
+                .unwrap_or(self.input_buffer.len());
+            self.input_buffer.drain(0..byte_pos);
             self.cursor_pos = 0;
 
             // Re-render with syntax highlighting (terminal cursor was at old_pos)
@@ -1535,10 +1670,24 @@ impl Shell {
                 None => {
                     // History search: replace entire input
                     self.input_buffer = text;
-                    self.cursor_pos = self.input_buffer.len();
+                    self.cursor_pos = self.input_buffer.chars().count();
                 }
                 Some((start, end)) => {
                     // Tab/file completion: replace only the specified range
+                    // Note: start and end are character indices, convert to byte indices
+                    let byte_start = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(start)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    let byte_end = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(end)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input_buffer.len());
+                    
                     let completion_text = if needs_quoting {
                         // File finder: quote if needed, add trailing slash for dirs
                         let quoted = quote_path_if_needed(&text);
@@ -1554,8 +1703,8 @@ impl Shell {
                         // Tab completion file/command
                         format!("{} ", text)
                     };
-                    self.input_buffer.replace_range(start..end, &completion_text);
-                    self.cursor_pos = start + completion_text.len();
+                    self.input_buffer.replace_range(byte_start..byte_end, &completion_text);
+                    self.cursor_pos = start + completion_text.chars().count();
                 }
             }
         }
@@ -1662,7 +1811,7 @@ impl Shell {
             }
             // Ctrl+E - move to end of query
             0x05 => {
-                self.cursor_pos = self.input_buffer.len();
+                self.cursor_pos = self.input_buffer.chars().count();
                 Some(self.render_picker_ui())
             }
             // Ctrl+W - delete word before cursor
@@ -1678,8 +1827,20 @@ impl Shell {
                     while new_pos > 0 && !is_word_boundary(chars[new_pos - 1]) {
                         new_pos -= 1;
                     }
-                    // Remove the text
-                    self.input_buffer.drain(new_pos..self.cursor_pos);
+                    // Remove the text (convert char indices to byte indices)
+                    let byte_start = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(new_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    let byte_end = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(self.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input_buffer.len());
+                    self.input_buffer.drain(byte_start..byte_end);
                     self.cursor_pos = new_pos;
                     self.update_picker_items();
                 }
@@ -1688,7 +1849,13 @@ impl Shell {
             // Ctrl+U - kill to beginning of line
             0x15 => {
                 if self.cursor_pos > 0 {
-                    self.input_buffer.drain(0..self.cursor_pos);
+                    let byte_pos = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(self.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input_buffer.len());
+                    self.input_buffer.drain(0..byte_pos);
                     self.cursor_pos = 0;
                     self.update_picker_items();
                 }
@@ -1696,8 +1863,15 @@ impl Shell {
             }
             // Ctrl+K - kill to end of line
             0x0b => {
-                if self.cursor_pos < self.input_buffer.len() {
-                    self.input_buffer.truncate(self.cursor_pos);
+                let char_count = self.input_buffer.chars().count();
+                if self.cursor_pos < char_count {
+                    let byte_pos = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(self.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input_buffer.len());
+                    self.input_buffer.truncate(byte_pos);
                     self.update_picker_items();
                 }
                 Some(self.render_picker_ui())
@@ -1706,19 +1880,93 @@ impl Shell {
             0x7f | 0x08 => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
-                    self.input_buffer.remove(self.cursor_pos);
+                    // cursor_pos is a character index, convert to byte offset for remove
+                    let byte_pos = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(self.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input_buffer.len());
+                    self.input_buffer.remove(byte_pos);
                     self.update_picker_items();
                 }
                 Some(self.render_picker_ui())
             }
             // Regular printable character - add to query
             0x20..=0x7e => {
-                self.input_buffer.insert(self.cursor_pos, byte as char);
+                // cursor_pos is a character index, convert to byte offset
+                let byte_pos = self
+                    .input_buffer
+                    .char_indices()
+                    .nth(self.cursor_pos)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.input_buffer.len());
+                self.input_buffer.insert(byte_pos, byte as char);
                 self.cursor_pos += 1;
                 self.update_picker_items();
                 Some(self.render_picker_ui())
             }
+            // UTF-8 multi-byte sequence handling for picker mode
+            0x80..=0xBF => {
+                // Continuation byte - add to buffer if we're accumulating
+                if !self.utf8_buffer.is_empty() {
+                    self.utf8_buffer.push(byte);
+                    self.try_complete_utf8_char_picker()
+                } else {
+                    None
+                }
+            }
+            0xC0..=0xF7 => {
+                // Leading byte of a multi-byte sequence
+                self.utf8_buffer.clear();
+                self.utf8_buffer.push(byte);
+                self.try_complete_utf8_char_picker()
+            }
             _ => None,
+        }
+    }
+
+    /// Try to complete a UTF-8 character from the buffer in picker mode.
+    fn try_complete_utf8_char_picker(&mut self) -> Option<Vec<u8>> {
+        if self.utf8_buffer.is_empty() {
+            return None;
+        }
+
+        // Determine expected length from first byte
+        let first = self.utf8_buffer[0];
+        let expected_len = if first & 0b1111_1000 == 0b1111_0000 {
+            4
+        } else if first & 0b1111_0000 == 0b1110_0000 {
+            3
+        } else if first & 0b1110_0000 == 0b1100_0000 {
+            2
+        } else {
+            self.utf8_buffer.clear();
+            return None;
+        };
+
+        if self.utf8_buffer.len() < expected_len {
+            return None;
+        }
+
+        let bytes: Vec<u8> = self.utf8_buffer.drain(..).collect();
+        match std::str::from_utf8(&bytes) {
+            Ok(s) => {
+                for c in s.chars() {
+                    // cursor_pos is a character index, need to find byte offset
+                    let byte_pos = self
+                        .input_buffer
+                        .char_indices()
+                        .nth(self.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.input_buffer.len());
+                    self.input_buffer.insert(byte_pos, c);
+                    self.cursor_pos += 1;
+                }
+                self.update_picker_items();
+                Some(self.render_picker_ui())
+            }
+            Err(_) => None,
         }
     }
 
