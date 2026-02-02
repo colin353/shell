@@ -2,80 +2,282 @@
 //!
 //! This module provides a virtual terminal that can parse ANSI escape sequences
 //! and maintain a grid of cells representing the terminal display.
+//!
+//! This implementation uses alacritty_terminal as the backend for better
+//! compatibility with real-world terminal applications.
 
+mod alacritty_wrapper;
 mod cell;
 pub mod delta;
-mod grid;
-mod parser;
 
+pub use alacritty_wrapper::AlacrittyEmulator;
 pub use cell::{Cell, CellAttributes, Color, Line};
 pub use delta::compute_delta;
-pub use grid::{CharSet, TerminalGrid};
-pub use parser::AnsiParser;
 
-/// A complete terminal emulator combining parser and grid
+/// Character set designations (for compatibility)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharSet {
+    /// US ASCII (B)
+    Ascii,
+    /// UK/British (A) - # becomes £
+    Uk,
+    /// DEC Special Graphics and line drawing (0)
+    DecSpecialGraphics,
+    /// DEC Alternate character ROM standard (1)
+    DecAltRomStandard,
+    /// DEC Alternate character ROM special graphics (2)
+    DecAltRomSpecial,
+}
+
+impl Default for CharSet {
+    fn default() -> Self {
+        CharSet::Ascii
+    }
+}
+
+/// Compatibility wrapper that provides a TerminalGrid-like interface
+/// backed by alacritty_terminal.
+#[derive(Clone)]
+pub struct TerminalGrid {
+    /// Cached cells for direct access
+    cells: Vec<Vec<Cell>>,
+    pub cols: usize,
+    pub rows: usize,
+    pub cursor_x: usize,
+    pub cursor_y: usize,
+    pub current_attrs: CellAttributes,
+    pub cursor_visible: bool,
+    pub scroll_top: usize,
+    pub scroll_bottom: usize,
+    pub origin_mode: bool,
+    pub autowrap: bool,
+    pub in_alternate_screen: bool,
+    pub charset_g0: CharSet,
+    pub charset_g1: CharSet,
+    pub gl_is_g1: bool,
+}
+
+impl TerminalGrid {
+    /// Create a new empty terminal grid
+    pub fn new(cols: usize, rows: usize) -> Self {
+        let cells = (0..rows)
+            .map(|_| (0..cols).map(|_| Cell::empty()).collect())
+            .collect();
+        
+        Self {
+            cells,
+            cols,
+            rows,
+            cursor_x: 0,
+            cursor_y: 0,
+            current_attrs: CellAttributes::default(),
+            cursor_visible: true,
+            scroll_top: 0,
+            scroll_bottom: rows.saturating_sub(1),
+            origin_mode: false,
+            autowrap: true,
+            in_alternate_screen: false,
+            charset_g0: CharSet::Ascii,
+            charset_g1: CharSet::Ascii,
+            gl_is_g1: false,
+        }
+    }
+
+    /// Get a cell at the specified position
+    pub fn get_cell(&self, x: usize, y: usize) -> &Cell {
+        if y < self.cells.len() && x < self.cells[y].len() {
+            &self.cells[y][x]
+        } else {
+            static EMPTY: Cell = Cell {
+                character: ' ',
+                attrs: CellAttributes {
+                    fg_color: None,
+                    bg_color: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strikethrough: false,
+                    dim: false,
+                    inverse: false,
+                    hidden: false,
+                },
+                is_wide_char_spacer: false,
+            };
+            &EMPTY
+        }
+    }
+
+    /// Set a cell at the specified position
+    pub fn set_cell(&mut self, x: usize, y: usize, cell: Cell) {
+        if y < self.cells.len() && x < self.cells[y].len() {
+            self.cells[y][x] = cell;
+        }
+    }
+
+    /// Get text content of a line (skips wide char spacers for proper text extraction)
+    pub fn get_line_text(&self, row: usize) -> String {
+        if row >= self.rows {
+            return String::new();
+        }
+        self.cells[row]
+            .iter()
+            .filter(|c| !c.is_wide_char_spacer)
+            .map(|c| c.character)
+            .collect()
+    }
+
+    /// Resize the grid
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        // Resize rows
+        while self.cells.len() < rows {
+            self.cells.push((0..cols).map(|_| Cell::empty()).collect());
+        }
+        while self.cells.len() > rows {
+            self.cells.pop();
+        }
+        
+        // Resize columns
+        for row in &mut self.cells {
+            while row.len() < cols {
+                row.push(Cell::empty());
+            }
+            while row.len() > cols {
+                row.pop();
+            }
+        }
+        
+        self.cols = cols;
+        self.rows = rows;
+        self.scroll_bottom = rows.saturating_sub(1);
+        self.cursor_x = self.cursor_x.min(cols.saturating_sub(1));
+        self.cursor_y = self.cursor_y.min(rows.saturating_sub(1));
+    }
+
+    /// Get the grid as lines for rendering
+    pub fn to_lines(&self) -> Vec<Line> {
+        self.cells
+            .iter()
+            .map(|row| Line::Cells(row.clone()))
+            .collect()
+    }
+
+    /// Update this grid from an AlacrittyEmulator
+    pub fn update_from(&mut self, emu: &AlacrittyEmulator) {
+        let (cols, rows) = emu.dimensions();
+        if self.cols != cols || self.rows != rows {
+            self.resize(cols, rows);
+        }
+        
+        // Copy cells
+        for y in 0..rows {
+            for x in 0..cols {
+                self.cells[y][x] = emu.get_cell(x, y);
+            }
+        }
+        
+        // Copy state
+        let (cx, cy) = emu.cursor_position();
+        self.cursor_x = cx;
+        self.cursor_y = cy;
+        self.cursor_visible = emu.cursor_visible();
+        self.autowrap = emu.autowrap();
+        self.origin_mode = emu.origin_mode();
+        self.in_alternate_screen = emu.in_alternate_screen();
+        let (top, bottom) = emu.scroll_region();
+        self.scroll_top = top;
+        self.scroll_bottom = bottom;
+    }
+
+    // Scrollback methods - alacritty handles this internally, stub implementations for now
+    
+    /// Get the number of lines in the scrollback buffer
+    pub fn scrollback_len(&self) -> usize {
+        // TODO: Extract from alacritty's history
+        0
+    }
+
+    /// Get a row from the scrollback buffer (index 0 is most recent)
+    pub fn get_scrollback_row(&self, _index: usize) -> Option<&Vec<Cell>> {
+        // TODO: Extract from alacritty's history
+        None
+    }
+
+    /// Get a row from the visible grid
+    pub fn get_row(&self, row: usize) -> Option<&Vec<Cell>> {
+        self.cells.get(row)
+    }
+}
+
+impl PartialEq for TerminalGrid {
+    fn eq(&self, other: &Self) -> bool {
+        self.cols == other.cols
+            && self.rows == other.rows
+            && self.cursor_x == other.cursor_x
+            && self.cursor_y == other.cursor_y
+            && self.cursor_visible == other.cursor_visible
+            && self.cells == other.cells
+    }
+}
+
+/// A complete terminal emulator - now backed by alacritty_terminal
 pub struct TerminalEmulator {
-    grid: TerminalGrid,
-    parser: AnsiParser,
+    inner: AlacrittyEmulator,
+    /// Cached grid state for efficient access
+    grid_cache: TerminalGrid,
 }
 
 impl TerminalEmulator {
     /// Create a new terminal emulator with the given dimensions
     pub fn new(cols: usize, rows: usize) -> Self {
+        let inner = AlacrittyEmulator::new(cols, rows);
+        let mut grid_cache = TerminalGrid::new(cols, rows);
+        grid_cache.update_from(&inner);
         Self {
-            grid: TerminalGrid::new(cols, rows),
-            parser: AnsiParser::new(),
+            inner,
+            grid_cache,
         }
     }
 
     /// Process raw bytes from the PTY
     pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.process(bytes, &mut self.grid);
+        self.inner.process(bytes);
+        // Eagerly update the cache
+        self.grid_cache.update_from(&self.inner);
     }
 
     /// Get the current display as lines for rendering
     pub fn to_lines(&self) -> Vec<Line> {
-        self.grid.to_lines()
+        self.inner.to_lines()
     }
 
-    /// Get the grid for direct access (useful for testing)
+    /// Get the grid for direct access
     pub fn grid(&self) -> &TerminalGrid {
-        &self.grid
+        &self.grid_cache
     }
 
-    /// Get mutable grid access
+    /// Get mutable access to the grid (for direct cell manipulation)
     pub fn grid_mut(&mut self) -> &mut TerminalGrid {
-        &mut self.grid
+        &mut self.grid_cache
     }
 
     /// Resize the terminal
     pub fn resize(&mut self, cols: usize, rows: usize) {
-        self.grid.resize(cols, rows);
+        self.inner.resize(cols, rows);
+        self.grid_cache.resize(cols, rows);
+        self.grid_cache.update_from(&self.inner);
     }
 
     /// Get cursor position
     pub fn cursor_position(&self) -> (usize, usize) {
-        (self.grid.cursor_x, self.grid.cursor_y)
+        self.inner.cursor_position()
     }
 
     /// Drain queued responses (for DSR and other terminal queries)
     pub fn drain_responses(&mut self) -> Vec<Vec<u8>> {
-        self.grid.drain_responses()
+        self.inner.drain_responses()
     }
 
     /// Blit a rectangular region from another terminal emulator into this one.
-    ///
-    /// Copies cells from `source` starting at (src_x, src_y) with dimensions (width, height)
-    /// into this emulator at position (dst_x, dst_y).
-    ///
-    /// # Arguments
-    /// * `source` - The source terminal emulator to copy from
-    /// * `src_x` - Starting column in the source
-    /// * `src_y` - Starting row in the source
-    /// * `dst_x` - Destination column in this emulator
-    /// * `dst_y` - Destination row in this emulator
-    /// * `width` - Width of the region to copy
-    /// * `height` - Height of the region to copy
     pub fn blit_from(
         &mut self,
         source: &TerminalEmulator,
@@ -86,13 +288,18 @@ impl TerminalEmulator {
         width: usize,
         height: usize,
     ) {
-        self.grid
-            .blit_from(&source.grid, src_x, src_y, dst_x, dst_y, width, height);
+        // Copy cells directly to the grid cache
+        for dy in 0..height {
+            for dx in 0..width {
+                let src_cell = source.inner.get_cell(src_x + dx, src_y + dy);
+                self.grid_cache.set_cell(dst_x + dx, dst_y + dy, src_cell);
+            }
+        }
     }
 
     /// Get the dimensions of this terminal (cols, rows)
     pub fn dimensions(&self) -> (usize, usize) {
-        (self.grid.cols, self.grid.rows)
+        self.inner.dimensions()
     }
 }
 
@@ -105,7 +312,7 @@ mod tests {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"Hello, World!");
 
-        let line = emu.grid.get_line_text(0);
+        let line = emu.grid().get_line_text(0);
         assert!(line.starts_with("Hello, World!"));
     }
 
@@ -114,17 +321,17 @@ mod tests {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"Line1\r\nLine2");
 
-        assert!(emu.grid.get_line_text(0).starts_with("Line1"));
-        assert!(emu.grid.get_line_text(1).starts_with("Line2"));
+        assert!(emu.grid().get_line_text(0).starts_with("Line1"));
+        assert!(emu.grid().get_line_text(1).starts_with("Line2"));
     }
 
     #[test]
     fn test_cursor_movement() {
         let mut emu = TerminalEmulator::new(80, 24);
-        // Write "Hello", move back 3 columns, overwrite with "XXX"
+        // Write "Hello", move back 3 columns, overwrite with "X"
         emu.process(b"Hello\x1b[3DX");
 
-        let line = emu.grid.get_line_text(0);
+        let line = emu.grid().get_line_text(0);
         assert!(line.starts_with("HeXlo"), "Got: {}", line);
     }
 
@@ -133,7 +340,7 @@ mod tests {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"Hello World\x1b[5D\x1b[K");
 
-        let line = emu.grid.get_line_text(0);
+        let line = emu.grid().get_line_text(0);
         assert!(line.starts_with("Hello "), "Got: '{}'", line);
         assert!(!line.contains("World"));
     }
@@ -143,11 +350,11 @@ mod tests {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"\x1b[31mRed\x1b[0m");
 
-        let cell = emu.grid.get_cell(0, 0);
+        let cell = emu.grid().get_cell(0, 0);
         assert_eq!(cell.attrs.fg_color, Some(Color::Red));
 
         // After reset, color should be None
-        let cell_after = emu.grid.get_cell(3, 0);
+        let cell_after = emu.grid().get_cell(3, 0);
         assert_eq!(cell_after.attrs.fg_color, None);
     }
 
@@ -156,7 +363,7 @@ mod tests {
         let mut emu = TerminalEmulator::new(80, 24);
         emu.process(b"\x1b[1mBold\x1b[0m Normal");
 
-        assert!(emu.grid.get_cell(0, 0).attrs.bold);
-        assert!(!emu.grid.get_cell(5, 0).attrs.bold);
+        assert!(emu.grid().get_cell(0, 0).attrs.bold);
+        assert!(!emu.grid().get_cell(5, 0).attrs.bold);
     }
 }

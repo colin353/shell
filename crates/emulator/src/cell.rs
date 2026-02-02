@@ -86,17 +86,20 @@ impl CellAttributes {
 pub struct Cell {
     pub character: char,
     pub attrs: CellAttributes,
+    /// Whether this cell is the second half of a double-width character
+    pub is_wide_char_spacer: bool,
 }
 
 impl Cell {
     pub fn new(character: char, attrs: CellAttributes) -> Self {
-        Self { character, attrs }
+        Self { character, attrs, is_wide_char_spacer: false }
     }
 
     pub fn empty() -> Self {
         Self {
             character: ' ',
             attrs: CellAttributes::default(),
+            is_wide_char_spacer: false,
         }
     }
 
@@ -104,6 +107,7 @@ impl Cell {
         Self {
             character,
             attrs: CellAttributes::default(),
+            is_wide_char_spacer: false,
         }
     }
 }

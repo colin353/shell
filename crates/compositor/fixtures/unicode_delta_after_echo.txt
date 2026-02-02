@@ -19,6 +19,6 @@ printf '\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe6\xbc\xa2\xe5\xad\x97\xe4\xb8\xad
 printf '\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe6\xbc\xa2\xe5\xad\x97\xe4\xb8\xad
 printf '\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe6\xbc\xa2\xe5\xad\x97\xe4\xb8\xad
 \xe5\x9b\xbd\xe8\xaa\x9e\n'                                                     
-日本語漢字中国語                                                                        
+日本語漢字中国語                                                                
 compositor ➜                                                                    
  0 bash                                                        2025-01-01 12:00 
