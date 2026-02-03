@@ -1126,15 +1126,15 @@ impl Shell {
 
     /// Replace the current input line with new content
     fn replace_input_line(&mut self, new_content: &str) -> Vec<u8> {
-        let old_pos = self.cursor_pos;
+        // Compute display width of old cursor position BEFORE changing buffer
+        let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
         
-        // Update state first
+        // Update state
         self.input_buffer = new_content.to_string();
         self.cursor_pos = self.input_buffer.chars().count();
 
-        // Re-render with syntax highlighting
-        // Terminal cursor was at old_pos before this operation
-        self.render_highlighted_input_from(old_pos)
+        // Re-render with syntax highlighting using pre-computed display width
+        self.render_highlighted_input_with_display_width(old_display_width)
     }
 
     /// Move cursor right
@@ -1236,7 +1236,8 @@ impl Shell {
         // If exactly one completion, insert it directly
         if completions.len() == 1 {
             let (_, text, kind) = &completions[0];
-            let old_pos = self.cursor_pos;
+            // Compute display width BEFORE modifying buffer
+            let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
 
             // Add trailing space unless it's a directory
             let is_directory = matches!(kind, syntax::CompletionKind::Directory);
@@ -1253,7 +1254,7 @@ impl Shell {
             self.cursor_pos = replace_start + completion_text.len();
 
             // Re-render with syntax highlighting
-            return Some(self.render_highlighted_input_from(old_pos));
+            return Some(self.render_highlighted_input_with_display_width(old_display_width));
         }
 
         // Multiple completions - check if there's a common prefix we can complete first
@@ -1262,10 +1263,11 @@ impl Shell {
         
         if common_prefix.len() > current_word.len() {
             // There's a common prefix longer than what's typed - complete to that first
-            let old_pos = self.cursor_pos;
+            // Compute display width BEFORE modifying buffer
+            let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
             self.input_buffer.replace_range(replace_start..replace_end, &common_prefix);
             self.cursor_pos = replace_start + common_prefix.len();
-            return Some(self.render_highlighted_input_from(old_pos));
+            return Some(self.render_highlighted_input_with_display_width(old_display_width));
         }
 
         // No common prefix to extend - show the picker
@@ -1527,6 +1529,9 @@ impl Shell {
         let chars: Vec<char> = self.input_buffer.chars().collect();
         let mut new_pos = self.cursor_pos;
 
+        // Compute display width BEFORE modifying buffer
+        let old_display_width = self.display_width_of_chars(&self.input_buffer, old_pos);
+
         // Skip word boundaries before cursor
         while new_pos > 0 && is_word_boundary(chars[new_pos - 1]) {
             new_pos -= 1;
@@ -1553,9 +1558,8 @@ impl Shell {
             self.input_buffer.drain(byte_start..byte_end);
             self.cursor_pos = new_pos;
 
-            // Re-render with syntax highlighting
-            // Terminal cursor was at old_pos before this operation
-            Some(self.render_highlighted_input_from(old_pos))
+            // Re-render with syntax highlighting using pre-computed display width
+            Some(self.render_highlighted_input_with_display_width(old_display_width))
         } else {
             None
         }
@@ -1624,7 +1628,8 @@ impl Shell {
     /// Kill (delete) from cursor to beginning of line (Ctrl+U)
     fn kill_to_beginning(&mut self) -> Option<Vec<u8>> {
         if self.cursor_pos > 0 {
-            let old_pos = self.cursor_pos;
+            // Compute display width BEFORE modifying buffer
+            let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
             // Convert character position to byte position
             let byte_pos = self
                 .input_buffer
@@ -1635,8 +1640,8 @@ impl Shell {
             self.input_buffer.drain(0..byte_pos);
             self.cursor_pos = 0;
 
-            // Re-render with syntax highlighting (terminal cursor was at old_pos)
-            Some(self.render_highlighted_input_from(old_pos))
+            // Re-render with syntax highlighting using pre-computed display width
+            Some(self.render_highlighted_input_with_display_width(old_display_width))
         } else {
             None
         }

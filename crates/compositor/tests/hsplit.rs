@@ -2459,3 +2459,53 @@ fn test_cjk_with_cat() -> Result<(), CompositorError> {
     
     Ok(())
 }
+
+#[test]
+fn test_cjk_ctrl_w_corruption() -> Result<(), CompositorError> {
+    // Test that Ctrl+W (delete word) with CJK characters doesn't corrupt display
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.set_fixed_time(fixed_test_time());
+    wait_for_output(&mut compositor, 500);
+    
+    // Type "echo 日本語漢字中"
+    compositor.handle_input("echo 日本語漢字中".as_bytes());
+    compositor.render_to_vec();
+    
+    // Check state before Ctrl+W
+    {
+        let pane = compositor.get_focused_pane_mut().unwrap();
+        let line0 = pane.terminal_emulator.grid().get_line_text(0);
+        eprintln!("Before Ctrl+W: {}", line0);
+        assert!(line0.contains("echo 日本語漢字中"), "Expected full text before Ctrl+W. Got: {}", line0);
+    }
+    
+    // Press Ctrl+W to delete word
+    compositor.handle_input(&[0x17]); // Ctrl+W
+    compositor.render_to_vec();
+    
+    // Check state after Ctrl+W - should have deleted "日本語漢字中" 
+    // and left "echo "
+    {
+        let pane = compositor.get_focused_pane_mut().unwrap();
+        let line0 = pane.terminal_emulator.grid().get_line_text(0);
+        eprintln!("After Ctrl+W: {}", line0);
+        
+        // Should NOT have corrupted fragments like repeated characters
+        assert!(
+            !line0.contains("eeecho") && !line0.contains("echoecho"),
+            "Line should not have corrupted echo fragments. Got:\n{}",
+            line0
+        );
+        
+        // Should have "echo " remaining (word deleted)
+        assert!(
+            line0.contains("echo ") && !line0.contains("日"),
+            "Line should have 'echo ' without CJK chars after Ctrl+W. Got:\n{}",
+            line0
+        );
+    }
+    
+    Ok(())
+}

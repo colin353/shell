@@ -1,4 +1,4 @@
-compositor ➜ echo echo hello                                                    
+compositor ➜ echo hello                                                         
                                                                                 
                                                                                 
                                                                                 
