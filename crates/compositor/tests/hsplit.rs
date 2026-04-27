@@ -84,6 +84,66 @@ fn wait_for_output(compositor: &mut Compositor, timeout_ms: u64) {
 }
 
 #[test]
+fn test_combined_prefix_creates_split() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.handle_input(&[0x02, b'"']);
+
+    assert_eq!(
+        compositor.active_tab().root.pane_count(),
+        2,
+        "Ctrl+b \" should split even when both bytes arrive in one read"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_encoded_prefix_creates_split() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.handle_input(b"\x1b[98;5u\x1b[34u");
+
+    assert_eq!(
+        compositor.active_tab().root.pane_count(),
+        2,
+        "encoded Ctrl+b followed by encoded \" should split"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_split_exits_zoom_mode() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.handle_input(&[0x02, b'"']);
+    compositor.handle_input(&[0x02, b'z']);
+
+    assert!(
+        compositor.active_tab().zoomed,
+        "Ctrl+b z should zoom after an initial split"
+    );
+
+    compositor.handle_input(&[0x02, b'%']);
+
+    assert!(
+        !compositor.active_tab().zoomed,
+        "creating a split while zoomed should unzoom the tab"
+    );
+    assert_eq!(
+        compositor.active_tab().root.pane_count(),
+        3,
+        "the requested split should still be created after unzooming"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_hsplit_basic() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();

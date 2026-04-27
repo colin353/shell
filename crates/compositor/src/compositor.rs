@@ -13,6 +13,92 @@ use std::sync::{Arc, Mutex};
 /// Clock function type for getting current time (allows mocking in tests)
 pub type ClockFn = Box<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>;
 
+fn find_prefix_key(input: &[u8]) -> Option<(usize, usize)> {
+    for index in 0..input.len() {
+        if input[index] == 0x02 {
+            return Some((index, 1));
+        }
+
+        if let Some((0x02, len)) = decode_input_key(&input[index..]) {
+            return Some((index, len));
+        }
+    }
+
+    None
+}
+
+fn decode_input_key(input: &[u8]) -> Option<(u8, usize)> {
+    let (params, final_byte, len) = decode_csi(input)?;
+
+    match final_byte {
+        b'u' => {
+            let codepoint = params.first().copied()?;
+            let modifiers = params.get(1).copied().unwrap_or(1);
+            if is_ctrl_b(codepoint, modifiers) {
+                Some((0x02, len))
+            } else if modifiers <= 1 && (0x20..=0x7e).contains(&codepoint) {
+                Some((codepoint as u8, len))
+            } else {
+                None
+            }
+        }
+        b'~' => {
+            let modifiers = params.get(1).copied()?;
+            let codepoint = params.get(2).copied()?;
+            if params.first().copied() == Some(27) && is_ctrl_b(codepoint, modifiers) {
+                Some((0x02, len))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_ctrl_b(codepoint: u16, modifiers: u16) -> bool {
+    (codepoint == b'b' as u16 || codepoint == b'B' as u16) && modifiers & 4 != 0
+}
+
+fn decode_csi(input: &[u8]) -> Option<(Vec<u16>, u8, usize)> {
+    let params_start = if input.starts_with(b"\x1b[") {
+        2
+    } else if input.first().copied() == Some(0x9b) {
+        1
+    } else {
+        return None;
+    };
+
+    let mut final_index = params_start;
+    while final_index < input.len() {
+        let byte = input[final_index];
+        if (0x40..=0x7e).contains(&byte) {
+            break;
+        }
+        if !byte.is_ascii_digit() && byte != b';' {
+            return None;
+        }
+        final_index += 1;
+    }
+
+    if final_index == input.len() {
+        return None;
+    }
+
+    let params = std::str::from_utf8(&input[params_start..final_index])
+        .ok()?
+        .split(';')
+        .map(|param| {
+            if param.is_empty() {
+                Some(0)
+            } else {
+                param.parse::<u16>().ok()
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    Some((params, input[final_index], final_index + 1))
+}
+
 /// The main compositor that manages terminal panes and the event loop.
 pub struct Compositor {
     /// List of tabs, each with its own root pane tree
@@ -172,6 +258,10 @@ impl Compositor {
     ///
     /// Returns `true` if the compositor should exit, `false` otherwise.
     pub fn handle_input(&mut self, input: &[u8]) -> bool {
+        if input.is_empty() {
+            return false;
+        }
+
         // Check if we're in scrollback mode
         if self.active_tab().root.is_in_scrollback_mode() {
             self.handle_scrollback_input(input);
@@ -181,99 +271,90 @@ impl Compositor {
         // Handle prefix mode commands
         if self.prefix_mode {
             self.prefix_mode = false;
-            if input.len() == 1 {
-                match input[0] {
-                    b'"' => {
-                        // Ctrl+b " - horizontal split (top/bottom)
-                        let _ = self.split_focused_pane(SplitDirection::Horizontal);
-                        self.render();
-                        return false;
-                    }
-                    b'%' => {
-                        // Ctrl+b % - vertical split (left/right)
-                        let _ = self.split_focused_pane(SplitDirection::Vertical);
-                        self.render();
-                        return false;
-                    }
-                    b'c' => {
-                        // Ctrl+b c - create new tab
-                        let _ = self.create_tab();
-                        return false;
-                    }
-                    b'n' => {
-                        // Ctrl+b n - next tab
-                        self.next_tab();
-                        return false;
-                    }
-                    b'p' => {
-                        // Ctrl+b p - previous tab
-                        self.prev_tab();
-                        return false;
-                    }
-                    b'0'..=b'9' => {
-                        // Ctrl+b 0-9 - switch to tab 0-9
-                        let tab_index = (input[0] - b'0') as usize;
-                        self.switch_to_tab(tab_index);
-                        return false;
-                    }
-                    b'[' => {
-                        // Ctrl+b [ - enter scrollback mode
-                        self.active_tab_mut().root.enter_scrollback_mode();
-                        self.render();
-                        return false;
-                    }
-                    b'u' => {
-                        // Ctrl+b u - enter URL mode (automatically enters scrollback mode first)
-                        self.active_tab_mut().root.enter_scrollback_mode();
-                        self.active_tab_mut().root.enter_url_mode();
-                        self.render();
-                        return false;
-                    }
-                    b'z' => {
-                        // Ctrl+b z - toggle zoom (temporary fullscreen) for focused pane
-                        let was_zoomed = self.active_tab().zoomed;
-                        let width = self.width;
-                        let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
-                        self.active_tab_mut().toggle_zoom();
-                        let is_zoomed = self.active_tab().zoomed;
-                        if is_zoomed && !was_zoomed {
-                            // Entering zoom mode: resize focused pane's PTY to fullscreen
-                            self.active_tab_mut()
-                                .root
-                                .resize_focused_pty(width, pane_height);
-                        } else if was_zoomed && !is_zoomed {
-                            // Exiting zoom mode: restore the original pane layout
-                            self.active_tab_mut().resize(width, pane_height);
-                        }
-                        self.render();
-                        return false;
-                    }
-                    b'r' => {
-                        // Ctrl+b r - force full screen redraw
-                        self.force_full_redraw();
-                        return false;
-                    }
-                    0x02 => {
-                        // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
-                        let result = self.active_tab_mut().root.handle_input(&[0x02]);
-                        self.handle_pane_input_result(result);
-                        return false;
-                    }
-                    _ => {
-                        // Unknown command, ignore
-                        return false;
-                    }
-                }
+            let (command, command_len) = decode_input_key(input).unwrap_or((input[0], 1));
+            self.handle_prefix_command(command);
+            if command_len < input.len() {
+                return self.handle_input(&input[command_len..]);
             }
             return false;
         }
 
         // Check for prefix key (Ctrl+b = 0x02)
-        if input.len() == 1 && input[0] == 0x02 {
+        if let Some((prefix_index, prefix_len)) = find_prefix_key(input) {
+            if prefix_index > 0 && self.handle_non_prefix_input(&input[..prefix_index]) {
+                return true;
+            }
             self.prefix_mode = true;
+            let remaining_index = prefix_index + prefix_len;
+            if remaining_index < input.len() {
+                return self.handle_input(&input[remaining_index..]);
+            }
             return false;
         }
 
+        self.handle_non_prefix_input(input)
+    }
+
+    fn handle_prefix_command(&mut self, command: u8) {
+        match command {
+            b'"' => {
+                // Ctrl+b " - horizontal split (top/bottom)
+                let _ = self.split_focused_pane(SplitDirection::Horizontal);
+                self.render();
+            }
+            b'%' => {
+                // Ctrl+b % - vertical split (left/right)
+                let _ = self.split_focused_pane(SplitDirection::Vertical);
+                self.render();
+            }
+            b'c' => {
+                // Ctrl+b c - create new tab
+                let _ = self.create_tab();
+            }
+            b'n' => {
+                // Ctrl+b n - next tab
+                self.next_tab();
+            }
+            b'p' => {
+                // Ctrl+b p - previous tab
+                self.prev_tab();
+            }
+            b'0'..=b'9' => {
+                // Ctrl+b 0-9 - switch to tab 0-9
+                let tab_index = (command - b'0') as usize;
+                self.switch_to_tab(tab_index);
+            }
+            b'[' => {
+                // Ctrl+b [ - enter scrollback mode
+                self.active_tab_mut().root.enter_scrollback_mode();
+                self.render();
+            }
+            b'u' => {
+                // Ctrl+b u - enter URL mode (automatically enters scrollback mode first)
+                self.active_tab_mut().root.enter_scrollback_mode();
+                self.active_tab_mut().root.enter_url_mode();
+                self.render();
+            }
+            b'z' => {
+                // Ctrl+b z - toggle zoom (temporary fullscreen) for focused pane
+                self.toggle_zoom();
+            }
+            b'r' => {
+                // Ctrl+b r - force full screen redraw
+                self.force_full_redraw();
+            }
+            0x02 => {
+                // Ctrl+b Ctrl+b - send Ctrl+b to the terminal
+                let result = self.active_tab_mut().root.handle_input(&[0x02]);
+                self.handle_pane_input_result(result);
+            }
+            _ => {
+                // Unknown command, ignore
+            }
+        }
+    }
+
+    fn handle_non_prefix_input(&mut self, input: &[u8]) -> bool {
         // Check for CTRL+C (0x03) - cascading close behavior with SIGINT
         if input.len() == 1 && input[0] == 0x03 {
             return self.handle_ctrl_c();
@@ -318,6 +399,24 @@ impl Compositor {
         let result = self.active_tab_mut().root.handle_input(input);
         self.handle_pane_input_result(result);
         false
+    }
+
+    fn toggle_zoom(&mut self) {
+        let was_zoomed = self.active_tab().zoomed;
+        let width = self.width;
+        let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+        self.active_tab_mut().toggle_zoom();
+        let is_zoomed = self.active_tab().zoomed;
+        if is_zoomed && !was_zoomed {
+            // Entering zoom mode: resize focused pane's PTY to fullscreen
+            self.active_tab_mut()
+                .root
+                .resize_focused_pty(width, pane_height);
+        } else if was_zoomed && !is_zoomed {
+            // Exiting zoom mode: restore the original pane layout
+            self.active_tab_mut().resize(width, pane_height);
+        }
+        self.render();
     }
 
     /// Handle the result of pane input processing
@@ -684,7 +783,17 @@ impl Compositor {
     ///
     /// Creates a new pane by splitting the focused pane either horizontally or vertically.
     pub fn split_focused_pane(&mut self, direction: SplitDirection) -> Result<(), CompositorError> {
+        self.exit_zoom_if_needed();
         self.active_tab_mut().root.split_focused(direction)
+    }
+
+    fn exit_zoom_if_needed(&mut self) {
+        if self.active_tab().zoomed {
+            let width = self.width;
+            let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+            self.active_tab_mut().exit_zoom();
+            self.active_tab_mut().resize(width, pane_height);
+        }
     }
 
     /// Move focus in the specified direction.

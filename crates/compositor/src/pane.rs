@@ -499,10 +499,6 @@ impl Pane {
 
     /// Enter scrollback mode
     pub fn enter_scrollback_mode(&mut self) {
-        // Don't enter scrollback mode if in alternate screen
-        if self.terminal_emulator.grid().in_alternate_screen {
-            return;
-        }
         self.scrollback_mode = true;
         self.scroll_offset = 0;
 

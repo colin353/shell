@@ -73,10 +73,135 @@ fn lorem_fixture_path() -> String {
     format!("{}/fixtures/lorem_ipsum.txt", env!("CARGO_MANIFEST_DIR"))
 }
 
-// TODO: These tests fail with alacritty backend because scrollback_len() and
-// get_scrollback_row() are not yet implemented - they always return 0/None
 #[test]
-#[ignore]
+fn test_combined_prefix_enters_scrollback() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.handle_input(&[0x02, b'[']);
+
+    assert!(
+        compositor.active_tab().root.is_in_scrollback_mode(),
+        "Ctrl+b [ should enter scrollback even when both bytes arrive in one read"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_encoded_prefix_enters_scrollback() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.handle_input(b"\x1b[98;5u[");
+
+    assert!(
+        compositor.active_tab().root.is_in_scrollback_mode(),
+        "CSI-u encoded Ctrl+b followed by [ should enter scrollback"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_encoded_prefix_and_command_enters_scrollback() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.handle_input(b"\x1b[98;5u\x1b[91u");
+
+    assert!(
+        compositor.active_tab().root.is_in_scrollback_mode(),
+        "encoded Ctrl+b followed by encoded [ should enter scrollback"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_xterm_encoded_prefix_enters_scrollback() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    compositor.handle_input(b"\x1b[27;5;98~[");
+
+    assert!(
+        compositor.active_tab().root.is_in_scrollback_mode(),
+        "xterm modifyOtherKeys encoded Ctrl+b followed by [ should enter scrollback"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_prefix_enters_scrollback_in_alternate_screen() -> Result<(), CompositorError> {
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    let pane = compositor.get_focused_pane_mut().unwrap();
+    pane.terminal_emulator.process(b"\x1b[?1049h");
+
+    assert!(
+        pane.terminal_emulator.grid().in_alternate_screen,
+        "test setup should put the focused pane in alternate screen"
+    );
+
+    compositor.handle_input(&[0x02, b'[']);
+
+    assert!(
+        compositor.active_tab().root.is_in_scrollback_mode(),
+        "Ctrl+b [ should enter scrollback for alternate-screen applications"
+    );
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "manual repro: requires the copilot CLI and waits for it to start"]
+fn test_copilot_subprocess_allows_scrollback_prefix() -> Result<(), CompositorError> {
+    if std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v copilot >/dev/null")
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("skipping: copilot binary is not available in PATH");
+        return Ok(());
+    }
+
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    wait_for_output(&mut compositor, 500);
+    compositor.handle_input(b"copilot\n");
+    wait_for_output(&mut compositor, 10_000);
+
+    let copilot_running = compositor
+        .get_focused_pane_mut()
+        .map(|pane| pane.has_subprocess())
+        .unwrap_or(false);
+    compositor.render_to_vec();
+    let screen = compositor.get_text_lines().join("\n");
+
+    assert!(
+        copilot_running,
+        "expected copilot subprocess to still be running after startup wait. Screen:\n{}",
+        screen
+    );
+
+    compositor.handle_input(&[0x02, b'[']);
+
+    assert!(
+        compositor.active_tab().root.is_in_scrollback_mode(),
+        "Ctrl+b [ should enter scrollback while copilot subprocess is running. Screen before prefix:\n{}",
+        screen
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_scrollback_basic() -> Result<(), CompositorError> {
     // Create a compositor with a small terminal to ensure scrollback is used
     let writer = MemoryWriter::new();
@@ -150,7 +275,6 @@ fn test_scrollback_basic() -> Result<(), CompositorError> {
 }
 
 #[test]
-#[ignore]
 fn test_scrollback_jump_to_top() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
