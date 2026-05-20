@@ -24,6 +24,13 @@ pub enum PaneInputResult {
     RenameWindow(String),
 }
 
+fn is_replayable_typeahead(input: &[u8]) -> bool {
+    !input.is_empty()
+        && input.iter().all(
+            |&byte| matches!(byte, b'\t' | b'\r' | b'\n' | 0x08 | 0x7f | 0x20..=0x7e | 0x80..=0xff),
+        )
+}
+
 /// Regex pattern for matching URLs (based on Alacritty's approach)
 /// Matches common URL schemes followed by valid URL characters
 static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -149,6 +156,8 @@ pub struct Pane {
     pub sent_sigint: bool,
     /// Temp file for edit-in-editor feature (CTRL+X CTRL+E)
     pub edit_temp_file: Option<std::path::PathBuf>,
+    /// Line-oriented input typed while a subprocess is running.
+    subprocess_typeahead: Vec<u8>,
     pub read_buffer: [u8; 4096],
     /// Whether the pane is in scrollback mode
     pub scrollback_mode: bool,
@@ -190,6 +199,7 @@ impl Pane {
             subprocess: None,
             sent_sigint: false,
             edit_temp_file: None,
+            subprocess_typeahead: Vec::new(),
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -223,6 +233,7 @@ impl Pane {
             subprocess: None,
             sent_sigint: false,
             edit_temp_file: None,
+            subprocess_typeahead: Vec::new(),
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -245,109 +256,138 @@ impl Pane {
     ///
     /// Returns a `PaneInputResult` indicating what action the compositor should take.
     pub fn handle_input(&mut self, input: &[u8]) -> PaneInputResult {
-        if let Some(ref mut proc) = self.subprocess {
+        if self.subprocess.is_some() {
+            self.record_subprocess_typeahead(input);
+            let Some(ref mut proc) = self.subprocess else {
+                return PaneInputResult::None;
+            };
             // Subprocess is active - send input directly to it
             let _ = proc.write(input);
             // Subprocess output will trigger rerender via poll
             PaneInputResult::None
         } else {
-            // Shell is active - process input and handle actions
-            match self.shell.handle_input(input) {
-                libshell::ShellAction::None => PaneInputResult::None,
-                libshell::ShellAction::Output(data) => {
-                    self.terminal_emulator.process(&data);
-                    PaneInputResult::Rerender
+            self.handle_shell_input(input)
+        }
+    }
+
+    fn record_subprocess_typeahead(&mut self, input: &[u8]) {
+        if input.iter().any(|&byte| byte == 0x03 || byte == 0x04) {
+            self.subprocess_typeahead.clear();
+            return;
+        }
+
+        let should_buffer = self
+            .subprocess
+            .as_ref()
+            .map(|proc| proc.is_canonical_echo_mode())
+            .unwrap_or(false)
+            && is_replayable_typeahead(input);
+
+        if should_buffer {
+            self.subprocess_typeahead.extend_from_slice(input);
+        } else {
+            self.subprocess_typeahead.clear();
+        }
+    }
+
+    fn handle_shell_input(&mut self, input: &[u8]) -> PaneInputResult {
+        match self.shell.handle_input(input) {
+            libshell::ShellAction::None => PaneInputResult::None,
+            libshell::ShellAction::Output(data) => {
+                self.terminal_emulator.process(&data);
+                PaneInputResult::Rerender
+            }
+            libshell::ShellAction::SpawnSubprocess {
+                output,
+                command,
+                args,
+                env: _,
+                cwd,
+                history_id: _,
+            } => {
+                // First, write any pending output (e.g., the newline after the command)
+                if !output.is_empty() {
+                    self.terminal_emulator.process(&output);
                 }
-                libshell::ShellAction::SpawnSubprocess {
-                    output,
-                    command,
-                    args,
-                    env: _,
-                    cwd,
-                    history_id: _,
-                } => {
-                    // First, write any pending output (e.g., the newline after the command)
-                    if !output.is_empty() {
-                        self.terminal_emulator.process(&output);
+
+                // Build the full command string
+                let full_command = if args.is_empty() {
+                    command
+                } else {
+                    format!("{} {}", command, args.join(" "))
+                };
+
+                // Spawn the subprocess
+                let width = self.terminal_emulator.grid().cols as u16;
+                let height = self.terminal_emulator.grid().rows as u16;
+
+                // Change to the shell's cwd before spawning
+                let _ = std::env::set_current_dir(&cwd);
+
+                self.subprocess_typeahead.clear();
+                match pty::PtyProcess::spawn(&full_command, width, height) {
+                    Ok(proc) => {
+                        self.subprocess = Some(proc);
                     }
-
-                    // Build the full command string
-                    let full_command = if args.is_empty() {
-                        command
-                    } else {
-                        format!("{} {}", command, args.join(" "))
-                    };
-
-                    // Spawn the subprocess
-                    let width = self.terminal_emulator.grid().cols as u16;
-                    let height = self.terminal_emulator.grid().rows as u16;
-
-                    // Change to the shell's cwd before spawning
-                    let _ = std::env::set_current_dir(&cwd);
-
-                    match pty::PtyProcess::spawn(&full_command, width, height) {
-                        Ok(proc) => {
-                            self.subprocess = Some(proc);
-                        }
-                        Err(e) => {
-                            // Failed to spawn - show error and prompt
-                            let error_msg = format!("spawn error: {}\r\n", e);
-                            self.terminal_emulator.process(error_msg.as_bytes());
-                            let prompt = self.shell.subprocess_exited(1);
-                            self.terminal_emulator.process(&prompt);
-                        }
+                    Err(e) => {
+                        // Failed to spawn - show error and prompt
+                        let error_msg = format!("spawn error: {}\r\n", e);
+                        self.terminal_emulator.process(error_msg.as_bytes());
+                        let prompt = self.shell.subprocess_exited(1);
+                        self.terminal_emulator.process(&prompt);
                     }
-                    PaneInputResult::Rerender
                 }
-                libshell::ShellAction::RenameWindow { output, name } => {
-                    // Write any pending output (e.g., the newline after the command)
-                    if !output.is_empty() {
-                        self.terminal_emulator.process(&output);
-                    }
-                    // Show the prompt
-                    let prompt = self.shell.get_prompt();
-                    self.terminal_emulator.process(prompt.as_bytes());
-                    PaneInputResult::RenameWindow(name)
+                PaneInputResult::Rerender
+            }
+            libshell::ShellAction::RenameWindow { output, name } => {
+                // Write any pending output (e.g., newline after the command)
+                if !output.is_empty() {
+                    self.terminal_emulator.process(&output);
                 }
-                libshell::ShellAction::EditInEditor {
-                    output,
-                    temp_file,
-                    editor,
-                } => {
-                    // Write any pending output
-                    if !output.is_empty() {
-                        self.terminal_emulator.process(&output);
-                    }
+                // Show the prompt
+                let prompt = self.shell.get_prompt();
+                self.terminal_emulator.process(prompt.as_bytes());
+                PaneInputResult::RenameWindow(name)
+            }
+            libshell::ShellAction::EditInEditor {
+                output,
+                temp_file,
+                editor,
+            } => {
+                // Write any pending output
+                if !output.is_empty() {
+                    self.terminal_emulator.process(&output);
+                }
 
-                    // Spawn the editor as a subprocess with the temp file as argument
-                    let width = self.terminal_emulator.grid().cols as u16;
-                    let height = self.terminal_emulator.grid().rows as u16;
-                    let full_command = format!("{} {}", editor, temp_file.display());
+                // Spawn the editor as a subprocess with the temp file as argument
+                let width = self.terminal_emulator.grid().cols as u16;
+                let height = self.terminal_emulator.grid().rows as u16;
+                let full_command = format!("{} {}", editor, temp_file.display());
 
-                    match pty::PtyProcess::spawn(&full_command, width, height) {
-                        Ok(proc) => {
-                            self.subprocess = Some(proc);
-                            // Store the temp file path so we can read it when editor exits
-                            self.edit_temp_file = Some(temp_file);
-                        }
-                        Err(e) => {
-                            // Failed to spawn editor - show error and prompt
-                            let error_msg = format!("editor error: {}\r\n", e);
-                            self.terminal_emulator.process(error_msg.as_bytes());
-                            // Clean up temp file
-                            let _ = std::fs::remove_file(&temp_file);
-                            let prompt = self.shell.get_prompt();
-                            self.terminal_emulator.process(prompt.as_bytes());
-                        }
+                self.subprocess_typeahead.clear();
+                match pty::PtyProcess::spawn(&full_command, width, height) {
+                    Ok(proc) => {
+                        self.subprocess = Some(proc);
+                        // Store the temp file path so we can read it when editor exits
+                        self.edit_temp_file = Some(temp_file);
                     }
-                    PaneInputResult::Rerender
+                    Err(e) => {
+                        // Failed to spawn editor - show error and prompt
+                        let error_msg = format!("editor error: {}\r\n", e);
+                        self.terminal_emulator.process(error_msg.as_bytes());
+                        // Clean up temp file
+                        let _ = std::fs::remove_file(&temp_file);
+                        let prompt = self.shell.get_prompt();
+                        self.terminal_emulator.process(prompt.as_bytes());
+                    }
                 }
-                libshell::ShellAction::Exit => {
-                    // Shell wants to exit - could close the pane
-                    // For now, just show a message
-                    self.terminal_emulator.process(b"[shell exited]\r\n");
-                    PaneInputResult::Rerender
-                }
+                PaneInputResult::Rerender
+            }
+            libshell::ShellAction::Exit => {
+                // Shell wants to exit - could close the pane
+                // For now, just show a message
+                self.terminal_emulator.process(b"[shell exited]\r\n");
+                PaneInputResult::Rerender
             }
         }
     }
@@ -397,13 +437,27 @@ impl Pane {
         // Check if subprocess has exited
         if let Some(ref proc) = self.subprocess {
             if let Some(exit_code) = proc.try_wait() {
+                let should_replay_typeahead =
+                    self.edit_temp_file.is_none() && !(self.sent_sigint && exit_code == 130);
+                let typeahead = if should_replay_typeahead {
+                    std::mem::take(&mut self.subprocess_typeahead)
+                } else {
+                    self.subprocess_typeahead.clear();
+                    Vec::new()
+                };
+
                 // Check if cursor is not at the start of a line (partial line output)
                 // If so, emit a partial line indicator before the prompt
                 let cursor_x = self.terminal_emulator.cursor_position().0;
                 if cursor_x != 0 {
-                    // Emit '%' with inverted colors, then reset, then newline
-                    // \x1b[7m = inverse video, \x1b[0m = reset, \r\n = newline
-                    self.terminal_emulator.process(b"\x1b[7m%\x1b[0m\r\n");
+                    if typeahead.is_empty() {
+                        // Emit '%' with inverted colors, then reset, then newline
+                        // \x1b[7m = inverse video, \x1b[0m = reset, \r\n = newline
+                        self.terminal_emulator.process(b"\x1b[7m%\x1b[0m\r\n");
+                    } else {
+                        // Clear locally echoed typeahead so replay renders it at the shell prompt.
+                        self.terminal_emulator.process(b"\r\x1b[2K");
+                    }
                 }
 
                 // Subprocess exited - clean up
@@ -427,6 +481,10 @@ impl Pane {
                     self.sent_sigint = false;
                     let output = self.shell.subprocess_exited(exit_code);
                     self.terminal_emulator.process(&output);
+                }
+
+                if !typeahead.is_empty() && self.subprocess.is_none() {
+                    let _ = self.handle_shell_input(&typeahead);
                 }
             }
         }

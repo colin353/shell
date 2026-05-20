@@ -116,7 +116,8 @@ impl PtyProcess {
         let bash = CString::new("bash").unwrap();
         let c_flag = CString::new("-c").unwrap();
         let c_command = CString::new(command).unwrap();
-        let args: Vec<&std::ffi::CStr> = vec![bash.as_c_str(), c_flag.as_c_str(), c_command.as_c_str()];
+        let args: Vec<&std::ffi::CStr> =
+            vec![bash.as_c_str(), c_flag.as_c_str(), c_command.as_c_str()];
 
         execvp(&bash, &args).expect("execvp failed");
         unreachable!()
@@ -135,6 +136,22 @@ impl PtyProcess {
     /// Write input to the PTY (sends to the subprocess's stdin)
     pub fn write(&self, data: &[u8]) -> Result<usize, PtyError> {
         write(&self.master_fd, data).map_err(PtyError::Write)
+    }
+
+    /// Check whether the PTY is currently in canonical mode with local echo.
+    ///
+    /// This is the mode used by line-oriented commands like `sleep` and `cat`.
+    /// Full-screen applications normally switch the PTY to raw/no-echo mode.
+    pub fn is_canonical_echo_mode(&self) -> bool {
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+        let ret = unsafe { libc::tcgetattr(self.master_fd.as_raw_fd(), termios.as_mut_ptr()) };
+        if ret < 0 {
+            return false;
+        }
+
+        let termios = unsafe { termios.assume_init() };
+        let required = libc::ICANON | libc::ECHO;
+        termios.c_lflag & required == required
     }
 
     /// Get the raw file descriptor for use with polling/select

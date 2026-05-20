@@ -83,6 +83,69 @@ fn wait_for_output(compositor: &mut Compositor, timeout_ms: u64) {
     }
 }
 
+fn temp_test_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/tmp/shell_{}_{}", name, std::process::id()))
+}
+
+#[test]
+fn test_typeahead_newline_replays_after_subprocess_exit() -> Result<(), CompositorError> {
+    let path = temp_test_path("typeahead_newline");
+    let _ = std::fs::remove_file(&path);
+
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    wait_for_output(&mut compositor, 300);
+    compositor.handle_input(b"sleep 1\n");
+    wait_for_output(&mut compositor, 100);
+
+    let command = format!("touch {}\n", path.display());
+    compositor.handle_input(command.as_bytes());
+
+    wait_for_output(&mut compositor, 2_500);
+
+    assert!(
+        path.exists(),
+        "typeahead entered during sleep should be replayed and executed after sleep exits"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_partial_typeahead_replays_after_subprocess_exit() -> Result<(), CompositorError> {
+    let path = temp_test_path("typeahead_partial");
+    let _ = std::fs::remove_file(&path);
+
+    let writer = MemoryWriter::new();
+    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+
+    wait_for_output(&mut compositor, 300);
+    compositor.handle_input(b"sleep 1\n");
+    wait_for_output(&mut compositor, 100);
+
+    let command = format!("touch {}", path.display());
+    compositor.handle_input(command.as_bytes());
+
+    wait_for_output(&mut compositor, 2_500);
+    assert!(
+        !path.exists(),
+        "partial typeahead should not execute until Enter is pressed after subprocess exit"
+    );
+
+    compositor.handle_input(b"\r");
+    wait_for_output(&mut compositor, 2_500);
+
+    assert!(
+        path.exists(),
+        "partial typeahead should be present at the shell prompt and execute on Enter"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
 #[test]
 fn test_combined_prefix_creates_split() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
