@@ -5,6 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use raw_tty::GuardMode;
 
+const ENTER_APP_MODE: &[u8] = b"\x1b[?1049h\x1b[2J\x1b[H";
+const EXIT_APP_MODE: &[u8] =
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1049l\x1b[?25h\x1b[0m";
+
 // Global flag to indicate a resize event occurred
 static RESIZE_PENDING: AtomicBool = AtomicBool::new(false);
 
@@ -56,10 +60,12 @@ fn main() {
         libc::signal(libc::SIGWINCH, handle_sigwinch as libc::sighandler_t);
     }
 
-    // Clear screen and move cursor to home position
+    // Own the host terminal as a full-screen application. Child applications'
+    // alternate-screen and mouse modes are consumed by the embedded emulator, so
+    // the outer terminal must be kept out of normal scrollback while shell runs.
     {
         let mut output = tty_output.lock().unwrap();
-        let _ = output.write_all(b"\x1b[2J\x1b[H");
+        let _ = output.write_all(ENTER_APP_MODE);
         let _ = output.flush();
     }
 
@@ -118,10 +124,11 @@ fn main() {
     }
 
     // Clean up: reset terminal
-    print!("\x1b[?25h"); // Show cursor
-    print!("\x1b[0m"); // Reset attributes
-    print!("\x1b[2J\x1b[H"); // Clear screen
-    std::io::stdout().flush().unwrap();
+    {
+        let mut output = tty_output.lock().unwrap();
+        let _ = output.write_all(EXIT_APP_MODE);
+        let _ = output.flush();
+    }
 }
 
 /// Get the terminal size using ioctl

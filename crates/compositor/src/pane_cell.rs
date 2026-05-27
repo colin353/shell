@@ -3,6 +3,13 @@ use crate::error::CompositorError;
 use crate::pane::{CtrlCResult, Pane, PaneInputResult};
 use crate::types::{Direction, SplitDirection};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseTarget {
+    pub local_x: usize,
+    pub local_y: usize,
+    pub mode: emulator::MouseMode,
+}
+
 /// A cell in the pane tree, which can be a single pane or a split.
 pub struct PaneCell {
     pub inner: PaneCellInner,
@@ -21,6 +28,13 @@ pub enum PaneCellInner {
 }
 
 impl PaneCell {
+    fn contains_position(&self, x: usize, y: usize) -> bool {
+        x >= self.pos_x
+            && x < self.pos_x.saturating_add(self.width)
+            && y >= self.pos_y
+            && y < self.pos_y.saturating_add(self.height)
+    }
+
     /// Handle keyboard input by routing it to the focused pane.
     /// Returns a `PaneInputResult` indicating what action should be taken.
     pub fn handle_input(&mut self, input: &[u8]) -> PaneInputResult {
@@ -95,6 +109,69 @@ impl PaneCell {
                     }
                 }
                 None
+            }
+        }
+    }
+
+    pub fn focused_mouse_mode(&self) -> emulator::MouseMode {
+        if !self.focus {
+            return emulator::MouseMode::default();
+        }
+
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.mouse_mode(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => cells
+                .iter()
+                .find(|cell| cell.focus)
+                .map(|cell| cell.focused_mouse_mode())
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn mouse_target_info(&self, x: usize, y: usize) -> Option<MouseTarget> {
+        if !self.contains_position(x, y) {
+            return None;
+        }
+
+        match &self.inner {
+            PaneCellInner::Pane(pane) => Some(MouseTarget {
+                local_x: x - self.pos_x,
+                local_y: y - self.pos_y,
+                mode: pane.mouse_mode(),
+            }),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                cells.iter().find_map(|cell| cell.mouse_target_info(x, y))
+            }
+        }
+    }
+
+    pub fn focus_pane_at(&mut self, x: usize, y: usize) -> bool {
+        if self.mouse_target_info(x, y).is_none() {
+            return false;
+        }
+
+        self.clear_focus();
+        self.set_focus_path_at(x, y)
+    }
+
+    fn set_focus_path_at(&mut self, x: usize, y: usize) -> bool {
+        if !self.contains_position(x, y) {
+            return false;
+        }
+
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {
+                self.focus = true;
+                true
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                if let Some(cell) = cells.iter_mut().find(|cell| cell.contains_position(x, y)) {
+                    if cell.set_focus_path_at(x, y) {
+                        self.focus = true;
+                        return true;
+                    }
+                }
+                false
             }
         }
     }

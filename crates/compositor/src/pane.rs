@@ -501,6 +501,14 @@ impl Pane {
         self.subprocess.is_some()
     }
 
+    pub fn mouse_mode(&self) -> emulator::MouseMode {
+        if self.subprocess.is_some() {
+            self.terminal_emulator.mouse_mode()
+        } else {
+            emulator::MouseMode::default()
+        }
+    }
+
     /// Handle CTRL+C with cascading logic.
     ///
     /// Returns a `CtrlCResult` indicating what action was taken:

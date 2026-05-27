@@ -14,6 +14,7 @@ use alacritty_terminal::vte::ansi::{Color as AlacColor, NamedColor, Processor, R
 use alacritty_terminal::Term;
 
 use crate::cell::{Cell, CellAttributes, Color, Line};
+use crate::{MouseEncoding, MouseMode, MouseReportMode};
 
 /// Dummy event listener that collects responses
 #[derive(Default)]
@@ -155,6 +156,30 @@ impl AlacrittyEmulator {
     /// Check if in alternate screen
     pub fn in_alternate_screen(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// Return the mouse reporting mode requested by the application.
+    pub fn mouse_mode(&self) -> MouseMode {
+        let mode = self.term.mode();
+        let report = if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseReportMode::Motion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseReportMode::Drag
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseReportMode::Click
+        } else {
+            MouseReportMode::None
+        };
+
+        let encoding = if mode.contains(TermMode::SGR_MOUSE) {
+            MouseEncoding::Sgr
+        } else if mode.contains(TermMode::UTF8_MOUSE) {
+            MouseEncoding::Utf8
+        } else {
+            MouseEncoding::Normal
+        };
+
+        MouseMode { report, encoding }
     }
 
     /// Get scroll region (top, bottom) - 0-indexed
@@ -350,6 +375,42 @@ mod tests {
         emu.resize(120, 40);
 
         assert_eq!(emu.dimensions(), (120, 40));
+    }
+
+    #[test]
+    fn test_mouse_mode_tracking() {
+        let mut emu = AlacrittyEmulator::new(80, 24);
+        assert_eq!(emu.mouse_mode(), MouseMode::default());
+
+        emu.process(b"\x1b[?1000h");
+        assert_eq!(
+            emu.mouse_mode(),
+            MouseMode {
+                report: MouseReportMode::Click,
+                encoding: MouseEncoding::Normal,
+            }
+        );
+
+        emu.process(b"\x1b[?1006h");
+        assert_eq!(
+            emu.mouse_mode(),
+            MouseMode {
+                report: MouseReportMode::Click,
+                encoding: MouseEncoding::Sgr,
+            }
+        );
+
+        emu.process(b"\x1b[?1002h");
+        assert_eq!(
+            emu.mouse_mode(),
+            MouseMode {
+                report: MouseReportMode::Drag,
+                encoding: MouseEncoding::Sgr,
+            }
+        );
+
+        emu.process(b"\x1b[?1002l\x1b[?1006l");
+        assert_eq!(emu.mouse_mode(), MouseMode::default());
     }
 
     #[test]

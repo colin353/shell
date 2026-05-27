@@ -29,6 +29,31 @@ pub enum CharSet {
     DecAltRomSpecial,
 }
 
+/// Mouse reporting mode requested by the application running in the terminal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseReportMode {
+    #[default]
+    None,
+    Click,
+    Drag,
+    Motion,
+}
+
+/// Mouse coordinate encoding requested by the application.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseEncoding {
+    #[default]
+    Normal,
+    Utf8,
+    Sgr,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MouseMode {
+    pub report: MouseReportMode,
+    pub encoding: MouseEncoding,
+}
+
 impl Default for CharSet {
     fn default() -> Self {
         CharSet::Ascii
@@ -275,6 +300,10 @@ impl TerminalEmulator {
     /// Drain queued responses (for DSR and other terminal queries)
     pub fn drain_responses(&mut self) -> Vec<Vec<u8>> {
         self.inner.drain_responses()
+    }
+
+    pub fn mouse_mode(&self) -> MouseMode {
+        self.inner.mouse_mode()
     }
 
     /// Get access to the underlying AlacrittyEmulator for debugging

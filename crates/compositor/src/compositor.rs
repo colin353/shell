@@ -4,6 +4,7 @@ use crate::pane_cell::PaneCell;
 use crate::tab::Tab;
 use crate::types::{Direction, SplitDirection};
 use crate::{BSU, ESU, STATUS_BAR_HEIGHT};
+use emulator::{MouseEncoding, MouseMode, MouseReportMode};
 use nix::unistd::{read, write};
 use std::collections::VecDeque;
 use std::io::Write;
@@ -74,6 +75,7 @@ fn decode_csi(input: &[u8]) -> Option<(Vec<u16>, u8, usize)> {
         if (0x40..=0x7e).contains(&byte) {
             break;
         }
+
         if !byte.is_ascii_digit() && byte != b';' {
             return None;
         }
@@ -97,6 +99,135 @@ fn decode_csi(input: &[u8]) -> Option<(Vec<u16>, u8, usize)> {
         .collect::<Option<Vec<_>>>()?;
 
     Some((params, input[final_index], final_index + 1))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SgrMouseEvent {
+    button: u16,
+    x: usize,
+    y: usize,
+    final_byte: u8,
+    len: usize,
+}
+
+fn parse_sgr_mouse_event(input: &[u8]) -> Option<SgrMouseEvent> {
+    if !input.starts_with(b"\x1b[<") {
+        return None;
+    }
+
+    let final_index = input
+        .iter()
+        .position(|&byte| byte == b'M' || byte == b'm')?;
+    let params = std::str::from_utf8(&input[3..final_index]).ok()?;
+    let mut parts = params.split(';');
+    let button = parts.next()?.parse::<u16>().ok()?;
+    let x = parts.next()?.parse::<usize>().ok()?.checked_sub(1)?;
+    let y = parts.next()?.parse::<usize>().ok()?.checked_sub(1)?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some(SgrMouseEvent {
+        button,
+        x,
+        y,
+        final_byte: input[final_index],
+        len: final_index + 1,
+    })
+}
+
+fn encode_mouse_event(
+    event: SgrMouseEvent,
+    local_x: usize,
+    local_y: usize,
+    encoding: MouseEncoding,
+) -> Option<Vec<u8>> {
+    match encoding {
+        MouseEncoding::Sgr => Some(
+            format!(
+                "\x1b[<{};{};{}{}",
+                event.button,
+                local_x + 1,
+                local_y + 1,
+                event.final_byte as char
+            )
+            .into_bytes(),
+        ),
+        MouseEncoding::Normal | MouseEncoding::Utf8 => {
+            let legacy_button = if event.final_byte == b'm' {
+                (event.button & !0b11) | 0b11
+            } else {
+                event.button
+            };
+            let button = legacy_button.checked_add(32)?;
+            let x = u16::try_from(local_x + 1).ok()?.checked_add(32)?;
+            let y = u16::try_from(local_y + 1).ok()?.checked_add(32)?;
+            if button > u8::MAX as u16 || x > u8::MAX as u16 || y > u8::MAX as u16 {
+                return None;
+            }
+            Some(vec![0x1b, b'[', b'M', button as u8, x as u8, y as u8])
+        }
+    }
+}
+
+fn host_mouse_sequence(mode: MouseMode) -> Vec<u8> {
+    let mut sequence =
+        Vec::from(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l".as_slice());
+
+    let report_sequence = match mode.report {
+        MouseReportMode::None => return sequence,
+        MouseReportMode::Click => b"\x1b[?1000h".as_slice(),
+        MouseReportMode::Drag => b"\x1b[?1002h".as_slice(),
+        MouseReportMode::Motion => b"\x1b[?1003h".as_slice(),
+    };
+
+    sequence.extend_from_slice(b"\x1b[?1006h");
+    sequence.extend_from_slice(report_sequence);
+    sequence
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_sgr_mouse_event() {
+        let event = parse_sgr_mouse_event(b"\x1b[<64;10;5Mabc").unwrap();
+        assert_eq!(
+            event,
+            SgrMouseEvent {
+                button: 64,
+                x: 9,
+                y: 4,
+                final_byte: b'M',
+                len: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn translates_sgr_mouse_coordinates() {
+        let event = parse_sgr_mouse_event(b"\x1b[<64;10;5M").unwrap();
+        let translated = encode_mouse_event(event, 2, 3, MouseEncoding::Sgr).unwrap();
+        assert_eq!(translated, b"\x1b[<64;3;4M");
+    }
+
+    #[test]
+    fn translates_release_to_legacy_mouse_encoding() {
+        let event = parse_sgr_mouse_event(b"\x1b[<0;10;5m").unwrap();
+        let translated = encode_mouse_event(event, 2, 3, MouseEncoding::Normal).unwrap();
+        assert_eq!(translated, vec![0x1b, b'[', b'M', 35, 35, 36]);
+    }
+
+    #[test]
+    fn host_mouse_sequence_uses_sgr_reporting() {
+        let sequence = host_mouse_sequence(MouseMode {
+            report: MouseReportMode::Drag,
+            encoding: MouseEncoding::Normal,
+        });
+
+        assert!(sequence.ends_with(b"\x1b[?1006h\x1b[?1002h"));
+    }
 }
 
 /// The main compositor that manages terminal panes and the event loop.
@@ -127,6 +258,8 @@ pub struct Compositor {
 
     // Whether the terminal supports synchronized output mode
     pub synchronized_output: bool,
+
+    host_mouse_mode: MouseMode,
 
     // Clock function for getting current time (mockable for tests)
     clock: ClockFn,
@@ -179,6 +312,7 @@ impl Compositor {
             input_queue: Mutex::new(VecDeque::new()),
             prefix_mode: false,
             synchronized_output: false,
+            host_mouse_mode: MouseMode::default(),
             clock: Box::new(|| chrono::Local::now()),
         })
     }
@@ -220,6 +354,7 @@ impl Compositor {
             input_queue: Mutex::new(VecDeque::new()),
             prefix_mode: false,
             synchronized_output: false,
+            host_mouse_mode: MouseMode::default(),
             clock: Box::new(|| chrono::Local::now()),
         })
     }
@@ -259,6 +394,14 @@ impl Compositor {
     /// Returns `true` if the compositor should exit, `false` otherwise.
     pub fn handle_input(&mut self, input: &[u8]) -> bool {
         if input.is_empty() {
+            return false;
+        }
+
+        if let Some(event) = parse_sgr_mouse_event(input) {
+            self.handle_mouse_event(event);
+            if event.len < input.len() {
+                return self.handle_input(&input[event.len..]);
+            }
             return false;
         }
 
@@ -399,6 +542,37 @@ impl Compositor {
         let result = self.active_tab_mut().root.handle_input(input);
         self.handle_pane_input_result(result);
         false
+    }
+
+    fn handle_mouse_event(&mut self, event: SgrMouseEvent) {
+        let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+        if event.y >= pane_height {
+            return;
+        }
+
+        let (local_x, local_y, mode, should_focus) = if self.active_tab().zoomed {
+            let mode = self.active_tab().root.focused_mouse_mode();
+            (event.x, event.y, mode, false)
+        } else if let Some(target) = self.active_tab().root.mouse_target_info(event.x, event.y) {
+            (target.local_x, target.local_y, target.mode, true)
+        } else {
+            return;
+        };
+
+        if mode.report == MouseReportMode::None {
+            return;
+        }
+
+        let Some(translated) = encode_mouse_event(event, local_x, local_y, mode.encoding) else {
+            return;
+        };
+
+        if should_focus {
+            self.active_tab_mut().root.focus_pane_at(event.x, event.y);
+        }
+
+        let result = self.active_tab_mut().root.handle_input(&translated);
+        self.handle_pane_input_result(result);
     }
 
     fn toggle_zoom(&mut self) {
@@ -1070,6 +1244,8 @@ impl Compositor {
     /// This traverses all panes, taking their grid contents and compositing them into
     /// a single terminal emulator. Then, it uses delta rendering to output only the changed parts.
     pub fn render(&mut self) {
+        self.sync_host_mouse_mode();
+
         // Clear the global emulator to prepare for compositing
         let (cols, rows) = self.global_emulator.dimensions();
         self.global_emulator = emulator::TerminalEmulator::new(cols, rows);
@@ -1135,6 +1311,20 @@ impl Compositor {
 
         // Save the current frame as the previous frame for next render
         self.prev_frame = self.global_emulator.grid().clone();
+    }
+
+    fn sync_host_mouse_mode(&mut self) {
+        let mode = self.active_tab().root.focused_mouse_mode();
+        if mode == self.host_mouse_mode {
+            return;
+        }
+
+        let sequence = host_mouse_sequence(mode);
+        if let Ok(mut output) = self.output.lock() {
+            let _ = output.write_all(&sequence);
+            let _ = output.flush();
+        }
+        self.host_mouse_mode = mode;
     }
 
     /// Render the status bar at the bottom of the terminal.
