@@ -48,6 +48,16 @@ impl PtyProcess {
     /// * `cols` - Terminal width in columns
     /// * `rows` - Terminal height in rows
     pub fn spawn(command: &str, cols: u16, rows: u16) -> Result<Self, PtyError> {
+        Self::spawn_with_env(command, cols, rows, &[])
+    }
+
+    /// Spawn a new process with environment variable overrides.
+    pub fn spawn_with_env(
+        command: &str,
+        cols: u16,
+        rows: u16,
+        env: &[(String, String)],
+    ) -> Result<Self, PtyError> {
         let winsize = Winsize {
             ws_row: rows,
             ws_col: cols,
@@ -95,13 +105,17 @@ impl PtyProcess {
                 }
 
                 // Parse command and execute
-                Self::exec_command(command);
+                Self::exec_command(command, env);
             }
         }
     }
 
     /// Execute the command in the child process (never returns on success)
-    fn exec_command(command: &str) -> ! {
+    fn exec_command(command: &str, env: &[(String, String)]) -> ! {
+        for (key, value) in env {
+            std::env::set_var(key, value);
+        }
+
         // Set TERM so programs know they can use colors and escape sequences
         std::env::set_var("TERM", "xterm-256color");
         // Some programs also check COLORTERM for true color support detection
@@ -113,7 +127,7 @@ impl PtyProcess {
         }
 
         // Execute via bash to get shell features (variable expansion, pipes, etc.)
-        let bash = CString::new("bash").unwrap();
+        let bash = CString::new("/bin/bash").unwrap();
         let c_flag = CString::new("-c").unwrap();
         let c_command = CString::new(command).unwrap();
         let args: Vec<&std::ffi::CStr> =
@@ -343,6 +357,71 @@ mod tests {
         assert!(
             output_str.contains("xterm-256color"),
             "Expected 'xterm-256color' in output (env var should be expanded): {}",
+            output_str
+        );
+    }
+
+    #[test]
+    fn test_spawn_with_env_overrides_child_env() {
+        let pty = PtyProcess::spawn_with_env(
+            "echo $SHELL_ENV_TEST_VALUE",
+            80,
+            24,
+            &[(
+                "SHELL_ENV_TEST_VALUE".to_string(),
+                "from-shell-env".to_string(),
+            )],
+        )
+        .unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+
+        let mut buf = [0u8; 1024];
+        let mut output = Vec::new();
+
+        for _ in 0..10 {
+            if let Ok(Some(n)) = pty.read(&mut buf) {
+                output.extend_from_slice(&buf[..n]);
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains("from-shell-env"),
+            "Expected overridden env var in output: {}",
+            output_str
+        );
+    }
+
+    #[test]
+    fn test_spawn_with_env_path_override_does_not_prevent_bash_exec() {
+        let pty = PtyProcess::spawn_with_env(
+            "echo ok",
+            80,
+            24,
+            &[("PATH".to_string(), "/tmp".to_string())],
+        )
+        .unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+
+        let mut buf = [0u8; 1024];
+        let mut output = Vec::new();
+
+        for _ in 0..10 {
+            if let Ok(Some(n)) = pty.read(&mut buf) {
+                output.extend_from_slice(&buf[..n]);
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains("ok"),
+            "Expected bash to run even with PATH overridden: {}",
             output_str
         );
     }

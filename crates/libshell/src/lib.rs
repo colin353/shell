@@ -20,11 +20,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use unicode_width::UnicodeWidthChar;
 
+mod diagnostics;
+mod environment;
 pub mod file_finder;
 pub mod history;
 pub mod picker;
 mod syntax;
 
+pub use diagnostics::{
+    clear_global_diagnostic_flag, global_diagnostic_flags, set_global_diagnostic_flag,
+    GlobalDiagnosticFlag,
+};
+pub use environment::{reload_shell_env, shell_env_file_path, shell_env_snapshot, ShellEnvError};
 pub use history::{
     BackupConfig, CommandSource, EntryId, HistoryEntry, HistorySearchResult, SearchResult,
     ShellHistory,
@@ -2355,6 +2362,32 @@ impl Shell {
                     });
                 }
             }
+            "reload-env" => {
+                let exit_code = match reload_shell_env() {
+                    Ok(count) => {
+                        output.extend(
+                            format!(
+                                "reload-env: loaded {} variables from {}\r\n",
+                                count,
+                                shell_env_file_path().display()
+                            )
+                            .as_bytes(),
+                        );
+                        0
+                    }
+                    Err(err) => {
+                        output.extend(format!("reload-env: {}\r\n", err).as_bytes());
+                        1
+                    }
+                };
+
+                if let Some(id) = history_id {
+                    let _ = self.core.record_exit(&id, exit_code, 0);
+                }
+
+                self.refresh_history_cache();
+                output.extend(self.get_prompt().as_bytes());
+            }
             _ => {
                 // External command - request subprocess spawn
                 // Store the history ID so we can record exit status later
@@ -2366,7 +2399,7 @@ impl Shell {
                     output: vec![], // Will be filled in by handle_input
                     command: parts[0].to_string(),
                     args: parts[1..].iter().map(|s| s.to_string()).collect(),
-                    env: vec![],
+                    env: shell_env_snapshot(),
                     cwd: self.cwd.clone(),
                     history_id,
                 });

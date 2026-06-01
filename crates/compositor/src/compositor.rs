@@ -1553,7 +1553,7 @@ impl Compositor {
         }
 
         // Check if we're in scrollback mode and render scroll indicator instead of date/time
-        let right_text = if self.tabs[self.active_tab].root.is_in_scrollback_mode() {
+        let Some(right_text) = (if self.tabs[self.active_tab].root.is_in_scrollback_mode() {
             // Create attributes for scrollback indicator
             let mut scroll_attrs = emulator::CellAttributes::default();
             scroll_attrs.bg_color = Some(emulator::Color::Yellow);
@@ -1583,12 +1583,49 @@ impl Compositor {
         } else {
             // Render the date/time on the right side of the first status bar row
             let datetime = (self.clock)();
-            datetime.format(" %Y-%m-%d %H:%M ").to_string()
+            Some(datetime.format(" %Y-%m-%d %H:%M ").to_string())
+        }) else {
+            return;
         };
 
-        let time_start_x = cols.saturating_sub(right_text.len());
+        let diagnostics = libshell::global_diagnostic_flags();
+        let diagnostics_width = diagnostics.len() * 2;
+        let time_start_x = cols.saturating_sub(diagnostics_width + right_text.len());
+        let mut right_x = time_start_x;
+
+        for flag in diagnostics {
+            if right_x < cols {
+                self.global_emulator.grid_mut().set_cell(
+                    right_x,
+                    status_bar_y,
+                    emulator::Cell::new(' ', bar_attrs.clone()),
+                );
+                right_x += 1;
+            }
+
+            let mut diagnostic_attrs = bar_attrs.clone();
+            diagnostic_attrs.fg_color = Some(match flag {
+                libshell::GlobalDiagnosticFlag::EnvironmentParseFailure => emulator::Color::Red,
+            });
+            diagnostic_attrs.bold = true;
+
+            if right_x < cols {
+                self.global_emulator.grid_mut().set_cell(
+                    right_x,
+                    status_bar_y,
+                    emulator::Cell::new(
+                        match flag {
+                            libshell::GlobalDiagnosticFlag::EnvironmentParseFailure => 'E',
+                        },
+                        diagnostic_attrs,
+                    ),
+                );
+                right_x += 1;
+            }
+        }
+
         for (i, ch) in right_text.chars().enumerate() {
-            let x = time_start_x + i;
+            let x = right_x + i;
             if x < cols {
                 self.global_emulator.grid_mut().set_cell(
                     x,

@@ -383,6 +383,37 @@ mod tests {
     }
 
     #[test]
+    fn test_status_bar_shows_environment_diagnostic() {
+        use chrono::TimeZone;
+
+        libshell::clear_global_diagnostic_flag(
+            libshell::GlobalDiagnosticFlag::EnvironmentParseFailure,
+        );
+        libshell::set_global_diagnostic_flag(
+            libshell::GlobalDiagnosticFlag::EnvironmentParseFailure,
+        );
+
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        compositor.set_fixed_time(
+            chrono::Local
+                .with_ymd_and_hms(2025, 1, 1, 12, 0, 0)
+                .unwrap(),
+        );
+
+        let _ = compositor.render_to_vec();
+        let cell = compositor.global_emulator().grid().get_cell(61, 23);
+
+        assert_eq!(cell.character, 'E');
+        assert_eq!(cell.attrs.fg_color, Some(emulator::Color::Red));
+        assert!(cell.attrs.bold);
+
+        libshell::clear_global_diagnostic_flag(
+            libshell::GlobalDiagnosticFlag::EnvironmentParseFailure,
+        );
+    }
+
+    #[test]
     fn test_parse_sync_query_response() {
         // Test valid responses indicating support
         // Mode is reset (Ps=2)

@@ -301,7 +301,7 @@ impl Pane {
                 output,
                 command,
                 args,
-                env: _,
+                env,
                 cwd,
                 history_id: _,
             } => {
@@ -325,7 +325,7 @@ impl Pane {
                 let _ = std::env::set_current_dir(&cwd);
 
                 self.subprocess_typeahead.clear();
-                match pty::PtyProcess::spawn(&full_command, width, height) {
+                match pty::PtyProcess::spawn_with_env(&full_command, width, height, &env) {
                     Ok(proc) => {
                         self.subprocess = Some(proc);
                     }
@@ -365,7 +365,8 @@ impl Pane {
                 let full_command = format!("{} {}", editor, temp_file.display());
 
                 self.subprocess_typeahead.clear();
-                match pty::PtyProcess::spawn(&full_command, width, height) {
+                let env = libshell::shell_env_snapshot();
+                match pty::PtyProcess::spawn_with_env(&full_command, width, height, &env) {
                     Ok(proc) => {
                         self.subprocess = Some(proc);
                         // Store the temp file path so we can read it when editor exits
