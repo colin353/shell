@@ -92,7 +92,11 @@ pub struct Cell {
 
 impl Cell {
     pub fn new(character: char, attrs: CellAttributes) -> Self {
-        Self { character, attrs, is_wide_char_spacer: false }
+        Self {
+            character,
+            attrs,
+            is_wide_char_spacer: false,
+        }
     }
 
     pub fn empty() -> Self {

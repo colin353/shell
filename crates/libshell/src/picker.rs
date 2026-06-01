@@ -109,15 +109,13 @@ impl PickerItem {
     /// Returns None if no status should be shown
     pub fn status_indicator(&self) -> Option<(char, bool)> {
         match self {
-            PickerItem::History(result) => {
-                result.entry.exit_code.map(|code| {
-                    if code == 0 {
-                        ('✓', true)
-                    } else {
-                        ('✗', false)
-                    }
-                })
-            }
+            PickerItem::History(result) => result.entry.exit_code.map(|code| {
+                if code == 0 {
+                    ('✓', true)
+                } else {
+                    ('✗', false)
+                }
+            }),
             PickerItem::TabCompletion(_) => None,
             PickerItem::File(item) => {
                 if item.is_directory {
@@ -546,7 +544,7 @@ mod tests {
     #[test]
     fn test_picker_state_navigation() {
         let mut state = PickerState::new(PickerMode::HistorySearch);
-        
+
         // Empty state - navigation should be safe
         state.move_up();
         state.move_down();
@@ -576,7 +574,7 @@ mod tests {
         ]);
 
         assert_eq!(state.selected, 0);
-        
+
         // Move up
         state.move_up();
         assert_eq!(state.selected, 1);
@@ -652,12 +650,12 @@ mod tests {
         };
 
         let state = PickerState::new_tab_completion(ctx);
-        
+
         assert_eq!(state.mode, PickerMode::TabCompletion);
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.selected, 0);
         assert!(state.tab_completion_ctx.is_some());
-        
+
         let ctx = state.tab_completion_ctx.as_ref().unwrap();
         assert_eq!(ctx.prefix, "carg");
         assert_eq!(ctx.replace_start, 0);

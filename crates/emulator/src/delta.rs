@@ -232,7 +232,7 @@ fn emit_cell_batch(
         let mut buf = [0u8; 4];
         let s = cell.character.encode_utf8(&mut buf);
         output.extend_from_slice(s.as_bytes());
-        
+
         // Advance cursor by the character's display width
         // Wide characters (CJK, emoji, etc.) are 2 columns wide
         let char_width = cell.character.width().unwrap_or(1);

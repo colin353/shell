@@ -13,7 +13,7 @@ compositor ➜
 compositor ➜ echo '日本語漢字中国語韓国語台湾語香港語新加坡語馬來西亞'          
 日本語漢字中国語韓国語台湾語香港語新加坡語馬來西亞                              
 compositor ➜ hello world                                                        
-bash: hello: command not found                                                  
+bash: line 1: hello: command not found                                          
  exit 127                                                                       
 compositor ➜                                                                    
                                                                                 

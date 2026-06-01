@@ -106,7 +106,11 @@ pub fn get_completions<F: FileSystem>(
 }
 
 /// Analyze the cursor position to determine completion context.
-fn analyze_cursor_position<'a>(tree: &Tree, source: &'a str, cursor_pos: usize) -> CursorContext<'a> {
+fn analyze_cursor_position<'a>(
+    tree: &Tree,
+    source: &'a str,
+    cursor_pos: usize,
+) -> CursorContext<'a> {
     let root = tree.root_node();
 
     // Find the node at cursor position
@@ -144,7 +148,7 @@ fn analyze_cursor_position<'a>(tree: &Tree, source: &'a str, cursor_pos: usize) 
             let is_path_with_var = parent.map_or(false, |p| {
                 p.kind() == "concatenation" && source[start..].contains('/')
             });
-            
+
             if is_path_with_var {
                 // Get the full concatenated word for file completion
                 if let Some(p) = parent {
@@ -449,7 +453,7 @@ fn complete_files<F: FileSystem>(
     fs: &F,
 ) -> Vec<Completion> {
     use crate::expand_path_with_info_env;
-    
+
     let word = ctx.word;
 
     // Check if the word starts with ~ or $ (needs expansion)

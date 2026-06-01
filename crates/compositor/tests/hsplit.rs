@@ -1495,7 +1495,7 @@ fn test_vsplit_unicode_rendering() -> Result<(), CompositorError> {
     compositor.render_to_vec();
 
     // Echo CJK characters (each should be 2 columns wide)
-    compositor.handle_input(b"echo '\xe4\xb8\xad\xe6\x96\x87\xe5\xad\x97\xe7\xac\xa6'");  // 中文字符
+    compositor.handle_input(b"echo '\xe4\xb8\xad\xe6\x96\x87\xe5\xad\x97\xe7\xac\xa6'"); // 中文字符
     compositor.handle_input(b"\r");
     compositor.render_to_vec();
 
@@ -1514,7 +1514,7 @@ fn test_vsplit_unicode_rendering() -> Result<(), CompositorError> {
     compositor.handle_input(&[0x0c]); // Ctrl+l - move focus right
     compositor.render_to_vec();
 
-    compositor.handle_input(b"echo '\xce\xb1\xce\xb2\xce\xb3'");  // αβγ
+    compositor.handle_input(b"echo '\xce\xb1\xce\xb2\xce\xb3'"); // αβγ
     compositor.handle_input(b"\r");
     compositor.render_to_vec();
 
@@ -1605,11 +1605,11 @@ fn test_unicode_incremental_vs_full_redraw() -> Result<(), CompositorError> {
     // - Emoji (varies, often 2 columns)
     // - Combining characters
     let test_strings = [
-        "echo 'a中b国c人d'",          // Interleaved ASCII and CJK
-        "echo '→←↑↓'",               // Arrows
+        "echo 'a中b国c人d'",        // Interleaved ASCII and CJK
+        "echo '→←↑↓'",              // Arrows
         "echo '①②③④⑤'",             // Circled numbers (narrow)
-        "echo '🇺🇸🇬🇧'",               // Flag emoji (complex graphemes)
-        "echo 'café résumé naïve'",   // Latin with diacritics
+        "echo '🇺🇸🇬🇧'",              // Flag emoji (complex graphemes)
+        "echo 'café résumé naïve'", // Latin with diacritics
     ];
 
     for s in &test_strings {
@@ -1842,11 +1842,11 @@ fn test_hsplit_unicode_via_bash() -> Result<(), CompositorError> {
 
     // Use printf to output unicode via bash - this bypasses the embedded shell's
     // input handling and tests pure terminal emulation
-    compositor.handle_input(b"printf '\\xe4\\xb8\\xad\\xe6\\x96\\x87\\n'\n");  // 中文 in UTF-8
+    compositor.handle_input(b"printf '\\xe4\\xb8\\xad\\xe6\\x96\\x87\\n'\n"); // 中文 in UTF-8
     wait_for_output(&mut compositor, 300);
 
     // Also print some box drawing and symbols
-    compositor.handle_input(b"printf '\\xe2\\x94\\x8c\\xe2\\x94\\x80\\xe2\\x94\\x90\\n'\n");  // ┌─┐
+    compositor.handle_input(b"printf '\\xe2\\x94\\x8c\\xe2\\x94\\x80\\xe2\\x94\\x90\\n'\n"); // ┌─┐
     wait_for_output(&mut compositor, 300);
 
     // Get compositor state after incremental rendering
@@ -1916,7 +1916,7 @@ fn test_vsplit_dense_unicode_via_bash() -> Result<(), CompositorError> {
     // Print a line of CJK characters near the border
     // In a 80-column terminal split vertically, each pane is ~39 columns
     // 15 CJK chars = 30 columns, should fit but tests width calculation
-    compositor.handle_input(b"printf '\\xe6\\x97\\xa5\\xe6\\x9c\\xac\\xe8\\xaa\\x9e\\xe4\\xb8\\xad\\xe5\\x9b\\xbd\\xe8\\xaa\\x9e\\xe9\\x9f\\x93\\xe5\\x9b\\xbd\\xe8\\xaa\\x9e\\n'\n");  // 日本語中国語韓国語
+    compositor.handle_input(b"printf '\\xe6\\x97\\xa5\\xe6\\x9c\\xac\\xe8\\xaa\\x9e\\xe4\\xb8\\xad\\xe5\\x9b\\xbd\\xe8\\xaa\\x9e\\xe9\\x9f\\x93\\xe5\\x9b\\xbd\\xe8\\xaa\\x9e\\n'\n"); // 日本語中国語韓国語
     wait_for_output(&mut compositor, 300);
 
     compositor.render_to_vec();
@@ -1989,9 +1989,13 @@ fn test_vim_ctrl_d_scroll() -> Result<(), CompositorError> {
     // Get absolute path to the test file using workspace root
     // CARGO_MANIFEST_DIR points to crates/compositor, go up to workspace root
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = std::path::Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+    let workspace_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
     let test_file = workspace_root.join("crates/libvim/fixtures/test_code.rs");
-    
+
     // Open vim on the test file
     let vim_cmd = format!("vim {}\n", test_file.display());
     compositor.handle_input(vim_cmd.as_bytes());
@@ -2211,9 +2215,8 @@ fn test_unicode_delta_clear() -> Result<(), CompositorError> {
         .collect();
     let replay_text = replay_lines.join("\n");
 
-    let replay_has_cjk = replay_text.contains("日")
-        || replay_text.contains("本")
-        || replay_text.contains("語");
+    let replay_has_cjk =
+        replay_text.contains("日") || replay_text.contains("本") || replay_text.contains("語");
 
     assert!(
         !replay_has_cjk,
@@ -2235,32 +2238,32 @@ fn test_delta_render_clears_wide_chars() {
     let mut emu_with_cjk = emulator::TerminalEmulator::new(80, 24);
     // Write CJK characters - each is 2 columns wide
     emu_with_cjk.process("日本語中国語".as_bytes());
-    
+
     // Create a blank emulator (simulating cleared screen)
     let blank_emu = emulator::TerminalEmulator::new(80, 24);
-    
+
     // Compute delta from CJK grid to blank grid
     let delta = emulator::compute_delta(emu_with_cjk.grid(), blank_emu.grid());
-    
+
     // Apply the delta to the CJK emulator
     emu_with_cjk.process(&delta);
-    
+
     // Get the text from the first line
     let line_text = emu_with_cjk.grid().get_line_text(0);
-    
+
     // The line should be blank (no CJK characters)
-    let has_cjk = line_text.contains("日") 
+    let has_cjk = line_text.contains("日")
         || line_text.contains("本")
         || line_text.contains("語")
         || line_text.contains("中")
         || line_text.contains("国");
-    
+
     assert!(
         !has_cjk,
         "After applying delta to blank, line should not contain CJK. Got: '{}'",
         line_text
     );
-    
+
     // The line should be all spaces or empty
     assert!(
         line_text.trim().is_empty(),
@@ -2275,27 +2278,27 @@ fn test_delta_render_wide_to_narrow() {
     // Emulator with wide CJK characters
     let mut emu1 = emulator::TerminalEmulator::new(80, 24);
     emu1.process("日本語中".as_bytes()); // 4 chars = 8 columns
-    
+
     // Emulator with narrow ASCII characters
     let mut emu2 = emulator::TerminalEmulator::new(80, 24);
     emu2.process(b"ABCDEFGH"); // 8 chars = 8 columns
-    
+
     // Compute delta
     let delta = emulator::compute_delta(emu1.grid(), emu2.grid());
-    
+
     // Apply delta to emu1
     emu1.process(&delta);
-    
+
     // Get the text
     let line_text = emu1.grid().get_line_text(0);
-    
+
     // Should contain the ASCII text, not CJK
     assert!(
         line_text.starts_with("ABCDEFGH"),
         "Should contain 'ABCDEFGH' after delta. Got: '{}'",
         line_text
     );
-    
+
     // Should NOT contain any CJK
     let has_cjk = line_text.contains("日") || line_text.contains("本");
     assert!(
@@ -2311,21 +2314,21 @@ fn test_delta_overwrite_wide_char() {
     // Emulator with a wide character at position 0
     let mut emu1 = emulator::TerminalEmulator::new(80, 24);
     emu1.process("日".as_bytes()); // 1 wide char = 2 columns
-    
+
     // Emulator with two narrow characters at positions 0 and 1
     let mut emu2 = emulator::TerminalEmulator::new(80, 24);
     emu2.process(b"AB"); // 2 chars = 2 columns
-    
+
     // Compute delta
     let delta = emulator::compute_delta(emu1.grid(), emu2.grid());
-    
+
     // Apply delta to emu1
     emu1.process(&delta);
-    
+
     // Get cell contents
     let cell0 = emu1.grid().get_cell(0, 0).character;
     let cell1 = emu1.grid().get_cell(1, 0).character;
-    
+
     // Both cells should now be A and B
     assert_eq!(cell0, 'A', "Cell 0 should be 'A', got '{}'", cell0);
     assert_eq!(cell1, 'B', "Cell 1 should be 'B', got '{}'", cell1);
@@ -2429,36 +2432,36 @@ fn test_wide_char_clear_delta() {
     let mut emu = emulator::TerminalEmulator::new(80, 24);
     // Write a line of CJK characters (each is 2 columns wide)
     emu.process("日本語漢字中国語\n".as_bytes());
-    
+
     // Now create a "cleared" state - all spaces
     let cleared = emulator::TerminalEmulator::new(80, 24);
-    
+
     // Compute the delta from CJK-filled to cleared
     let delta = emulator::compute_delta(emu.grid(), cleared.grid());
-    
+
     // Apply the delta to the CJK emulator
     emu.process(&delta);
-    
+
     // Get the first line's text
     let line0 = emu.grid().get_line_text(0);
     let line1 = emu.grid().get_line_text(1);
-    
+
     // Both lines should be blank - no CJK remnants
     let has_cjk_line0 = line0.contains("日") || line0.contains("本") || line0.contains("語");
     let has_cjk_line1 = line1.contains("日") || line1.contains("本") || line1.contains("語");
-    
+
     assert!(
         !has_cjk_line0,
         "Line 0 should be cleared of CJK. Got: '{}'",
         line0
     );
-    
+
     assert!(
         !has_cjk_line1,
         "Line 1 should be cleared of CJK. Got: '{}'",
         line1
     );
-    
+
     // All cells in the first row should be spaces
     for x in 0..20 {
         let cell = emu.grid().get_cell(x, 0);
@@ -2481,7 +2484,7 @@ fn test_cjk_echo_corruption() -> Result<(), CompositorError> {
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
-    
+
     // Check pane's terminal state BEFORE typing
     {
         let pane = compositor.get_focused_pane_mut().unwrap();
@@ -2496,7 +2499,7 @@ fn test_cjk_echo_corruption() -> Result<(), CompositorError> {
     // Echo CJK characters
     compositor.handle_input(b"echo '\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe6\xbc\xa2\xe5\xad\x97\xe4\xb8\xad\xe5\x9b\xbd\xe8\xaa\x9e\xe9\x9f\x93\xe5\x9b\xbd\xe8\xaa\x9e\xe5\x8f\xb0\xe6\xb9\xbe'\n");
     wait_for_output(&mut compositor, 500);
-    
+
     // Check pane's terminal state AFTER typing - compare cache vs inner
     {
         let pane = compositor.get_focused_pane_mut().unwrap();
@@ -2536,7 +2539,7 @@ fn test_cjk_echo_corruption() -> Result<(), CompositorError> {
         "Line 0 should contain the echo command. Got:\n{}",
         line0
     );
-    
+
     // Verify the CJK characters are present
     assert!(
         line0.contains("日本語") && line0.contains("韓国語"),
@@ -2555,15 +2558,15 @@ fn test_cjk_with_cat() -> Result<(), CompositorError> {
 
     compositor.set_fixed_time(fixed_test_time());
     wait_for_output(&mut compositor, 500);
-    
+
     // Run cat as a subprocess
     compositor.handle_input(b"cat\n");
     wait_for_output(&mut compositor, 300);
-    
+
     // Type some CJK characters
     compositor.handle_input("日本語\n".as_bytes());
     wait_for_output(&mut compositor, 300);
-    
+
     // Check pane state
     {
         let pane = compositor.get_focused_pane_mut().unwrap();
@@ -2575,11 +2578,11 @@ fn test_cjk_with_cat() -> Result<(), CompositorError> {
         eprintln!("  Inner line 1: {}", inner_line1);
         eprintln!("  Inner line 2: {}", inner_line2);
     }
-    
+
     // Exit cat
     compositor.handle_input(b"\x04"); // Ctrl+D
     wait_for_output(&mut compositor, 300);
-    
+
     Ok(())
 }
 
@@ -2591,37 +2594,41 @@ fn test_cjk_ctrl_w_corruption() -> Result<(), CompositorError> {
 
     compositor.set_fixed_time(fixed_test_time());
     wait_for_output(&mut compositor, 500);
-    
+
     // Type "echo 日本語漢字中"
     compositor.handle_input("echo 日本語漢字中".as_bytes());
     compositor.render_to_vec();
-    
+
     // Check state before Ctrl+W
     {
         let pane = compositor.get_focused_pane_mut().unwrap();
         let line0 = pane.terminal_emulator.grid().get_line_text(0);
         eprintln!("Before Ctrl+W: {}", line0);
-        assert!(line0.contains("echo 日本語漢字中"), "Expected full text before Ctrl+W. Got: {}", line0);
+        assert!(
+            line0.contains("echo 日本語漢字中"),
+            "Expected full text before Ctrl+W. Got: {}",
+            line0
+        );
     }
-    
+
     // Press Ctrl+W to delete word
     compositor.handle_input(&[0x17]); // Ctrl+W
     compositor.render_to_vec();
-    
-    // Check state after Ctrl+W - should have deleted "日本語漢字中" 
+
+    // Check state after Ctrl+W - should have deleted "日本語漢字中"
     // and left "echo "
     {
         let pane = compositor.get_focused_pane_mut().unwrap();
         let line0 = pane.terminal_emulator.grid().get_line_text(0);
         eprintln!("After Ctrl+W: {}", line0);
-        
+
         // Should NOT have corrupted fragments like repeated characters
         assert!(
             !line0.contains("eeecho") && !line0.contains("echoecho"),
             "Line should not have corrupted echo fragments. Got:\n{}",
             line0
         );
-        
+
         // Should have "echo " remaining (word deleted)
         assert!(
             line0.contains("echo ") && !line0.contains("日"),
@@ -2629,6 +2636,6 @@ fn test_cjk_ctrl_w_corruption() -> Result<(), CompositorError> {
             line0
         );
     }
-    
+
     Ok(())
 }

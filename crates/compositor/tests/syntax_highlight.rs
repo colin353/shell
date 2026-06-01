@@ -108,7 +108,7 @@ fn test_syntax_highlighting_echo() -> Result<(), CompositorError> {
 
     // Type "echo hello world" character by character
     compositor.handle_input(b"echo hello world");
-    
+
     // Capture the raw render output with ANSI codes
     let raw_output = compositor.render_to_vec();
     save_raw_fixture("syntax_highlight_echo_hello_world_raw.txt", &raw_output);
@@ -344,7 +344,10 @@ fn test_syntax_highlighting_backspace() -> Result<(), CompositorError> {
     compositor.render_to_vec();
 
     let after_backspace_lines = compositor.get_text_lines();
-    save_fixture("syntax_highlight_after_backspace.txt", &after_backspace_lines);
+    save_fixture(
+        "syntax_highlight_after_backspace.txt",
+        &after_backspace_lines,
+    );
 
     // Verify the text now shows "echo" (not "echoX")
     let text: String = after_backspace_lines.join("\n");

@@ -244,7 +244,7 @@ pub struct ParsedSearchPath {
 
 impl ParsedSearchPath {
     /// Convert an expanded path back to display form using the original prefix.
-    /// 
+    ///
     /// For example, if original_prefix is "~" and expanded_prefix is "/Users/name",
     /// then "/Users/name/Documents" becomes "~/Documents".
     pub fn to_display_path(&self, expanded_path: &str) -> String {
@@ -282,7 +282,7 @@ pub fn parse_word_for_search(word: &str, cwd: &Path) -> (PathBuf, String, bool) 
 /// A ParsedSearchPath with all the information needed for completion
 pub fn parse_word_for_search_full(word: &str, cwd: &Path) -> ParsedSearchPath {
     use crate::expand_path;
-    
+
     if word.is_empty() {
         return ParsedSearchPath {
             base_dir: cwd.to_path_buf(),
@@ -297,18 +297,28 @@ pub fn parse_word_for_search_full(word: &str, cwd: &Path) -> ParsedSearchPath {
     let (expanded_word, original_prefix, expanded_prefix) = if word.starts_with('~') {
         let expanded = expand_path(word);
         let home = std::env::var("HOME").unwrap_or_default();
-        (expanded.to_string_lossy().to_string(), Some("~".to_string()), Some(home))
+        (
+            expanded.to_string_lossy().to_string(),
+            Some("~".to_string()),
+            Some(home),
+        )
     } else if word.starts_with('$') {
         let expanded = expand_path(word);
         let expanded_str = expanded.to_string_lossy().to_string();
         // Extract the variable name for the prefix
-        let var_end = word[1..].chars()
+        let var_end = word[1..]
+            .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '{' || *c == '}')
-            .count() + 1;
+            .count()
+            + 1;
         let var_part = &word[..var_end];
         // Get the expanded value of just the variable
         let var_expanded = expand_path(var_part);
-        (expanded_str, Some(var_part.to_string()), Some(var_expanded.to_string_lossy().to_string()))
+        (
+            expanded_str,
+            Some(var_part.to_string()),
+            Some(var_expanded.to_string_lossy().to_string()),
+        )
     } else {
         (word.to_string(), None, None)
     };
@@ -449,10 +459,7 @@ mod tests {
 
     #[test]
     fn test_quote_path_with_spaces() {
-        assert_eq!(
-            quote_path_if_needed("my file.txt"),
-            "\"my file.txt\""
-        );
+        assert_eq!(quote_path_if_needed("my file.txt"), "\"my file.txt\"");
         assert_eq!(
             quote_path_if_needed("path/to/my file.txt"),
             "\"path/to/my file.txt\""
@@ -471,7 +478,7 @@ mod tests {
     #[test]
     fn test_parse_word_absolute() {
         let cwd = PathBuf::from("/home/user");
-        
+
         let (base, query, is_abs) = parse_word_for_search("/usr/bin/ca", &cwd);
         assert!(is_abs);
         assert_eq!(query, "ca");
@@ -481,7 +488,7 @@ mod tests {
     #[test]
     fn test_parse_word_relative() {
         let cwd = PathBuf::from("/home/user");
-        
+
         // When `src` dir doesn't exist, falls back to cwd with full word as query
         let (base, query, is_abs) = parse_word_for_search("src/main", &cwd);
         assert!(!is_abs);
@@ -493,7 +500,7 @@ mod tests {
     #[test]
     fn test_parse_word_empty() {
         let cwd = PathBuf::from("/home/user");
-        
+
         let (base, query, is_abs) = parse_word_for_search("", &cwd);
         assert!(!is_abs);
         assert_eq!(base, cwd);

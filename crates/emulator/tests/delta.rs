@@ -1295,7 +1295,8 @@ fn test_compositor_delta_flow_ctrl_a() {
     }
 
     // Step 2: Press up arrow to recall command
-    pty.write(&[0x1b, b'[', b'A']).expect("Failed to write up arrow");
+    pty.write(&[0x1b, b'[', b'A'])
+        .expect("Failed to write up arrow");
     for _ in 0..20 {
         thread::sleep(Duration::from_millis(20));
         drain_and_process(&pty, &mut pane_emulator, &mut buf);
@@ -1315,13 +1316,21 @@ fn test_compositor_delta_flow_ctrl_a() {
     let delta_after_ctrl_a = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
 
     if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
-        eprintln!("=== Delta after Ctrl+A ({} bytes): {:?} ===", 
-            delta_after_ctrl_a.len(), 
-            String::from_utf8_lossy(&delta_after_ctrl_a));
-        eprintln!("=== Pane emulator cursor: ({}, {}) ===",
-            pane_emulator.grid().cursor_x, pane_emulator.grid().cursor_y);
-        eprintln!("=== Real terminal cursor: ({}, {}) ===",
-            real_terminal.grid().cursor_x, real_terminal.grid().cursor_y);
+        eprintln!(
+            "=== Delta after Ctrl+A ({} bytes): {:?} ===",
+            delta_after_ctrl_a.len(),
+            String::from_utf8_lossy(&delta_after_ctrl_a)
+        );
+        eprintln!(
+            "=== Pane emulator cursor: ({}, {}) ===",
+            pane_emulator.grid().cursor_x,
+            pane_emulator.grid().cursor_y
+        );
+        eprintln!(
+            "=== Real terminal cursor: ({}, {}) ===",
+            real_terminal.grid().cursor_x,
+            real_terminal.grid().cursor_y
+        );
         panic!("Mismatch after Ctrl+A: {}", msg);
     }
 
@@ -1334,9 +1343,11 @@ fn test_compositor_delta_flow_ctrl_a() {
     let delta_after_insert = render_and_apply(&pane_emulator, &mut prev_frame, &mut real_terminal);
 
     if let Err(msg) = grids_match(real_terminal.grid(), pane_emulator.grid()) {
-        eprintln!("=== Delta after insert ({} bytes): {:?} ===", 
-            delta_after_insert.len(), 
-            String::from_utf8_lossy(&delta_after_insert));
+        eprintln!(
+            "=== Delta after insert ({} bytes): {:?} ===",
+            delta_after_insert.len(),
+            String::from_utf8_lossy(&delta_after_insert)
+        );
         eprintln!("=== Pane emulator state ===");
         for y in 0..5 {
             eprintln!("  {}", pane_emulator.grid().get_line_text(y));
@@ -1345,9 +1356,13 @@ fn test_compositor_delta_flow_ctrl_a() {
         for y in 0..5 {
             eprintln!("  {}", real_terminal.grid().get_line_text(y));
         }
-        eprintln!("=== Pane cursor: ({}, {}), Real cursor: ({}, {}) ===",
-            pane_emulator.grid().cursor_x, pane_emulator.grid().cursor_y,
-            real_terminal.grid().cursor_x, real_terminal.grid().cursor_y);
+        eprintln!(
+            "=== Pane cursor: ({}, {}), Real cursor: ({}, {}) ===",
+            pane_emulator.grid().cursor_x,
+            pane_emulator.grid().cursor_y,
+            real_terminal.grid().cursor_x,
+            real_terminal.grid().cursor_y
+        );
         panic!("Mismatch after typing 'asdf': {}", msg);
     }
 }

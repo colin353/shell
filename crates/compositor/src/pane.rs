@@ -414,7 +414,11 @@ impl Pane {
                     Ok(Some(0)) => break, // EOF
                     Ok(Some(n)) => {
                         if debug {
-                            eprintln!("PTY read {} bytes: {:?}", n, String::from_utf8_lossy(&self.read_buffer[..n]));
+                            eprintln!(
+                                "PTY read {} bytes: {:?}",
+                                n,
+                                String::from_utf8_lossy(&self.read_buffer[..n])
+                            );
                             eprintln!("  Raw bytes: {:02x?}", &self.read_buffer[..n]);
                         }
                         // Process through terminal emulator

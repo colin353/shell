@@ -1,17 +1,17 @@
-    less Cargo.toml                                                             
-    vim Cargo.toml                                                              
-    pwd                                                                         
-    less Cargo.                                                                 
-    vim src//terminal.rs                                                        
-    vim src/terminal.rs                                                         
-    vim crates/emulator/fixtures/terminal.rs                                    
-    jkjk:q                                                                      
-    :q                                                                          
-    vim --clean                                                                 
-    vim crates/libvim/fixtures/test_code.rs                                     
-    echo hello world                                                            
-    asdf hello world                                                            
-    asdfecho hello world                                                        
+    cd shell/                                                                   
+    cargo run --release                                                         
+    cd ~/Documents/                                                             
+    cd ~/Downloads/                                                             
+    0u2026;2$y10;rgb:ffff/ffff/ffff11;rgb:2828/2c2c/34344;0;rgb:1d1d/1f1f/2121..
+    copilot --model gpt5.5 --yolo                                               
+    copilot --model gpt-5.5 --allow-all-tools --yolo                            
+    cd ~/Documents/code/                                                        
+    cp target/release/shell ~/bin                                               
+    cd                                                                          
+    mv bin shell                                                                
+    mkdir bin                                                                   
+    mv shell bin/                                                               
+    cd ~/Documents/code/shell/                                                  
   ✓ git status                                                                  
   ✓ git commit -m 'Initial commit'                                              
   ✗ git push origin main                                                        

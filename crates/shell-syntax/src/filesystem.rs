@@ -96,9 +96,10 @@ impl FakeFileSystem {
 
 impl FileSystem for FakeFileSystem {
     fn read_dir(&self, path: &Path) -> io::Result<Vec<DirEntry>> {
-        self.entries.get(path).cloned().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "directory not found")
-        })
+        self.entries
+            .get(path)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "directory not found"))
     }
 
     fn is_executable(&self, path: &Path) -> bool {

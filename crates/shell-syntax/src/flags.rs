@@ -13,7 +13,14 @@ pub struct CommandInfo {
 pub fn get_command_info(cmd: &str) -> Option<CommandInfo> {
     match cmd {
         "git" => Some(CommandInfo {
-            flags: &["--help", "--version", "-C", "-c", "--git-dir", "--work-tree"],
+            flags: &[
+                "--help",
+                "--version",
+                "-C",
+                "-c",
+                "--git-dir",
+                "--work-tree",
+            ],
             subcommands: &[
                 "add",
                 "bisect",
@@ -134,11 +141,29 @@ pub fn get_command_info(cmd: &str) -> Option<CommandInfo> {
             subcommands: &[],
         }),
         "cat" => Some(CommandInfo {
-            flags: &["-n", "--number", "-b", "--number-nonblank", "-s", "--squeeze-blank", "-A"],
+            flags: &[
+                "-n",
+                "--number",
+                "-b",
+                "--number-nonblank",
+                "-s",
+                "--squeeze-blank",
+                "-A",
+            ],
             subcommands: &[],
         }),
         "rm" => Some(CommandInfo {
-            flags: &["-r", "-R", "--recursive", "-f", "--force", "-i", "-d", "--dir", "-v"],
+            flags: &[
+                "-r",
+                "-R",
+                "--recursive",
+                "-f",
+                "--force",
+                "-i",
+                "-d",
+                "--dir",
+                "-v",
+            ],
             subcommands: &[],
         }),
         "cp" => Some(CommandInfo {
@@ -160,7 +185,16 @@ pub fn get_command_info(cmd: &str) -> Option<CommandInfo> {
             subcommands: &[],
         }),
         "mv" => Some(CommandInfo {
-            flags: &["-f", "--force", "-i", "--interactive", "-v", "--verbose", "-n", "--no-clobber"],
+            flags: &[
+                "-f",
+                "--force",
+                "-i",
+                "--interactive",
+                "-v",
+                "--verbose",
+                "-n",
+                "--no-clobber",
+            ],
             subcommands: &[],
         }),
         "mkdir" => Some(CommandInfo {
@@ -172,7 +206,15 @@ pub fn get_command_info(cmd: &str) -> Option<CommandInfo> {
             subcommands: &[],
         }),
         "chown" => Some(CommandInfo {
-            flags: &["-R", "--recursive", "-v", "--verbose", "-c", "--changes", "-h"],
+            flags: &[
+                "-R",
+                "--recursive",
+                "-v",
+                "--verbose",
+                "-c",
+                "--changes",
+                "-h",
+            ],
             subcommands: &[],
         }),
         "docker" => Some(CommandInfo {

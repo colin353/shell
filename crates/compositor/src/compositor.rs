@@ -228,6 +228,25 @@ mod tests {
 
         assert!(sequence.ends_with(b"\x1b[?1006h\x1b[?1002h"));
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prefers_wayland_clipboard_when_wayland_display_is_set() {
+        let commands = linux_clipboard_commands_for(Some(std::ffi::OsStr::new("wayland-0")));
+
+        assert_eq!(commands[0].program, "wl-copy");
+        assert_eq!(commands[1].program, "xclip");
+        assert_eq!(commands[2].program, "xsel");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uses_x11_clipboard_commands_without_wayland_display() {
+        let commands = linux_clipboard_commands_for(None);
+
+        assert_eq!(commands[0].program, "xclip");
+        assert_eq!(commands[1].program, "xsel");
+    }
 }
 
 /// The main compositor that manages terminal panes and the event loop.
@@ -1736,52 +1755,18 @@ impl Compositor {
 /// Copy text to the system clipboard.
 ///
 /// On macOS, this uses `pbcopy`.
-/// On Linux, this tries `xclip` or `xsel`.
+/// On Linux, this tries `wl-copy`, `xclip`, or `xsel`.
 /// On other platforms, this is a no-op.
 fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        use std::process::{Command, Stdio};
-
-        let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            use std::io::Write;
-            stdin.write_all(text.as_bytes())?;
-        }
-
-        child.wait()?;
-        Ok(())
+        copy_to_clipboard_with_commands(text, &[ClipboardCommand::new("pbcopy", &[])])
     }
 
     #[cfg(target_os = "linux")]
     {
-        use std::process::{Command, Stdio};
-
-        // Try xclip first, then xsel
-        let result = Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(Stdio::piped())
-            .spawn();
-
-        let mut child = match result {
-            Ok(child) => child,
-            Err(_) => {
-                // Fall back to xsel
-                Command::new("xsel")
-                    .args(["--clipboard", "--input"])
-                    .stdin(Stdio::piped())
-                    .spawn()?
-            }
-        };
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            use std::io::Write;
-            stdin.write_all(text.as_bytes())?;
-        }
-
-        child.wait()?;
-        Ok(())
+        let commands = linux_clipboard_commands();
+        copy_to_clipboard_with_commands(text, &commands)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1790,6 +1775,84 @@ fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
         let _ = text;
         Ok(())
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[derive(Debug, PartialEq, Eq)]
+struct ClipboardCommand {
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl ClipboardCommand {
+    const fn new(program: &'static str, args: &'static [&'static str]) -> Self {
+        Self { program, args }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn copy_to_clipboard_with_commands(
+    text: &str,
+    commands: &[ClipboardCommand],
+) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    let mut failures = Vec::new();
+
+    for command in commands {
+        let mut child = match Command::new(command.program)
+            .args(command.args)
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(err) => {
+                failures.push(format!("{}: {}", command.program, err));
+                continue;
+            }
+        };
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            if let Err(err) = stdin.write_all(text.as_bytes()) {
+                failures.push(format!("{}: {}", command.program, err));
+                let _ = child.wait();
+                continue;
+            }
+        }
+
+        match child.wait() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => failures.push(format!("{} exited with {}", command.program, status)),
+            Err(err) => failures.push(format!("{}: {}", command.program, err)),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("no clipboard command succeeded ({})", failures.join("; ")),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_clipboard_commands() -> Vec<ClipboardCommand> {
+    linux_clipboard_commands_for(std::env::var_os("WAYLAND_DISPLAY").as_deref())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_clipboard_commands_for(
+    wayland_display: Option<&std::ffi::OsStr>,
+) -> Vec<ClipboardCommand> {
+    let mut commands = Vec::new();
+
+    if wayland_display.is_some_and(|display| !display.is_empty()) {
+        commands.push(ClipboardCommand::new("wl-copy", &[]));
+    }
+
+    commands.push(ClipboardCommand::new("xclip", &["-selection", "clipboard"]));
+    commands.push(ClipboardCommand::new("xsel", &["--clipboard", "--input"]));
+
+    commands
 }
 
 /// Open a URL in the default browser.

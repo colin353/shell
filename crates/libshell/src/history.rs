@@ -312,8 +312,14 @@ impl ShellHistory {
 
             // Skip lines that don't look like JSON objects
             if !trimmed.starts_with('{') {
-                eprintln!("Warning: skipping non-JSON history line: {}", 
-                    if trimmed.len() > 50 { &trimmed[..50] } else { trimmed });
+                eprintln!(
+                    "Warning: skipping non-JSON history line: {}",
+                    if trimmed.len() > 50 {
+                        &trimmed[..50]
+                    } else {
+                        trimmed
+                    }
+                );
                 continue;
             }
 
@@ -662,13 +668,11 @@ impl ShellHistory {
 
         for (idx, id) in order.iter().enumerate() {
             if let Some(entry) = entries.get(id) {
-                let stats = command_stats
-                    .entry(&entry.command)
-                    .or_insert(CommandStats {
-                        count: 0,
-                        most_recent_idx: idx,
-                        had_success: false,
-                    });
+                let stats = command_stats.entry(&entry.command).or_insert(CommandStats {
+                    count: 0,
+                    most_recent_idx: idx,
+                    had_success: false,
+                });
                 stats.count += 1;
                 stats.most_recent_idx = idx; // Last one wins (order is chronological)
                 if entry.exit_code == Some(0) {
@@ -767,8 +771,7 @@ impl ShellHistory {
 
                 // Recency bonus (based on most recent execution of this command)
                 if total_entries > 1 {
-                    let recency_factor =
-                        stats.most_recent_idx as f64 / (total_entries - 1) as f64;
+                    let recency_factor = stats.most_recent_idx as f64 / (total_entries - 1) as f64;
                     breakdown.recency_bonus = (recency_factor * MAX_RECENCY_BONUS as f64) as i64;
                 }
 
@@ -1252,7 +1255,9 @@ mod tests {
         assert_eq!(results[1].entry.command, "git stash");
 
         // Verify frequency bonus is reflected in score breakdown
-        assert!(results[0].score_breakdown.frequency_bonus > results[1].score_breakdown.frequency_bonus);
+        assert!(
+            results[0].score_breakdown.frequency_bonus > results[1].score_breakdown.frequency_bonus
+        );
     }
 
     #[test]
@@ -1278,8 +1283,14 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         // Find the successful command
-        let successful = results.iter().find(|r| r.entry.command == "cargo build").unwrap();
-        let failed = results.iter().find(|r| r.entry.command == "cargo bild").unwrap();
+        let successful = results
+            .iter()
+            .find(|r| r.entry.command == "cargo build")
+            .unwrap();
+        let failed = results
+            .iter()
+            .find(|r| r.entry.command == "cargo bild")
+            .unwrap();
 
         // Successful command should have exit code bonus
         assert!(successful.score_breakdown.exit_code_bonus > 0);

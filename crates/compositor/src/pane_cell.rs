@@ -1692,9 +1692,7 @@ impl PaneCell {
                                 true
                             }
                         }
-                        libvim::Mode::VisualLine => {
-                            abs_line >= start.row && abs_line <= end.row
-                        }
+                        libvim::Mode::VisualLine => abs_line >= start.row && abs_line <= end.row,
                         libvim::Mode::Normal => false,
                     }
                 };
@@ -1752,7 +1750,8 @@ impl PaneCell {
                                                 cell.attrs.bg_color = Some(emulator::Color::Yellow);
                                                 cell.attrs.fg_color = Some(emulator::Color::Black);
                                             }
-                                        } else if let Some(is_current) = is_url_match(line_index, col)
+                                        } else if let Some(is_current) =
+                                            is_url_match(line_index, col)
                                         {
                                             if is_current {
                                                 cell.attrs.underline = true;

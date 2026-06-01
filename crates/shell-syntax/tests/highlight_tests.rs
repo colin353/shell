@@ -1,8 +1,6 @@
 //! Snapshot tests for syntax highlighting.
 
-use shell_syntax::{
-    CompletionContext, DirEntry, FakeFileSystem, HighlightKind, ShellSyntax,
-};
+use shell_syntax::{CompletionContext, DirEntry, FakeFileSystem, HighlightKind, ShellSyntax};
 use std::path::PathBuf;
 
 fn test_context() -> CompletionContext {

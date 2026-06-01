@@ -20,5 +20,5 @@ compositor ➜
         CharSet::Ascii => b'B',                                                 
         CharSet::Uk => b'A',                                                    
         CharSet::DecSpecialGraphics => b'0',                                    
-                                                                                
+                                                              9,5            5% 
  0 bash                                                        2025-01-01 12:00 

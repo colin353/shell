@@ -248,9 +248,7 @@ mod tests {
 
     fn make_context() -> CompletionContext {
         CompletionContext {
-            env_vars: [("HOME".into(), "/home/user".into())]
-                .into_iter()
-                .collect(),
+            env_vars: [("HOME".into(), "/home/user".into())].into_iter().collect(),
             path_executables: vec!["ls".into(), "grep".into(), "cat".into()],
             cwd: PathBuf::from("/home/user"),
         }
@@ -266,15 +264,24 @@ mod tests {
     fn test_classify_builtin() {
         let context = make_context();
         let fs = make_fs();
-        assert_eq!(classify_command("cd", &context, &fs), HighlightKind::Builtin);
-        assert_eq!(classify_command("echo", &context, &fs), HighlightKind::Builtin);
+        assert_eq!(
+            classify_command("cd", &context, &fs),
+            HighlightKind::Builtin
+        );
+        assert_eq!(
+            classify_command("echo", &context, &fs),
+            HighlightKind::Builtin
+        );
     }
 
     #[test]
     fn test_classify_path_executable() {
         let context = make_context();
         let fs = make_fs();
-        assert_eq!(classify_command("ls", &context, &fs), HighlightKind::Command);
+        assert_eq!(
+            classify_command("ls", &context, &fs),
+            HighlightKind::Command
+        );
     }
 
     #[test]

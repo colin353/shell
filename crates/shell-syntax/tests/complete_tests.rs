@@ -1,8 +1,6 @@
 //! Snapshot tests for tab completion.
 
-use shell_syntax::{
-    CompletionContext, CompletionKind, DirEntry, FakeFileSystem, ShellSyntax,
-};
+use shell_syntax::{CompletionContext, CompletionKind, DirEntry, FakeFileSystem, ShellSyntax};
 use std::path::PathBuf;
 
 fn test_context() -> CompletionContext {
@@ -194,7 +192,9 @@ fn test_complete_directory() {
 
     let completions = syntax.completions(5, &context);
     assert!(completions.iter().any(|c| c.display == "folder/"));
-    assert!(completions.iter().any(|c| c.kind == CompletionKind::Directory));
+    assert!(completions
+        .iter()
+        .any(|c| c.kind == CompletionKind::Directory));
     insta::assert_debug_snapshot!(completions);
 }
 
@@ -311,7 +311,7 @@ fn test_complete_tilde_path() {
             },
         ],
     );
-    
+
     let mut syntax = ShellSyntax::with_filesystem(fs);
     syntax.update("cat ~/Do");
     let context = test_context();
@@ -332,14 +332,12 @@ fn test_complete_tilde_alone() {
     let mut fs = FakeFileSystem::new();
     fs.add_dir(
         "/home/user",
-        vec![
-            DirEntry {
-                name: "file.txt".into(),
-                is_dir: false,
-            },
-        ],
+        vec![DirEntry {
+            name: "file.txt".into(),
+            is_dir: false,
+        }],
     );
-    
+
     let mut syntax = ShellSyntax::with_filesystem(fs);
     syntax.update("cat ~/");
     let context = test_context();
@@ -355,21 +353,22 @@ fn test_complete_env_var_path() {
     let mut fs = FakeFileSystem::new();
     fs.add_dir(
         "/home/user",
-        vec![
-            DirEntry {
-                name: "Documents".into(),
-                is_dir: true,
-            },
-        ],
+        vec![DirEntry {
+            name: "Documents".into(),
+            is_dir: true,
+        }],
     );
-    
+
     let mut syntax = ShellSyntax::with_filesystem(fs);
     syntax.update("cat $HOME/Do");
     let context = test_context();
 
     let completions = syntax.completions(12, &context);
     // Should complete with $HOME/Documents (preserving $HOME)
-    assert!(!completions.is_empty(), "Should have completions for $HOME/Do");
+    assert!(
+        !completions.is_empty(),
+        "Should have completions for $HOME/Do"
+    );
     assert!(
         completions.iter().any(|c| c.text.starts_with("$HOME/")),
         "Completions should preserve $HOME prefix: {:?}",

@@ -5,9 +5,7 @@
 //! - CompletionContext construction from shell state
 //! - Tab completion handling
 
-use shell_syntax::{
-    CompletionContext, HighlightKind, HighlightedSpan, ShellSyntax,
-};
+use shell_syntax::{CompletionContext, HighlightKind, HighlightedSpan, ShellSyntax};
 use std::path::PathBuf;
 
 // Re-export CompletionKind for use in lib.rs
@@ -67,19 +65,14 @@ impl SyntaxHandler {
         self.syntax.update(input);
 
         let context = self.build_context(cwd);
-        self.syntax.complete(cursor_pos, &context).map(|c| {
-            (c.text, c.replace_start, c.replace_end, c.is_partial)
-        })
+        self.syntax
+            .complete(cursor_pos, &context)
+            .map(|c| (c.text, c.replace_start, c.replace_end, c.is_partial))
     }
 
     /// Get all completions at cursor position.
     #[allow(dead_code)]
-    pub fn completions(
-        &mut self,
-        input: &str,
-        cursor_pos: usize,
-        cwd: &PathBuf,
-    ) -> Vec<String> {
+    pub fn completions(&mut self, input: &str, cursor_pos: usize, cwd: &PathBuf) -> Vec<String> {
         self.maybe_refresh_path();
         self.syntax.update(input);
 
@@ -105,7 +98,7 @@ impl SyntaxHandler {
 
         let context = self.build_context(cwd);
         let completions = self.syntax.completions(cursor_pos, &context);
-        
+
         if completions.is_empty() {
             return None;
         }
@@ -124,9 +117,13 @@ impl SyntaxHandler {
 
     /// Get the word at the cursor position with its boundaries.
     /// Returns (word, start, end) or None if cursor is not on a word.
-    pub fn word_at_cursor(&mut self, input: &str, cursor_pos: usize) -> Option<(String, usize, usize)> {
+    pub fn word_at_cursor(
+        &mut self,
+        input: &str,
+        cursor_pos: usize,
+    ) -> Option<(String, usize, usize)> {
         self.syntax.update(input);
-        
+
         // Use completions to get the word boundaries (they include word info)
         // This is a bit indirect, but it uses tree-sitter properly
         let context = CompletionContext {
@@ -134,23 +131,23 @@ impl SyntaxHandler {
             path_executables: Vec::new(),
             cwd: PathBuf::from("."),
         };
-        
+
         let completions = self.syntax.completions(cursor_pos, &context);
-        
+
         if !completions.is_empty() {
             let first = &completions[0];
             let word = input[first.replace_start..first.replace_end].to_string();
             return Some((word, first.replace_start, first.replace_end));
         }
-        
+
         // Fallback: simple word extraction
         if input.is_empty() || cursor_pos == 0 {
             return Some((String::new(), cursor_pos, cursor_pos));
         }
-        
+
         let pos = cursor_pos.min(input.len());
         let bytes = input.as_bytes();
-        
+
         // Find word start (scan backwards)
         let mut start = pos;
         while start > 0 {
@@ -161,7 +158,7 @@ impl SyntaxHandler {
             }
             start = prev;
         }
-        
+
         // Find word end (scan forwards)
         let mut end = pos;
         while end < bytes.len() {
@@ -171,7 +168,7 @@ impl SyntaxHandler {
             }
             end += 1;
         }
-        
+
         let word = input[start..end].to_string();
         Some((word, start, end))
     }
@@ -344,40 +341,53 @@ mod path_tests {
     #[test]
     fn test_path_has_cargo() {
         let executables = scan_path_executables();
-        assert!(executables.contains(&"cargo".to_string()), 
-            "cargo should be in PATH executables");
+        assert!(
+            executables.contains(&"cargo".to_string()),
+            "cargo should be in PATH executables"
+        );
     }
-    
+
     #[test]
     fn test_completions_include_cargo() {
         let mut handler = SyntaxHandler::new();
         let cwd = std::path::PathBuf::from("/tmp");
-        
+
         // There should be multiple completions for "carg" (cargo, cargo-clippy, etc.)
         let completions = handler.completions("carg", 4, &cwd);
-        assert!(completions.contains(&"cargo".to_string()), 
-            "Completions should include 'cargo'. Got: {:?}", completions);
-        
+        assert!(
+            completions.contains(&"cargo".to_string()),
+            "Completions should include 'cargo'. Got: {:?}",
+            completions
+        );
+
         // With multiple matches, complete() now returns the common prefix
         // "carg" -> "cargo" (common prefix of cargo, cargo-clippy, cargo-deb, etc.)
         let completion = handler.complete("carg", 4, &cwd);
-        assert!(completion.is_some(), "Should return common prefix completion");
+        assert!(
+            completion.is_some(),
+            "Should return common prefix completion"
+        );
         let (text, _, _, is_partial) = completion.unwrap();
         assert_eq!(text, "cargo", "Should complete to common prefix 'cargo'");
         assert!(is_partial, "Should be marked as partial completion");
     }
-    
+
     #[test]
     fn test_highlight_cargo_is_command() {
         let mut handler = SyntaxHandler::new();
         let cwd = std::path::PathBuf::from("/tmp");
-        
+
         // cargo should be highlighted as a valid command, not red
         let highlighted = handler.highlight("cargo build", &cwd);
         // Should contain bold blue for Command, not red for CommandNotFound
-        assert!(highlighted.contains("\x1b[1;34m"), 
-            "cargo should be highlighted as Command (bold blue). Got: {:?}", highlighted);
-        assert!(!highlighted.contains("\x1b[31;4m"), 
-            "cargo should NOT be highlighted as CommandNotFound (red underline)");
+        assert!(
+            highlighted.contains("\x1b[1;34m"),
+            "cargo should be highlighted as Command (bold blue). Got: {:?}",
+            highlighted
+        );
+        assert!(
+            !highlighted.contains("\x1b[31;4m"),
+            "cargo should NOT be highlighted as CommandNotFound (red underline)"
+        );
     }
 }

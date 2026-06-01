@@ -59,9 +59,9 @@ pub fn expand_path_with_env(path: &str, env_vars: Option<&HashMap<String, String
             std::env::var(name).ok()
         }
     };
-    
+
     let mut result = path.to_string();
-    
+
     // Handle tilde expansion
     if result == "~" {
         if let Some(home) = get_var("HOME") {
@@ -72,12 +72,12 @@ pub fn expand_path_with_env(path: &str, env_vars: Option<&HashMap<String, String
             result = format!("{}{}", home, &result[1..]);
         }
     }
-    
+
     // Handle environment variable expansion
     // Match $VAR or ${VAR} patterns
     let mut expanded = String::new();
     let mut chars = result.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '$' {
             // Check for ${VAR} syntax
@@ -121,7 +121,7 @@ pub fn expand_path_with_env(path: &str, env_vars: Option<&HashMap<String, String
             expanded.push(c);
         }
     }
-    
+
     PathBuf::from(expanded)
 }
 
@@ -143,7 +143,10 @@ pub fn expand_path_with_info(path: &str) -> ExpandedPath {
 
 /// Expand a path and return both the expanded path and prefix information,
 /// using a custom environment variable map.
-pub fn expand_path_with_info_env(path: &str, env_vars: Option<&HashMap<String, String>>) -> ExpandedPath {
+pub fn expand_path_with_info_env(
+    path: &str,
+    env_vars: Option<&HashMap<String, String>>,
+) -> ExpandedPath {
     let get_var = |name: &str| -> Option<String> {
         if let Some(vars) = env_vars {
             vars.get(name).cloned()
@@ -151,9 +154,9 @@ pub fn expand_path_with_info_env(path: &str, env_vars: Option<&HashMap<String, S
             std::env::var(name).ok()
         }
     };
-    
+
     let expanded = expand_path_with_env(path, env_vars);
-    
+
     if path.starts_with('~') {
         let home = get_var("HOME").unwrap_or_default();
         ExpandedPath {
@@ -163,9 +166,11 @@ pub fn expand_path_with_info_env(path: &str, env_vars: Option<&HashMap<String, S
         }
     } else if path.starts_with('$') {
         // Extract the variable name
-        let var_end = path[1..].chars()
+        let var_end = path[1..]
+            .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '{' || *c == '}')
-            .count() + 1;
+            .count()
+            + 1;
         let var_part = &path[..var_end];
         let var_expanded = expand_path_with_env(var_part, env_vars);
         ExpandedPath {

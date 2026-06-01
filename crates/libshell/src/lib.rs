@@ -29,7 +29,10 @@ pub use history::{
     BackupConfig, CommandSource, EntryId, HistoryEntry, HistorySearchResult, SearchResult,
     ShellHistory,
 };
-pub use picker::{FileItem, PickerConfig, PickerItem, PickerMode, PickerState, TabCompletionContext, TabCompletionItem};
+pub use picker::{
+    FileItem, PickerConfig, PickerItem, PickerMode, PickerState, TabCompletionContext,
+    TabCompletionItem,
+};
 
 /// Find the longest common prefix among a set of strings
 fn find_common_prefix<'a>(strings: impl Iterator<Item = &'a str>) -> String {
@@ -72,7 +75,7 @@ fn is_word_boundary(c: char) -> bool {
 /// Returns the expanded path as a PathBuf.
 pub fn expand_path(path: &str) -> PathBuf {
     let mut result = path.to_string();
-    
+
     // Handle tilde expansion
     if result == "~" {
         if let Ok(home) = std::env::var("HOME") {
@@ -83,12 +86,12 @@ pub fn expand_path(path: &str) -> PathBuf {
             result = format!("{}{}", home, &result[1..]);
         }
     }
-    
+
     // Handle environment variable expansion
     // Match $VAR or ${VAR} patterns
     let mut expanded = String::new();
     let mut chars = result.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '$' {
             // Check for ${VAR} syntax
@@ -132,7 +135,7 @@ pub fn expand_path(path: &str) -> PathBuf {
             expanded.push(c);
         }
     }
-    
+
     PathBuf::from(expanded)
 }
 
@@ -646,12 +649,12 @@ impl Shell {
         output.extend(self.render_full_multiline_input().as_bytes());
         output
     }
-    
+
     /// Render the full input buffer with prompts, handling multi-line correctly.
     fn render_full_multiline_input(&mut self) -> String {
         let lines: Vec<&str> = self.input_buffer.split('\n').collect();
         let mut result = String::new();
-        
+
         for (i, line) in lines.iter().enumerate() {
             if i == 0 {
                 // First line gets the main prompt
@@ -664,7 +667,7 @@ impl Shell {
             // Highlight just this line
             result.push_str(&self.syntax_handler.highlight(line, &self.cwd));
         }
-        
+
         result
     }
 
@@ -786,7 +789,7 @@ impl Shell {
                     self.input_buffer.pop();
                     self.input_buffer.push('\n');
                     self.cursor_pos = self.input_buffer.chars().count();
-                    
+
                     // Move to next line and show continuation prompt
                     let mut output = vec![b'\r', b'\n'];
                     output.extend(self.get_continuation_prompt().as_bytes());
@@ -802,11 +805,12 @@ impl Shell {
                 if self.cursor_pos > 0 {
                     let old_pos = self.cursor_pos;
                     let char_to_delete = self.input_buffer.chars().nth(self.cursor_pos - 1);
-                    
+
                     // Compute display width of cursor position BEFORE delete
                     // This is the width we need to move back to get to start of input
-                    let old_display_width = self.display_width_of_chars(&self.input_buffer, old_pos);
-                    
+                    let old_display_width =
+                        self.display_width_of_chars(&self.input_buffer, old_pos);
+
                     self.cursor_pos -= 1;
                     // cursor_pos is a character index, convert to byte offset for remove
                     let byte_pos = self
@@ -859,7 +863,8 @@ impl Shell {
                 output.extend(highlighted.as_bytes());
                 // Position cursor correctly using display width
                 let total_display_width = self.display_width(&self.input_buffer);
-                let cursor_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+                let cursor_display_width =
+                    self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
                 let move_back = total_display_width.saturating_sub(cursor_display_width);
                 if move_back > 0 {
                     output.extend(format!("\x1b[{}D", move_back).as_bytes());
@@ -1128,7 +1133,7 @@ impl Shell {
     fn replace_input_line(&mut self, new_content: &str) -> Vec<u8> {
         // Compute display width of old cursor position BEFORE changing buffer
         let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
-        
+
         // Update state
         self.input_buffer = new_content.to_string();
         self.cursor_pos = self.input_buffer.chars().count();
@@ -1143,9 +1148,7 @@ impl Shell {
         if self.cursor_pos < char_count {
             // Get the character at current position to determine its width
             let char_at_cursor = self.input_buffer.chars().nth(self.cursor_pos);
-            let width = char_at_cursor
-                .and_then(|c| c.width())
-                .unwrap_or(1);
+            let width = char_at_cursor.and_then(|c| c.width()).unwrap_or(1);
             self.cursor_pos += 1;
             // Move cursor by the character's display width
             if width > 1 {
@@ -1163,9 +1166,7 @@ impl Shell {
         if self.cursor_pos > 0 {
             // Get the character we're moving past to determine its width
             let char_before_cursor = self.input_buffer.chars().nth(self.cursor_pos - 1);
-            let width = char_before_cursor
-                .and_then(|c| c.width())
-                .unwrap_or(1);
+            let width = char_before_cursor.and_then(|c| c.width()).unwrap_or(1);
             self.cursor_pos -= 1;
             // Move cursor by the character's display width
             if width > 1 {
@@ -1199,7 +1200,8 @@ impl Shell {
         let char_count = self.input_buffer.chars().count();
         if self.cursor_pos < char_count {
             // Calculate display width from cursor to end
-            let current_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            let current_display_width =
+                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
             let total_display_width = self.display_width(&self.input_buffer);
             let remaining_width = total_display_width.saturating_sub(current_display_width);
             self.cursor_pos = char_count;
@@ -1219,11 +1221,9 @@ impl Shell {
     /// If multiple completions match, show the picker UI.
     fn handle_tab_completion(&mut self) -> Option<Vec<u8>> {
         // Get all completions
-        let completions_data = self.syntax_handler.completions_full(
-            &self.input_buffer,
-            self.cursor_pos,
-            &self.cwd,
-        );
+        let completions_data =
+            self.syntax_handler
+                .completions_full(&self.input_buffer, self.cursor_pos, &self.cwd);
 
         let Some((completions, replace_start, replace_end)) = completions_data else {
             return None;
@@ -1237,7 +1237,8 @@ impl Shell {
         if completions.len() == 1 {
             let (_, text, kind) = &completions[0];
             // Compute display width BEFORE modifying buffer
-            let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            let old_display_width =
+                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
 
             // Add trailing space unless it's a directory
             let is_directory = matches!(kind, syntax::CompletionKind::Directory);
@@ -1248,7 +1249,8 @@ impl Shell {
             };
 
             // Replace the text in the input buffer
-            self.input_buffer.replace_range(replace_start..replace_end, &completion_text);
+            self.input_buffer
+                .replace_range(replace_start..replace_end, &completion_text);
 
             // Update cursor position to end of inserted completion
             self.cursor_pos = replace_start + completion_text.len();
@@ -1260,12 +1262,14 @@ impl Shell {
         // Multiple completions - check if there's a common prefix we can complete first
         let common_prefix = find_common_prefix(completions.iter().map(|(_, t, _)| t.as_str()));
         let current_word = &self.input_buffer[replace_start..replace_end];
-        
+
         if common_prefix.len() > current_word.len() {
             // There's a common prefix longer than what's typed - complete to that first
             // Compute display width BEFORE modifying buffer
-            let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
-            self.input_buffer.replace_range(replace_start..replace_end, &common_prefix);
+            let old_display_width =
+                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            self.input_buffer
+                .replace_range(replace_start..replace_end, &common_prefix);
             self.cursor_pos = replace_start + common_prefix.len();
             return Some(self.render_highlighted_input_with_display_width(old_display_width));
         }
@@ -1282,7 +1286,7 @@ impl Shell {
         replace_end: usize,
     ) -> Option<Vec<u8>> {
         let prefix = self.input_buffer[replace_start..replace_end].to_string();
-        
+
         // Convert completions to TabCompletionItems
         let items: Vec<TabCompletionItem> = completions
             .into_iter()
@@ -1325,39 +1329,41 @@ impl Shell {
             // Multi-line input: only re-render the current line (after the last newline)
             let current_line_start = last_newline + 1;
             let current_line = &self.input_buffer[current_line_start..];
-            
+
             // Calculate cursor position within the current line (in characters)
             let cursor_in_current_line = if self.cursor_pos > current_line_start {
                 self.cursor_pos - current_line_start
             } else {
                 0
             };
-            
+
             // Calculate old cursor position within the current line (in characters)
             let old_cursor_in_current_line = if old_cursor_pos > current_line_start {
                 old_cursor_pos - current_line_start
             } else {
                 0
             };
-            
+
             // Move cursor to start of current line (after continuation prompt)
             // Need to move by display width (columns), not character count
-            let old_cursor_display_width = self.display_width_of_chars(current_line, old_cursor_in_current_line);
+            let old_cursor_display_width =
+                self.display_width_of_chars(current_line, old_cursor_in_current_line);
             if old_cursor_display_width > 0 {
                 output.extend(format!("\x1b[{}D", old_cursor_display_width).as_bytes());
             }
-            
+
             // Clear from cursor to end of line
             output.extend(b"\x1b[K");
-            
+
             // Get highlighted version of just the current line
             let highlighted = self.syntax_handler.highlight(current_line, &self.cwd);
             output.extend(highlighted.as_bytes());
-            
+
             // Move cursor back to correct position within current line
             // Calculate display width from cursor to end of line
             let total_display_width = self.display_width(current_line);
-            let cursor_display_width = self.display_width_of_chars(current_line, cursor_in_current_line);
+            let cursor_display_width =
+                self.display_width_of_chars(current_line, cursor_in_current_line);
             let move_back_columns = total_display_width.saturating_sub(cursor_display_width);
             if move_back_columns > 0 {
                 output.extend(format!("\x1b[{}D", move_back_columns).as_bytes());
@@ -1366,7 +1372,8 @@ impl Shell {
             // Single-line input: original behavior
             // Move cursor to start of input area (after prompt)
             // Need to move by display width (columns), not character count
-            let old_cursor_display_width = self.display_width_of_chars(&self.input_buffer, old_cursor_pos);
+            let old_cursor_display_width =
+                self.display_width_of_chars(&self.input_buffer, old_cursor_pos);
             if old_cursor_display_width > 0 {
                 output.extend(format!("\x1b[{}D", old_cursor_display_width).as_bytes());
             }
@@ -1383,7 +1390,8 @@ impl Shell {
             // Move cursor back to correct position
             // Calculate display width from cursor to end of buffer
             let total_display_width = self.display_width(&self.input_buffer);
-            let cursor_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            let cursor_display_width =
+                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
             let move_back_columns = total_display_width.saturating_sub(cursor_display_width);
             if move_back_columns > 0 {
                 output.extend(format!("\x1b[{}D", move_back_columns).as_bytes());
@@ -1402,7 +1410,10 @@ impl Shell {
 
     /// Render the current input line with syntax highlighting, using a pre-computed display width.
     /// Used after backspace when the buffer has already been modified.
-    fn render_highlighted_input_with_display_width(&mut self, old_cursor_display_width: usize) -> Vec<u8> {
+    fn render_highlighted_input_with_display_width(
+        &mut self,
+        old_cursor_display_width: usize,
+    ) -> Vec<u8> {
         let mut output = Vec::new();
 
         // For single-line input (no multi-line support in this variant for now)
@@ -1453,13 +1464,13 @@ impl Shell {
 
         // Move cursor up one line
         output.extend(b"\x1b[A");
-        
+
         // Move cursor to beginning of line
         output.extend(b"\r");
-        
+
         // Clear from cursor to end of screen (clears current line and all lines below)
         output.extend(b"\x1b[J");
-        
+
         // Re-render the full multi-line input from the prompt
         output.extend(self.render_full_multiline_input().as_bytes());
 
@@ -1629,7 +1640,8 @@ impl Shell {
     fn kill_to_beginning(&mut self) -> Option<Vec<u8>> {
         if self.cursor_pos > 0 {
             // Compute display width BEFORE modifying buffer
-            let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            let old_display_width =
+                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
             // Convert character position to byte position
             let byte_pos = self
                 .input_buffer
@@ -1675,12 +1687,8 @@ impl Shell {
         let initial_query = parsed.query.clone();
 
         // Create the file finder context with prefix preservation
-        let mut ctx = FileFinderContext::from_parsed(
-            parsed,
-            replace_start,
-            replace_end,
-            word.clone(),
-        );
+        let mut ctx =
+            FileFinderContext::from_parsed(parsed, replace_start, replace_end, word.clone());
 
         // Collect files from the directory
         ctx.collect_files();
@@ -1702,7 +1710,11 @@ impl Shell {
     /// Exit picker mode without selecting
     fn exit_picker(&mut self) -> Vec<u8> {
         let ui_lines = self.picker_state.as_ref().map(|s| s.ui_lines).unwrap_or(0);
-        let is_file_finder = self.picker_state.as_ref().map(|s| s.mode == PickerMode::FileFinder).unwrap_or(false);
+        let is_file_finder = self
+            .picker_state
+            .as_ref()
+            .map(|s| s.mode == PickerMode::FileFinder)
+            .unwrap_or(false);
         self.picker_state = None;
 
         // Restore original input buffer if we were in file finder mode
@@ -1722,14 +1734,14 @@ impl Shell {
     /// Select current item and exit picker mode
     fn select_picker_item(&mut self) -> Vec<u8> {
         use crate::file_finder::quote_path_if_needed;
-        
+
         // Extract the selection info before dropping picker_state
         // For tab completion, use current cursor position as the end of replacement
         let selection_info = self.picker_state.as_ref().and_then(|state| {
             let selected_item = state.selected_item()?;
             let selected_text = selected_item.completion_text().to_string();
             let is_directory = selected_item.is_directory();
-            
+
             match &state.mode {
                 PickerMode::HistorySearch => {
                     // History search replaces entire input (is_directory = false)
@@ -1738,18 +1750,32 @@ impl Shell {
                 PickerMode::TabCompletion => {
                     // Tab completion replaces from original start to saved end
                     let ctx = state.tab_completion_ctx.as_ref()?;
-                    Some((selected_text, Some((ctx.replace_start, ctx.replace_end)), is_directory, false))
+                    Some((
+                        selected_text,
+                        Some((ctx.replace_start, ctx.replace_end)),
+                        is_directory,
+                        false,
+                    ))
                 }
                 PickerMode::FileFinder => {
                     // File finder replaces the original word with the selected path
                     let ctx = state.file_finder_ctx.as_ref()?;
-                    Some((selected_text, Some((ctx.replace_start, ctx.replace_end)), is_directory, true))
+                    Some((
+                        selected_text,
+                        Some((ctx.replace_start, ctx.replace_end)),
+                        is_directory,
+                        true,
+                    ))
                 }
             }
         });
 
         let ui_lines = self.picker_state.as_ref().map(|s| s.ui_lines).unwrap_or(0);
-        let is_file_finder = self.picker_state.as_ref().map(|s| s.mode == PickerMode::FileFinder).unwrap_or(false);
+        let is_file_finder = self
+            .picker_state
+            .as_ref()
+            .map(|s| s.mode == PickerMode::FileFinder)
+            .unwrap_or(false);
         self.picker_state = None;
 
         // Restore original input buffer if we were in file finder mode
@@ -1785,7 +1811,7 @@ impl Shell {
                         .nth(end)
                         .map(|(i, _)| i)
                         .unwrap_or(self.input_buffer.len());
-                    
+
                     let completion_text = if needs_quoting {
                         // File finder: quote if needed, add trailing slash for dirs
                         let quoted = quote_path_if_needed(&text);
@@ -1801,7 +1827,8 @@ impl Shell {
                         // Tab completion file/command
                         format!("{} ", text)
                     };
-                    self.input_buffer.replace_range(byte_start..byte_end, &completion_text);
+                    self.input_buffer
+                        .replace_range(byte_start..byte_end, &completion_text);
                     self.cursor_pos = start + completion_text.chars().count();
                 }
             }
@@ -1815,34 +1842,37 @@ impl Shell {
     fn update_picker_items(&mut self) {
         if let Some(ref mut state) = self.picker_state {
             let items = match &state.mode {
-                PickerMode::HistorySearch => {
-                    self.core
-                        .history()
-                        .search_with_indices(&self.input_buffer, picker::MAX_VISIBLE_ITEMS)
-                        .into_iter()
-                        .map(PickerItem::History)
-                        .collect()
-                }
+                PickerMode::HistorySearch => self
+                    .core
+                    .history()
+                    .search_with_indices(&self.input_buffer, picker::MAX_VISIBLE_ITEMS)
+                    .into_iter()
+                    .map(PickerItem::History)
+                    .collect(),
                 PickerMode::TabCompletion => {
                     // Filter completions based on the current word being typed
                     if let Some(ref ctx) = state.tab_completion_ctx {
                         // Get the current filter text (what's been typed in the word position)
                         let filter = if ctx.replace_start < self.input_buffer.len() {
-                            &self.input_buffer[ctx.replace_start..self.cursor_pos.min(self.input_buffer.len())]
+                            &self.input_buffer
+                                [ctx.replace_start..self.cursor_pos.min(self.input_buffer.len())]
                         } else {
                             ""
                         };
-                        
+
                         // Filter completions that start with the current input
                         ctx.all_completions
                             .iter()
                             .filter(|item| {
-                                item.completion_text.to_lowercase().starts_with(&filter.to_lowercase())
+                                item.completion_text
+                                    .to_lowercase()
+                                    .starts_with(&filter.to_lowercase())
                             })
                             .cloned()
                             .map(|mut item| {
                                 // Update match indices based on current filter
-                                item.match_indices = (0..filter.len().min(item.display_text.len())).collect();
+                                item.match_indices =
+                                    (0..filter.len().min(item.display_text.len())).collect();
                                 PickerItem::TabCompletion(item)
                             })
                             .collect()
@@ -2171,7 +2201,13 @@ impl Shell {
     fn render_picker_ui(&mut self) -> Vec<u8> {
         let prompt = self.get_prompt();
         if let Some(ref mut state) = self.picker_state {
-            picker::render_picker_ui(state, &self.input_buffer, self.cursor_pos, &prompt, self.cols)
+            picker::render_picker_ui(
+                state,
+                &self.input_buffer,
+                self.cursor_pos,
+                &prompt,
+                self.cols,
+            )
         } else {
             Vec::new()
         }
@@ -2226,10 +2262,10 @@ impl Shell {
         match parts[0] {
             "cd" => {
                 let target = parts.get(1).copied().unwrap_or("~");
-                
+
                 // Expand tilde and environment variables
                 let expanded = expand_path(target);
-                
+
                 // If the path is relative (doesn't start with /), join with cwd
                 let target_path = if expanded.is_absolute() {
                     expanded
@@ -2353,16 +2389,16 @@ mod tests {
     #[test]
     fn test_expand_path_tilde() {
         let home = std::env::var("HOME").unwrap();
-        
+
         // Test ~ alone
         assert_eq!(expand_path("~"), PathBuf::from(&home));
-        
+
         // Test ~/something
         assert_eq!(
             expand_path("~/Documents"),
             PathBuf::from(format!("{}/Documents", home))
         );
-        
+
         // Test ~/nested/path
         assert_eq!(
             expand_path("~/a/b/c"),
@@ -2374,19 +2410,19 @@ mod tests {
     fn test_expand_path_env_var() {
         // Set a test env var
         std::env::set_var("TEST_SHELL_VAR", "/test/path");
-        
+
         // Test $VAR syntax
         assert_eq!(
             expand_path("$TEST_SHELL_VAR/subdir"),
             PathBuf::from("/test/path/subdir")
         );
-        
+
         // Test ${VAR} syntax
         assert_eq!(
             expand_path("${TEST_SHELL_VAR}/subdir"),
             PathBuf::from("/test/path/subdir")
         );
-        
+
         // Clean up
         std::env::remove_var("TEST_SHELL_VAR");
     }
@@ -2395,7 +2431,7 @@ mod tests {
     fn test_expand_path_no_expansion() {
         // Absolute paths without special chars
         assert_eq!(expand_path("/usr/bin"), PathBuf::from("/usr/bin"));
-        
+
         // Relative paths without special chars
         assert_eq!(expand_path("foo/bar"), PathBuf::from("foo/bar"));
     }

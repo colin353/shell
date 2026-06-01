@@ -1,12 +1,12 @@
 compositor ➜ ls \                                                               
 > -lah                                                                          
-total 8                                                                         
-drwxr-xr-x@  6 colinwm  staff   192B Jan  2 15:01 .                             
-drwxr-xr-x@ 10 colinwm  staff   320B Jan 15 17:39 ..                            
--rw-r--r--@  1 colinwm  staff   272B Jan 10 21:56 Cargo.toml                    
-drwxr-xr-x@ 45 colinwm  staff   1.4K Feb  2 16:53 fixtures                      
-drwxr-xr-x@ 10 colinwm  staff   320B Feb  2 16:53 src                           
-drwxr-xr-x@  5 colinwm  staff   160B Feb  2 16:53 tests                         
+total 24K                                                                       
+drwxrwxr-x  5 colin colin 4.0K May 27 21:09 .                                   
+drwxrwxr-x 10 colin colin 4.0K May 27 21:09 ..                                  
+-rw-rw-r--  1 colin colin  272 May 27 21:09 Cargo.toml                          
+drwxrwxr-x  2 colin colin 4.0K Jun  1 11:42 fixtures                            
+drwxrwxr-x  2 colin colin 4.0K Jun  1 11:42 src                                 
+drwxrwxr-x  2 colin colin 4.0K Jun  1 11:42 tests                               
 compositor ➜                                                                    
                                                                                 
                                                                                 
