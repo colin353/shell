@@ -848,7 +848,9 @@ dependencies = [
  "compositor",
  "libc",
  "nix",
+ "protocol",
  "raw_tty",
+ "tempfile",
 ]
 
 [[package]]

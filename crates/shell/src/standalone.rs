@@ -1,0 +1,134 @@
+//! Standalone mode: the original single-process shell (no daemon split).
+//! Behavior is unchanged from the pre-daemon `main()`.
+
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use raw_tty::GuardMode;
+
+use crate::common::{get_terminal_size, ENTER_APP_MODE, EXIT_APP_MODE};
+
+// Global flag to indicate a resize event occurred
+static RESIZE_PENDING: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigwinch(_: libc::c_int) {
+    RESIZE_PENDING.store(true, Ordering::SeqCst);
+}
+
+pub fn run() {
+    // Set up raw mode TTY for input
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .expect("Failed to open /dev/tty");
+
+    // Get terminal size
+    let (width, height) = get_terminal_size(tty.as_raw_fd());
+
+    // Open a SEPARATE /dev/tty for output - this is critical!
+    // We can't use try_clone() because that shares the file description,
+    // and when we set the input to non-blocking, it would affect the output too.
+    let tty_output_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .expect("Failed to open /dev/tty for output");
+
+    let tty_output: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(tty_output_file));
+
+    let mut tty_input = tty.try_clone().unwrap().guard_mode().unwrap();
+    tty_input.set_raw_mode().expect("Failed to set raw mode");
+
+    // Create the compositor with the terminal dimensions and TTY output
+    let mut compositor = compositor::Compositor::with_output(width, height, tty_output.clone())
+        .expect("Failed to create compositor");
+
+    // Always enable synchronized output - terminals that don't support it will
+    // ignore the BSU/ESU sequences.
+    compositor.set_synchronized_output(true);
+
+    // Set tty_input to non-blocking
+    let fd = tty_input.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    // Set up SIGWINCH handler for terminal resize events
+    unsafe {
+        libc::signal(
+            libc::SIGWINCH,
+            handle_sigwinch as *const () as libc::sighandler_t,
+        );
+    }
+
+    // Own the host terminal as a full-screen application.
+    {
+        let mut output = tty_output.lock().unwrap();
+        let _ = output.write_all(ENTER_APP_MODE);
+        let _ = output.flush();
+    }
+
+    // Initial render to display the shell prompt
+    compositor.render();
+
+    // Main event loop
+    let mut input_buf = [0u8; 1024];
+
+    loop {
+        // Check for resize events
+        if RESIZE_PENDING.swap(false, Ordering::SeqCst) {
+            let (new_width, new_height) = get_terminal_size(tty.as_raw_fd());
+            compositor.resize(new_width, new_height);
+            // Clear screen and force a full redraw after resize
+            {
+                let mut output = tty_output.lock().unwrap();
+                let _ = output.write_all(b"\x1b[2J\x1b[H");
+                let _ = output.flush();
+            }
+            compositor.force_render();
+        }
+
+        // Check for keyboard input
+        match tty_input.read(&mut input_buf) {
+            Ok(0) => {
+                // EOF - terminal closed
+                break;
+            }
+            Ok(n) => {
+                let input = &input_buf[..n];
+
+                // Send input to the compositor
+                // handle_input returns true if we should exit
+                if compositor.handle_input(input) {
+                    break;
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No input available, continue
+            }
+            Err(e) => {
+                eprintln!("Error reading input: {}", e);
+                break;
+            }
+        }
+
+        // Poll the compositor for PTY events with a short timeout
+        match compositor.poll_once(10) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Compositor error: {}", e);
+                break;
+            }
+        }
+    }
+
+    // Clean up: reset terminal
+    {
+        let mut output = tty_output.lock().unwrap();
+        let _ = output.write_all(EXIT_APP_MODE);
+        let _ = output.flush();
+    }
+}

@@ -1,151 +1,69 @@
-use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+//! Entry point. Dispatches to one of three modes:
+//!
+//! - `shell`            — standalone single-process shell (default, unchanged)
+//! - `shell daemon`     — headless daemon serving a Unix socket
+//! - `shell attach`     — dumb client attaching to a daemon
+//!
+//! Both daemon and attach accept `--socket <path>` (default: a per-user socket
+//! under `$XDG_RUNTIME_DIR`).
 
-use raw_tty::GuardMode;
+use shell::{client, common, server, standalone};
+use std::path::PathBuf;
+use std::process::ExitCode;
 
-const ENTER_APP_MODE: &[u8] = b"\x1b[?1049h\x1b[2J\x1b[H";
-const EXIT_APP_MODE: &[u8] =
-    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1049l\x1b[?25h\x1b[0m";
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = args.first().map(String::as_str);
 
-// Global flag to indicate a resize event occurred
-static RESIZE_PENDING: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn handle_sigwinch(_: libc::c_int) {
-    RESIZE_PENDING.store(true, Ordering::SeqCst);
-}
-
-fn main() {
-    // Set up raw mode TTY for input
-    let tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .expect("Failed to open /dev/tty");
-
-    // Get terminal size
-    let (width, height) = get_terminal_size(tty.as_raw_fd());
-
-    // Open a SEPARATE /dev/tty for output - this is critical!
-    // We can't use try_clone() because that shares the file description,
-    // and when we set the input to non-blocking, it would affect the output too.
-    let tty_output_file = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .expect("Failed to open /dev/tty for output");
-
-    let tty_output: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(tty_output_file));
-
-    let mut tty_input = tty.try_clone().unwrap().guard_mode().unwrap();
-    tty_input.set_raw_mode().expect("Failed to set raw mode");
-
-    // Create the compositor with the terminal dimensions and TTY output
-    let mut compositor = compositor::Compositor::with_output(width, height, tty_output.clone())
-        .expect("Failed to create compositor");
-
-    // Always enable synchronized output - terminals that don't support it will
-    // ignore the BSU/ESU sequences.
-    compositor.set_synchronized_output(true);
-
-    // Set tty_input to non-blocking
-    let fd = tty_input.as_raw_fd();
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
-
-    // Set up SIGWINCH handler for terminal resize events
-    unsafe {
-        libc::signal(libc::SIGWINCH, handle_sigwinch as libc::sighandler_t);
-    }
-
-    // Own the host terminal as a full-screen application. Child applications'
-    // alternate-screen and mouse modes are consumed by the embedded emulator, so
-    // the outer terminal must be kept out of normal scrollback while shell runs.
-    {
-        let mut output = tty_output.lock().unwrap();
-        let _ = output.write_all(ENTER_APP_MODE);
-        let _ = output.flush();
-    }
-
-    // Initial render to display the shell prompt
-    compositor.render();
-
-    // Main event loop
-    let mut input_buf = [0u8; 1024];
-
-    loop {
-        // Check for resize events
-        if RESIZE_PENDING.swap(false, Ordering::SeqCst) {
-            let (new_width, new_height) = get_terminal_size(tty.as_raw_fd());
-            compositor.resize(new_width, new_height);
-            // Clear screen and force a full redraw after resize
-            {
-                let mut output = tty_output.lock().unwrap();
-                let _ = output.write_all(b"\x1b[2J\x1b[H");
-                let _ = output.flush();
-            }
-            compositor.force_render();
+    match mode {
+        None | Some("standalone") => {
+            standalone::run();
+            ExitCode::SUCCESS
         }
-
-        // Check for keyboard input
-        match tty_input.read(&mut input_buf) {
-            Ok(0) => {
-                // EOF - terminal closed
-                break;
-            }
-            Ok(n) => {
-                let input = &input_buf[..n];
-
-                // Send input to the compositor
-                // handle_input returns true if we should exit
-                if compositor.handle_input(input) {
-                    break;
-                }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No input available, continue
-            }
+        Some("daemon") => match server::run(&socket_path(&args[1..])) {
+            Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("Error reading input: {}", e);
-                break;
+                eprintln!("shell daemon: {e}");
+                ExitCode::FAILURE
             }
-        }
-
-        // Poll the compositor for PTY events with a short timeout
-        match compositor.poll_once(10) {
-            Ok(_) => {}
+        },
+        Some("attach") => match client::run(&socket_path(&args[1..])) {
+            Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("Compositor error: {}", e);
-                break;
+                eprintln!("shell attach: {e}");
+                ExitCode::FAILURE
             }
+        },
+        Some("-h") | Some("--help") | Some("help") => {
+            print_usage();
+            ExitCode::SUCCESS
         }
-    }
-
-    // Clean up: reset terminal
-    {
-        let mut output = tty_output.lock().unwrap();
-        let _ = output.write_all(EXIT_APP_MODE);
-        let _ = output.flush();
+        Some(other) => {
+            eprintln!("shell: unknown mode `{other}`\n");
+            print_usage();
+            ExitCode::FAILURE
+        }
     }
 }
 
-/// Get the terminal size using ioctl
-fn get_terminal_size(fd: std::os::fd::RawFd) -> (usize, usize) {
-    let mut winsize = libc::winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-
-    unsafe {
-        if libc::ioctl(fd, libc::TIOCGWINSZ, &mut winsize) == 0 {
-            (winsize.ws_col as usize, winsize.ws_row as usize)
-        } else {
-            // Fallback to default size
-            (80, 24)
+/// Resolve the socket path from `--socket <path>`, else the per-user default.
+fn socket_path(args: &[String]) -> PathBuf {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if arg == "--socket" {
+            if let Some(path) = it.next() {
+                return PathBuf::from(path);
+            }
         }
     }
+    common::default_socket_path()
+}
+
+fn print_usage() {
+    eprintln!(
+        "usage:\n  \
+         shell                       run the standalone shell\n  \
+         shell daemon [--socket P]   run a headless daemon\n  \
+         shell attach [--socket P]   attach to a daemon"
+    );
 }

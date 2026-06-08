@@ -72,10 +72,67 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(mut r: R) -> io::Result<Option<T
     serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Incremental frame decoder for readers that can't block on a full frame
+/// (e.g. a single-threaded `poll()` loop). Feed it whatever bytes a `read()`
+/// returns via [`push`](Self::push), then drain complete frames with
+/// [`next_frame`](Self::next_frame).
+#[derive(Default)]
+pub struct FrameReader {
+    buf: Vec<u8>,
+    /// Bytes before this offset have been consumed; compacted lazily on push.
+    pos: usize,
+}
+
+impl FrameReader {
+    pub fn new() -> Self {
+        FrameReader::default()
+    }
+
+    /// Append freshly-read bytes to the internal buffer.
+    pub fn push(&mut self, data: &[u8]) {
+        // Drop already-consumed bytes before growing, keeping the buffer bounded.
+        if self.pos > 0 {
+            self.buf.drain(..self.pos);
+            self.pos = 0;
+        }
+        self.buf.extend_from_slice(data);
+    }
+
+    /// Pop the next fully-buffered frame, or `Ok(None)` if more bytes are needed.
+    pub fn next_frame<T: DeserializeOwned>(&mut self) -> io::Result<Option<T>> {
+        let avail = self.buf.len() - self.pos;
+        if avail < 4 {
+            return Ok(None);
+        }
+        let p = self.pos;
+        let len = u32::from_le_bytes([
+            self.buf[p],
+            self.buf[p + 1],
+            self.buf[p + 2],
+            self.buf[p + 3],
+        ]);
+        if len > MAX_FRAME_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame length {len} exceeds maximum {MAX_FRAME_LEN}"),
+            ));
+        }
+        let len = len as usize;
+        if avail < 4 + len {
+            return Ok(None);
+        }
+        let body = &self.buf[p + 4..p + 4 + len];
+        let value = serde_json::from_slice(body)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.pos += 4 + len;
+        Ok(Some(value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ClientMsg, PaneId};
+    use crate::{ClientMsg, PaneId, ServerMsg};
 
     #[test]
     fn stream_round_trip_multiple_frames() {
@@ -111,5 +168,35 @@ mod tests {
         let mut cursor = io::Cursor::new(buf);
         let r: io::Result<Option<ClientMsg>> = read_frame(&mut cursor);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn frame_reader_handles_partial_and_coalesced() {
+        // Two frames concatenated, fed one byte at a time, must decode in order.
+        let mut wire = to_frame(&ServerMsg::Render { bytes: vec![1, 2, 3] });
+        wire.extend(to_frame(&ServerMsg::ProcessExited {
+            pane: PaneId(4),
+            code: 0,
+        }));
+
+        let mut fr = FrameReader::new();
+        let mut decoded: Vec<ServerMsg> = Vec::new();
+        for chunk in wire.chunks(1) {
+            fr.push(chunk);
+            while let Some(msg) = fr.next_frame::<ServerMsg>().unwrap() {
+                decoded.push(msg);
+            }
+        }
+        assert_eq!(decoded.len(), 2);
+        assert!(matches!(decoded[0], ServerMsg::Render { .. }));
+        assert!(matches!(decoded[1], ServerMsg::ProcessExited { pane: PaneId(4), code: 0 }));
+
+        // And the same bytes delivered all at once.
+        let mut fr = FrameReader::new();
+        fr.push(&wire);
+        let a = fr.next_frame::<ServerMsg>().unwrap();
+        let b = fr.next_frame::<ServerMsg>().unwrap();
+        let c = fr.next_frame::<ServerMsg>().unwrap();
+        assert!(a.is_some() && b.is_some() && c.is_none());
     }
 }

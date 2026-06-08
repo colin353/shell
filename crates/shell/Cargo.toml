@@ -8,3 +8,7 @@ raw_tty = "0.1.0"
 nix = { version = "0.29", features = ["term", "process", "signal", "fs"] }
 libc = "0.2"
 compositor = { path = "../compositor" }
+protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tempfile = "3.10"
