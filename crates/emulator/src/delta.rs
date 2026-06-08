@@ -222,6 +222,20 @@ fn emit_cell_batch(
             output.extend_from_slice(b"\x1b[?7l");
         }
 
+        // A cell may hold a control character (e.g. alacritty stores a literal
+        // TAB `\t` in the cell the cursor was on when a tab was processed). Such a
+        // cell renders as blank, but emitting the raw byte would make the receiving
+        // terminal *execute* the control (a TAB would move the cursor to the next
+        // tab stop instead of painting the cell). That both fails to apply the
+        // cell's attributes and desyncs our cursor tracking, shifting every later
+        // cell in the batch. Render control characters as a space, which paints the
+        // background correctly and advances exactly one column.
+        let glyph = if cell.character.is_control() {
+            ' '
+        } else {
+            cell.character
+        };
+
         // Update attributes if needed
         if cell.attrs != *current_attrs {
             emit_sgr_transition(output, current_attrs, &cell.attrs);
@@ -230,12 +244,12 @@ fn emit_cell_batch(
 
         // Emit the character
         let mut buf = [0u8; 4];
-        let s = cell.character.encode_utf8(&mut buf);
+        let s = glyph.encode_utf8(&mut buf);
         output.extend_from_slice(s.as_bytes());
 
         // Advance cursor by the character's display width
         // Wide characters (CJK, emoji, etc.) are 2 columns wide
-        let char_width = cell.character.width().unwrap_or(1);
+        let char_width = glyph.width().unwrap_or(1);
         *cursor_x += char_width;
 
         // Re-enable autowrap if we disabled it
