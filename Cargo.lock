@@ -141,6 +141,7 @@ dependencies = [
  "nix",
  "pty",
  "regex",
+ "unicode-width",
 ]
 
 [[package]]
