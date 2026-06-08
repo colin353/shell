@@ -508,7 +508,13 @@ impl Compositor {
                 self.toggle_zoom();
             }
             b'r' => {
-                // Ctrl+b r - force full screen redraw
+                // Ctrl+b r - force full screen redraw. For a remote pane, also
+                // pull a fresh authoritative repaint from the remote, since the
+                // corruption may be in the local pane emulator's own state
+                // (which a local redraw would just faithfully reproduce).
+                if let Some(pane) = self.get_focused_pane_mut() {
+                    pane.request_remote_resync();
+                }
                 self.force_full_redraw();
             }
             0x02 => {
@@ -1247,6 +1253,13 @@ impl Compositor {
                     pane.read_and_process();
                 }
             }
+        }
+
+        // A remote session may have pushed a window rename; apply it to the tab
+        // owning the focused (remote) pane.
+        let remote_title = self.get_focused_pane_mut().and_then(|p| p.take_remote_title());
+        if let Some(name) = remote_title {
+            self.tabs[self.active_tab].name = name;
         }
 
         // Process queued keyboard input

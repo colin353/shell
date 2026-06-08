@@ -229,7 +229,11 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
         sink.clone(),
     )
     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compositor: {e:?}")))?;
-    compositor.set_synchronized_output(true);
+    // Do NOT enable synchronized output here: this daemon's render bytes are fed
+    // into the *local* pane emulator, not a real terminal, so BSU/ESU sequences
+    // would pollute that emulator's state (the local compositor wraps the real
+    // terminal output itself).
+    compositor.set_synchronized_output(false);
     if bare {
         // No chrome: this daemon is embedded inside a remote pane.
         compositor.set_status_bar_visible(false);
@@ -262,6 +266,8 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
         }
     });
 
+    let mut last_name = compositor.active_tab().name.clone();
+
     loop {
         let mut exit = false;
         loop {
@@ -276,6 +282,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
                     compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
                     compositor.force_full_redraw();
                 }
+                Ok(ClientMsg::RequestResync) => compositor.force_full_redraw(),
                 Ok(ClientMsg::UpdateLocalEnv { vars }) => apply_env_defaults(&vars),
                 Ok(_) => {}
                 Err(TryRecvError::Empty) => break,
@@ -285,6 +292,15 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
                 }
             }
         }
+
+        // Propagate window renames (e.g. the `rename-window` builtin run inside
+        // the remote shell) up to the client's local tab.
+        let name = compositor.active_tab().name.clone();
+        if name != last_name {
+            last_name = name.clone();
+            let _ = codec::write_frame(&mut handshake_out, &ServerMsg::RenameWindow { name });
+        }
+
         if exit {
             break;
         }

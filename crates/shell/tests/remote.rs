@@ -140,4 +140,13 @@ fn remote_pane_runs_a_shell_over_stdio_transport() {
         windows_contains(&out, b"traveled"),
         "forwarded env var should be set on the remote"
     );
+
+    // rename-window run inside the remote shell renames the LOCAL tab; the outer
+    // (non-bare) daemon's status bar — visible to this client — reflects it.
+    send(&mut stream, b"rename-window REMOTE_RENAMED\r");
+    let out = read_until(&mut stream, b"REMOTE_RENAMED", Duration::from_secs(8));
+    assert!(
+        windows_contains(&out, b"REMOTE_RENAMED"),
+        "rename-window in a remote pane should rename the local tab"
+    );
 }

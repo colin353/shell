@@ -547,6 +547,19 @@ impl Pane {
         Ok(())
     }
 
+    /// If this pane is remote, ask it to repaint from the authoritative remote
+    /// screen (used by `Ctrl-b r`).
+    pub fn request_remote_resync(&mut self) {
+        if let Some(remote) = self.remote.as_mut() {
+            let _ = remote.request_resync();
+        }
+    }
+
+    /// Take a window-rename pushed up by the remote session, if any.
+    pub fn take_remote_title(&mut self) -> Option<String> {
+        self.remote.as_mut().and_then(|r| r.take_title())
+    }
+
     /// Drain output from the active remote session into the emulator, and on
     /// transport exit return the pane to its local shell.
     fn read_and_process_remote(&mut self) {

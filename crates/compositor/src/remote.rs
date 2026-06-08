@@ -27,6 +27,8 @@ pub struct RemoteProcess {
     frames: FrameReader,
     /// Decoded ANSI awaiting the pane's emulator.
     pending: Vec<u8>,
+    /// A window-rename pushed by the remote, awaiting the local compositor.
+    pending_title: Option<String>,
     eof: bool,
     exit_code: Option<i32>,
     #[allow(dead_code)]
@@ -80,6 +82,7 @@ impl RemoteProcess {
             stdout_fd,
             frames: FrameReader::new(),
             pending: Vec::new(),
+            pending_title: None,
             eof: false,
             exit_code: None,
             target: target.to_string(),
@@ -115,6 +118,7 @@ impl RemoteProcess {
                         ServerMsg::GridResync { grid, .. } => self
                             .pending
                             .extend_from_slice(&emulator::render_snapshot_to_ansi(&grid)),
+                        ServerMsg::RenameWindow { name } => self.pending_title = Some(name),
                         _ => {}
                     }
                 }
@@ -150,6 +154,18 @@ impl RemoteProcess {
     /// Tell the remote its size changed.
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         codec::write_frame(&mut self.stdin, &ClientMsg::Resize { cols, rows })
+    }
+
+    /// Ask the remote to repaint its authoritative screen (recovers from any
+    /// local drift). The fresh paint arrives on stdout and is applied by
+    /// `read()`.
+    pub fn request_resync(&mut self) -> io::Result<()> {
+        codec::write_frame(&mut self.stdin, &ClientMsg::RequestResync)
+    }
+
+    /// Take a pending window-rename pushed by the remote, if any.
+    pub fn take_title(&mut self) -> Option<String> {
+        self.pending_title.take()
     }
 
     /// Exit code if the transport (and thus the remote session) has ended.

@@ -111,6 +111,9 @@ pub enum ClientMsg {
         cols: u16,
         rows: u16,
     },
+    /// Ask the daemon to repaint the authoritative screen from scratch (used by
+    /// `Ctrl-b r` when a pane is remote, to recover from any local drift).
+    RequestResync,
 
     /// Dumb-mode: a raw keystroke stream (daemon owns line editing).
     Input {
@@ -219,6 +222,11 @@ pub enum ServerMsg {
     RemoteStatus {
         pane: PaneId,
         status: RemoteStatus,
+    },
+    /// The remote session renamed its window (e.g. the `rename-window` builtin);
+    /// the client should rename the local tab that owns this remote pane.
+    RenameWindow {
+        name: String,
     },
 
     /// Dual-write: mirror this entry into the local log (rewritten to
