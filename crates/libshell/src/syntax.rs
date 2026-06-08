@@ -6,6 +6,7 @@
 //! - Tab completion handling
 
 use shell_syntax::{CompletionContext, HighlightKind, HighlightedSpan, ShellSyntax};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 // Re-export CompletionKind for use in lib.rs
@@ -16,6 +17,8 @@ pub struct SyntaxHandler {
     syntax: ShellSyntax,
     /// Cached PATH executables (refreshed periodically).
     path_executables: Vec<String>,
+    /// PATH value used for the cached executable scan.
+    path_var: String,
     /// Last time PATH was scanned.
     path_last_refresh: std::time::Instant,
 }
@@ -29,10 +32,13 @@ impl Default for SyntaxHandler {
 impl SyntaxHandler {
     /// Create a new syntax handler.
     pub fn new() -> Self {
-        let path_executables = scan_path_executables();
+        let env_vars = effective_env_vars();
+        let path_var = env_path(&env_vars);
+        let path_executables = scan_path_executables(&path_var);
         Self {
             syntax: ShellSyntax::new(),
             path_executables,
+            path_var,
             path_last_refresh: std::time::Instant::now(),
         }
     }
@@ -41,10 +47,11 @@ impl SyntaxHandler {
     ///
     /// Returns the input string with ANSI color codes applied.
     pub fn highlight(&mut self, input: &str, cwd: &PathBuf) -> String {
-        self.maybe_refresh_path();
+        let env_vars = effective_env_vars();
+        self.maybe_refresh_path(&env_vars);
         self.syntax.update(input);
 
-        let context = self.build_context(cwd);
+        let context = self.build_context(cwd, env_vars);
         let spans = self.syntax.highlight(&context);
 
         render_highlighted(input, &spans)
@@ -61,10 +68,11 @@ impl SyntaxHandler {
         cursor_pos: usize,
         cwd: &PathBuf,
     ) -> Option<(String, usize, usize, bool)> {
-        self.maybe_refresh_path();
+        let env_vars = effective_env_vars();
+        self.maybe_refresh_path(&env_vars);
         self.syntax.update(input);
 
-        let context = self.build_context(cwd);
+        let context = self.build_context(cwd, env_vars);
         self.syntax
             .complete(cursor_pos, &context)
             .map(|c| (c.text, c.replace_start, c.replace_end, c.is_partial))
@@ -73,10 +81,11 @@ impl SyntaxHandler {
     /// Get all completions at cursor position.
     #[allow(dead_code)]
     pub fn completions(&mut self, input: &str, cursor_pos: usize, cwd: &PathBuf) -> Vec<String> {
-        self.maybe_refresh_path();
+        let env_vars = effective_env_vars();
+        self.maybe_refresh_path(&env_vars);
         self.syntax.update(input);
 
-        let context = self.build_context(cwd);
+        let context = self.build_context(cwd, env_vars);
         self.syntax
             .completions(cursor_pos, &context)
             .into_iter()
@@ -93,10 +102,11 @@ impl SyntaxHandler {
         cursor_pos: usize,
         cwd: &PathBuf,
     ) -> Option<(Vec<(String, String, CompletionKind)>, usize, usize)> {
-        self.maybe_refresh_path();
+        let env_vars = effective_env_vars();
+        self.maybe_refresh_path(&env_vars);
         self.syntax.update(input);
 
-        let context = self.build_context(cwd);
+        let context = self.build_context(cwd, env_vars);
         let completions = self.syntax.completions(cursor_pos, &context);
 
         if completions.is_empty() {
@@ -180,29 +190,41 @@ impl SyntaxHandler {
     }
 
     /// Build completion context from current shell state.
-    fn build_context(&self, cwd: &PathBuf) -> CompletionContext {
+    fn build_context(&self, cwd: &PathBuf, env_vars: HashMap<String, String>) -> CompletionContext {
         CompletionContext {
-            env_vars: std::env::vars().collect(),
+            env_vars,
             path_executables: self.path_executables.clone(),
             cwd: cwd.clone(),
         }
     }
 
-    /// Refresh PATH executables if enough time has passed.
-    fn maybe_refresh_path(&mut self) {
+    /// Refresh PATH executables if the shell PATH changed or enough time has passed.
+    fn maybe_refresh_path(&mut self, env_vars: &HashMap<String, String>) {
+        let path_var = env_path(env_vars);
         // Refresh every 30 seconds
-        if self.path_last_refresh.elapsed().as_secs() > 30 {
-            self.path_executables = scan_path_executables();
+        if self.path_var != path_var || self.path_last_refresh.elapsed().as_secs() > 30 {
+            self.path_executables = scan_path_executables(&path_var);
+            self.path_var = path_var;
             self.path_last_refresh = std::time::Instant::now();
         }
     }
 }
 
+/// Build the effective shell environment used by subprocesses.
+fn effective_env_vars() -> HashMap<String, String> {
+    let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+    env_vars.extend(crate::shell_env_snapshot());
+    env_vars
+}
+
+fn env_path(env_vars: &HashMap<String, String>) -> String {
+    env_vars.get("PATH").cloned().unwrap_or_default()
+}
+
 /// Scan PATH for available executables.
-fn scan_path_executables() -> Vec<String> {
-    let path_var = std::env::var("PATH").unwrap_or_default();
+fn scan_path_executables(path_var: &str) -> Vec<String> {
     let mut executables = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
 
     for dir in path_var.split(':') {
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -340,10 +362,34 @@ mod path_tests {
 
     #[test]
     fn test_path_has_cargo() {
-        let executables = scan_path_executables();
+        let env_vars = effective_env_vars();
+        let executables = scan_path_executables(&env_path(&env_vars));
         assert!(
             executables.contains(&"cargo".to_string()),
             "cargo should be in PATH executables"
+        );
+    }
+
+    #[test]
+    fn test_scan_path_executables_uses_supplied_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable_path = dir.path().join("from-shell-env-path");
+        std::fs::write(&executable_path, "").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&executable_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable_path, permissions).unwrap();
+        }
+
+        let path = dir.path().to_string_lossy();
+        let executables = scan_path_executables(&path);
+
+        assert!(
+            executables.contains(&"from-shell-env-path".to_string()),
+            "executables should be scanned from the supplied PATH"
         );
     }
 
