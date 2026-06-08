@@ -278,6 +278,10 @@ pub struct Compositor {
     // Whether the terminal supports synchronized output mode
     pub synchronized_output: bool,
 
+    // Whether to draw (and reserve a row for) the status bar. Disabled in
+    // `--bare` mode so a remote daemon embedded in a pane has no chrome.
+    status_bar_visible: bool,
+
     host_mouse_mode: MouseMode,
 
     // Clock function for getting current time (mockable for tests)
@@ -331,6 +335,7 @@ impl Compositor {
             input_queue: Mutex::new(VecDeque::new()),
             prefix_mode: false,
             synchronized_output: false,
+            status_bar_visible: true,
             host_mouse_mode: MouseMode::default(),
             clock: Box::new(|| chrono::Local::now()),
         })
@@ -373,6 +378,7 @@ impl Compositor {
             input_queue: Mutex::new(VecDeque::new()),
             prefix_mode: false,
             synchronized_output: false,
+            status_bar_visible: true,
             host_mouse_mode: MouseMode::default(),
             clock: Box::new(|| chrono::Local::now()),
         })
@@ -564,7 +570,7 @@ impl Compositor {
     }
 
     fn handle_mouse_event(&mut self, event: SgrMouseEvent) {
-        let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+        let pane_height = self.height.saturating_sub(self.status_bar_height());
         if event.y >= pane_height {
             return;
         }
@@ -597,7 +603,7 @@ impl Compositor {
     fn toggle_zoom(&mut self) {
         let was_zoomed = self.active_tab().zoomed;
         let width = self.width;
-        let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+        let pane_height = self.height.saturating_sub(self.status_bar_height());
         self.active_tab_mut().toggle_zoom();
         let is_zoomed = self.active_tab().zoomed;
         if is_zoomed && !was_zoomed {
@@ -619,6 +625,11 @@ impl Compositor {
             PaneInputResult::Rerender => self.render(),
             PaneInputResult::RenameWindow(name) => {
                 self.tabs[self.active_tab].name = name;
+                self.render();
+            }
+            PaneInputResult::ConnectedRemote(target) => {
+                // The tab is now remote-owned: future splits auto-connect there.
+                self.tabs[self.active_tab].remote_host = Some(target);
                 self.render();
             }
         }
@@ -926,7 +937,7 @@ impl Compositor {
 
     /// Create a new tab and switch to it
     pub fn create_tab(&mut self) -> Result<(), CompositorError> {
-        let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+        let pane_height = self.height.saturating_sub(self.status_bar_height());
         let tab = Tab::new("bash".to_string(), self.width, pane_height)?;
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
@@ -977,13 +988,25 @@ impl Compositor {
     /// Creates a new pane by splitting the focused pane either horizontally or vertically.
     pub fn split_focused_pane(&mut self, direction: SplitDirection) -> Result<(), CompositorError> {
         self.exit_zoom_if_needed();
-        self.active_tab_mut().root.split_focused(direction)
+        self.active_tab_mut().root.split_focused(direction)?;
+
+        // In a remote-owned tab, the new (now focused) pane joins the same host.
+        if let Some(host) = self.active_tab().remote_host.clone() {
+            let env = libshell::shell_env_snapshot();
+            if let Some(pane) = self.get_focused_pane_mut() {
+                if let Err(e) = pane.connect_remote(&host, &env) {
+                    let msg = format!("connect error: {}\r\n", e);
+                    pane.terminal_emulator.process(msg.as_bytes());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn exit_zoom_if_needed(&mut self) {
         if self.active_tab().zoomed {
             let width = self.width;
-            let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+            let pane_height = self.height.saturating_sub(self.status_bar_height());
             self.active_tab_mut().exit_zoom();
             self.active_tab_mut().resize(width, pane_height);
         }
@@ -1054,7 +1077,7 @@ impl Compositor {
                     // Close just the focused pane and exit zoom mode
                     let was_zoomed = self.active_tab().zoomed;
                     let width = self.width;
-                    let pane_height = self.height.saturating_sub(STATUS_BAR_HEIGHT);
+                    let pane_height = self.height.saturating_sub(self.status_bar_height());
                     self.active_tab_mut().exit_zoom();
                     self.active_tab_mut().root.close_focused_pane();
                     // If we were zoomed, restore the pane layout
@@ -1253,6 +1276,10 @@ impl Compositor {
                     self.tabs[self.active_tab].name = name;
                     needs_render = true;
                 }
+                PaneInputResult::ConnectedRemote(target) => {
+                    self.tabs[self.active_tab].remote_host = Some(target);
+                    needs_render = true;
+                }
             }
         }
         needs_render
@@ -1270,7 +1297,7 @@ impl Compositor {
         self.global_emulator = emulator::TerminalEmulator::new(cols, rows);
 
         // Calculate pane area (excluding status bar)
-        let pane_height = rows.saturating_sub(STATUS_BAR_HEIGHT);
+        let pane_height = rows.saturating_sub(self.status_bar_height());
 
         // Composite the active tab's panes into the global emulator
         let tab = &mut self.tabs[self.active_tab];
@@ -1285,8 +1312,10 @@ impl Compositor {
             tab.root.composite_into(&mut self.global_emulator);
         }
 
-        // Render the status bar at the bottom
-        self.render_status_bar();
+        // Render the status bar at the bottom (skipped in bare mode)
+        if self.status_bar_visible {
+            self.render_status_bar();
+        }
 
         // Set the cursor position and visibility from the focused pane
         if let Some((cursor_x, cursor_y, cursor_visible)) =
@@ -1370,6 +1399,14 @@ impl Compositor {
         active_tab_attrs.fg_color = Some(emulator::Color::Green);
         active_tab_attrs.bold = true;
 
+        // Distinct colors for remote-owned tabs (blue vs the green of local tabs).
+        let mut remote_tab_attrs = emulator::CellAttributes::default();
+        remote_tab_attrs.bg_color = Some(emulator::Color::Blue);
+        remote_tab_attrs.fg_color = Some(emulator::Color::BrightWhite);
+        let mut active_remote_tab_attrs = remote_tab_attrs.clone();
+        active_remote_tab_attrs.bg_color = Some(emulator::Color::BrightBlue);
+        active_remote_tab_attrs.bold = true;
+
         // Fill the status bar rows with the background color
         for y in status_bar_y..rows {
             for x in 0..cols {
@@ -1386,11 +1423,17 @@ impl Compositor {
         for (i, tab) in self.tabs.iter().enumerate() {
             // Add 'Z' suffix if tab is zoomed
             let zoom_indicator = if tab.zoomed { "Z" } else { "" };
-            let tab_text = format!(" {} {}{} ", i, tab.name, zoom_indicator);
-            let attrs = if i == self.active_tab {
-                active_tab_attrs.clone()
-            } else {
-                bar_attrs.clone()
+            // Remote-owned tabs show the host (after `user@`).
+            let remote_indicator = match &tab.remote_host {
+                Some(host) => format!(" @{}", host.rsplit('@').next().unwrap_or(host)),
+                None => String::new(),
+            };
+            let tab_text = format!(" {} {}{}{} ", i, tab.name, zoom_indicator, remote_indicator);
+            let attrs = match (tab.remote_host.is_some(), i == self.active_tab) {
+                (true, true) => active_remote_tab_attrs.clone(),
+                (true, false) => remote_tab_attrs.clone(),
+                (false, true) => active_tab_attrs.clone(),
+                (false, false) => bar_attrs.clone(),
             };
 
             for ch in tab_text.chars() {
@@ -1686,8 +1729,10 @@ impl Compositor {
             .root
             .composite_into(&mut self.global_emulator);
 
-        // Render the status bar
-        self.render_status_bar();
+        // Render the status bar (skipped in bare mode)
+        if self.status_bar_visible {
+            self.render_status_bar();
+        }
 
         // Set the cursor position and visibility from the focused pane
         if let Some((cursor_x, cursor_y, cursor_visible)) =
@@ -1737,7 +1782,7 @@ impl Compositor {
         self.prev_frame = emulator::TerminalGrid::new(width, height);
 
         // Calculate pane height (total height minus status bar)
-        let pane_height = height.saturating_sub(STATUS_BAR_HEIGHT);
+        let pane_height = height.saturating_sub(self.status_bar_height());
 
         // Recursively resize all tabs
         for tab in &mut self.tabs {
@@ -1790,6 +1835,27 @@ impl Compositor {
     /// Use `detect_synchronized_output_support()` to check if the terminal supports this mode.
     pub fn set_synchronized_output(&mut self, enabled: bool) {
         self.synchronized_output = enabled;
+    }
+
+    /// Rows reserved for the status bar: `STATUS_BAR_HEIGHT` normally, 0 in bare
+    /// mode.
+    pub fn status_bar_height(&self) -> usize {
+        if self.status_bar_visible {
+            STATUS_BAR_HEIGHT
+        } else {
+            0
+        }
+    }
+
+    /// Show or hide the status bar (bare mode). Re-lays out panes to the new
+    /// usable height.
+    pub fn set_status_bar_visible(&mut self, visible: bool) {
+        if self.status_bar_visible == visible {
+            return;
+        }
+        self.status_bar_visible = visible;
+        let (w, h) = (self.width, self.height);
+        self.resize(w, h);
     }
 
     /// Check if synchronized output mode is currently enabled.

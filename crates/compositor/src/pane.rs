@@ -22,6 +22,9 @@ pub enum PaneInputResult {
     Rerender,
     /// Request to rename the containing window/tab
     RenameWindow(String),
+    /// The pane connected to a remote host; the compositor should mark the
+    /// containing tab as remote-owned so new splits auto-connect.
+    ConnectedRemote(String),
 }
 
 fn is_replayable_typeahead(input: &[u8]) -> bool {
@@ -404,14 +407,8 @@ impl Pane {
                     self.terminal_emulator.process(&output);
                 }
 
-                let width = self.terminal_emulator.grid().cols as u16;
-                let height = self.terminal_emulator.grid().rows as u16;
-
-                self.subprocess_typeahead.clear();
-                match crate::remote::RemoteProcess::connect(&target, width, height, &env) {
-                    Ok(remote) => {
-                        self.remote = Some(remote);
-                    }
+                match self.connect_remote(&target, &env) {
+                    Ok(()) => PaneInputResult::ConnectedRemote(target),
                     Err(e) => {
                         let error_msg = format!("connect error: {}\r\n", e);
                         self.terminal_emulator.process(error_msg.as_bytes());
@@ -419,9 +416,9 @@ impl Pane {
                         // returns and the exit is recorded.
                         let prompt = self.shell.subprocess_exited(1);
                         self.terminal_emulator.process(&prompt);
+                        PaneInputResult::Rerender
                     }
                 }
-                PaneInputResult::Rerender
             }
             libshell::ShellAction::Exit => {
                 // Shell wants to exit - could close the pane
@@ -536,6 +533,18 @@ impl Pane {
                 }
             }
         }
+    }
+
+    /// Connect this pane to a remote host, taking over from the local shell.
+    /// Reusable by the `connect` builtin and by auto-connected splits in a
+    /// remote-owned tab. Returns `Err` if spawning the transport fails.
+    pub fn connect_remote(&mut self, target: &str, env: &[(String, String)]) -> std::io::Result<()> {
+        let width = self.terminal_emulator.grid().cols as u16;
+        let height = self.terminal_emulator.grid().rows as u16;
+        self.subprocess_typeahead.clear();
+        let remote = crate::remote::RemoteProcess::connect(target, width, height, env)?;
+        self.remote = Some(remote);
+        Ok(())
     }
 
     /// Drain output from the active remote session into the emulator, and on

@@ -10,6 +10,9 @@ pub struct Tab {
     pub root: PaneCell,
     /// Whether the focused pane is currently zoomed (temporary fullscreen)
     pub zoomed: bool,
+    /// If set, this tab is "owned" by a remote host: new panes created by
+    /// splitting auto-connect to it, and the status bar shows the host.
+    pub remote_host: Option<String>,
 }
 
 impl Tab {
@@ -26,6 +29,7 @@ impl Tab {
                 focus: true,
             },
             zoomed: false,
+            remote_host: None,
         })
     }
 
@@ -47,6 +51,7 @@ impl Tab {
                 focus: true,
             },
             zoomed: false,
+            remote_host: None,
         })
     }
 

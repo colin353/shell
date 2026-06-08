@@ -48,9 +48,12 @@ impl RemoteProcess {
             .stderr(Stdio::inherit());
         let mut child = command.spawn()?;
         let mut stdin = child.stdin.take().expect("piped stdin");
-        let mut stdout = child.stdout.take().expect("piped stdout");
+        let stdout = child.stdout.take().expect("piped stdout");
 
-        // Handshake: Hello -> Welcome.
+        // Non-blocking handshake: send Hello and the forwarded env right away,
+        // but DON'T wait for Welcome — otherwise connecting (e.g. an
+        // auto-connected split) would freeze the whole compositor on ssh setup.
+        // The Welcome/GridResync arrive on stdout and are consumed by `read()`.
         codec::write_frame(
             &mut stdin,
             &ClientMsg::Hello(Hello {
@@ -59,23 +62,6 @@ impl RemoteProcess {
                 size: (cols, rows),
             }),
         )?;
-        match codec::read_frame::<_, ServerMsg>(&mut stdout)? {
-            Some(ServerMsg::Welcome(w)) if w.version == PROTOCOL_VERSION => {}
-            Some(ServerMsg::Welcome(w)) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("remote protocol {} != local {}", w.version, PROTOCOL_VERSION),
-                ));
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "expected Welcome from remote",
-                ))
-            }
-        }
-
-        // Forward local env (applied remote-wins as defaults on the other side).
         if !env.is_empty() {
             let _ = codec::write_frame(
                 &mut stdin,
@@ -203,12 +189,22 @@ fn build_command(target: &str) -> io::Result<Command> {
             None => std::env::current_exe()?,
         };
         let mut c = Command::new(exe);
-        c.args(["daemon", "--stdio"]);
+        c.args(["daemon", "--stdio", "--bare"]);
         Ok(c)
     } else {
-        // `shell` is expected on the remote PATH. ssh wires our stdio to it.
+        // The remote binary, default `shell` (found on the remote PATH).
+        // `SHELL_REMOTE_BIN` overrides it with an explicit path (e.g. `~/shell`),
+        // useful when `shell` isn't on the non-interactive login PATH.
+        let remote_bin = std::env::var("SHELL_REMOTE_BIN").unwrap_or_else(|_| "shell".to_string());
         let mut c = Command::new("ssh");
-        c.args([target, "shell", "daemon", "--stdio"]);
+        // -T: do not allocate a remote PTY, so the binary protocol on stdio
+        // isn't mangled by terminal line discipline.
+        c.arg("-T")
+            .arg(target)
+            .arg(remote_bin)
+            .arg("daemon")
+            .arg("--stdio")
+            .arg("--bare");
         Ok(c)
     }
 }

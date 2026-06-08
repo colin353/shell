@@ -201,7 +201,7 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
 ///
 /// Unlike the socket daemon this does not persist across disconnects — a
 /// persistent remote session (bridge + detached daemon) is a later step.
-pub fn run_stdio() -> io::Result<()> {
+pub fn run_stdio(bare: bool) -> io::Result<()> {
     // Own dup'd copies of stdin/stdout so we get unbuffered, independently
     // closeable handles (and never touch the global buffered Stdin/Stdout).
     let mut handshake_in = dup_file(0)?;
@@ -230,6 +230,10 @@ pub fn run_stdio() -> io::Result<()> {
     )
     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compositor: {e:?}")))?;
     compositor.set_synchronized_output(true);
+    if bare {
+        // No chrome: this daemon is embedded inside a remote pane.
+        compositor.set_status_bar_visible(false);
+    }
 
     // Refresh + snapshot while the sink is detached (output dropped), then paint
     // the client with a GridResync; afterwards live deltas stream as Render.

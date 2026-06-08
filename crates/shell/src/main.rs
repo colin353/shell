@@ -23,7 +23,7 @@ fn main() -> ExitCode {
         Some("daemon") => {
             let rest = &args[1..];
             let result = if rest.iter().any(|a| a == "--stdio") {
-                server::run_stdio()
+                server::run_stdio(rest.iter().any(|a| a == "--bare"))
             } else {
                 server::run(&socket_path(rest))
             };
