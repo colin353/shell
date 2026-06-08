@@ -441,6 +441,7 @@ dependencies = [
  "fs2",
  "fuzzy-matcher",
  "ignore",
+ "protocol",
  "serde",
  "serde_json",
  "shell-syntax",
@@ -597,6 +598,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9695f8df41bb4f3d222c95a67532365f569318332d03d5f3f67f37b20e6ebdf0"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -29,6 +29,7 @@
 use fs2::FileExt;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use protocol::{HistoryScope, Origin};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -88,6 +89,10 @@ pub struct HistoryEntry {
     pub duration_ms: Option<u64>,
     /// Working directory when command was executed
     pub cwd: Option<String>,
+    /// Where the command executed. `Local` is relative to this log: in any
+    /// machine's own history it means "ran here." Mirrored remote entries carry
+    /// `Remote(host)`.
+    pub origin: Origin,
 }
 
 impl HistoryEntry {
@@ -101,6 +106,7 @@ impl HistoryEntry {
             killed: false,
             duration_ms: None,
             cwd: None,
+            origin: Origin::Local,
         }
     }
 
@@ -108,6 +114,17 @@ impl HistoryEntry {
         self.cwd = Some(cwd);
         self
     }
+
+    pub fn with_origin(mut self, origin: Origin) -> Self {
+        self.origin = origin;
+        self
+    }
+}
+
+/// Whether an origin is the local machine — used to keep local entries' on-disk
+/// JSON unchanged (the `origin` field is omitted when `Local`).
+fn origin_is_local(origin: &Origin) -> bool {
+    matches!(origin, Origin::Local)
 }
 
 /// Events that can be written to the append-only log
@@ -123,6 +140,9 @@ enum LogEvent {
         source: CommandSource,
         #[serde(skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// Omitted for local commands; old logs without it default to `Local`.
+        #[serde(default, skip_serializing_if = "origin_is_local")]
+        origin: Origin,
     },
     /// Amend an existing entry with completion information
     Amend {
@@ -134,7 +154,8 @@ enum LogEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         killed: Option<bool>,
     },
-    /// Import from external history (zsh/bash)
+    /// Import from external history (zsh/bash). Always local — imports come from
+    /// this machine's shell history files.
     Import {
         id: String,
         cmd: String,
@@ -165,6 +186,9 @@ pub struct ScoreBreakdown {
     pub frequency_bonus: i64,
     /// Bonus based on how recently the command was last run
     pub recency_bonus: i64,
+    /// Penalty (subtracted) for entries whose origin differs from the preferred
+    /// host under [`HistoryScope::Prefer`]. Zero otherwise.
+    pub off_host_penalty: i64,
 }
 
 impl ScoreBreakdown {
@@ -175,6 +199,29 @@ impl ScoreBreakdown {
             + self.exit_code_bonus
             + self.frequency_bonus
             + self.recency_bonus
+            - self.off_host_penalty
+    }
+}
+
+/// Off-host penalty magnitude for [`HistoryScope::Prefer`]. Sized to sit below
+/// the frequency bonus (max 100) — a command you run constantly everywhere
+/// still surfaces — but above the recency bonus (max 20), so all else equal an
+/// on-host command wins.
+const OFF_HOST_PENALTY: i64 = 60;
+
+/// Whether `scope` admits an entry with the given origin at all.
+fn scope_includes(scope: &HistoryScope, origin: &Origin) -> bool {
+    match scope {
+        HistoryScope::Only(target) => origin == target,
+        HistoryScope::All | HistoryScope::Prefer(_) => true,
+    }
+}
+
+/// Score penalty applied to an entry's origin under `scope`.
+fn scope_penalty(scope: &HistoryScope, origin: &Origin) -> i64 {
+    match scope {
+        HistoryScope::Prefer(target) if origin != target => OFF_HOST_PENALTY,
+        _ => 0,
     }
 }
 
@@ -350,6 +397,7 @@ impl ShellHistory {
                 timestamp,
                 source,
                 cwd,
+                origin,
             } => {
                 let entry_id = EntryId::from_string(id);
                 let entry = HistoryEntry {
@@ -361,6 +409,7 @@ impl ShellHistory {
                     killed: false,
                     duration_ms: None,
                     cwd,
+                    origin,
                 };
                 entries.insert(entry_id.clone(), entry);
                 entry_order.push(entry_id);
@@ -397,6 +446,7 @@ impl ShellHistory {
                     killed: false,
                     duration_ms: None,
                     cwd: None,
+                    origin: Origin::Local,
                 };
                 entries.insert(entry_id.clone(), entry);
                 entry_order.push(entry_id);
@@ -441,12 +491,27 @@ impl ShellHistory {
         self.record_command_with_cwd(command, source, None)
     }
 
-    /// Record a new command execution with working directory
+    /// Record a new command execution with working directory.
+    ///
+    /// Origin defaults to [`Origin::Local`]; use
+    /// [`record_command_with_origin`](Self::record_command_with_origin) to tag a
+    /// command that ran on a remote host.
     pub fn record_command_with_cwd(
         &self,
         command: String,
         source: CommandSource,
         cwd: Option<String>,
+    ) -> io::Result<EntryId> {
+        self.record_command_with_origin(command, source, cwd, Origin::Local)
+    }
+
+    /// Record a new command execution, tagging where it ran.
+    pub fn record_command_with_origin(
+        &self,
+        command: String,
+        source: CommandSource,
+        cwd: Option<String>,
+        origin: Origin,
     ) -> io::Result<EntryId> {
         let entry = HistoryEntry {
             id: EntryId::new(),
@@ -457,6 +522,7 @@ impl ShellHistory {
             killed: false,
             duration_ms: None,
             cwd: cwd.clone(),
+            origin: origin.clone(),
         };
 
         let timestamp = entry
@@ -471,6 +537,7 @@ impl ShellHistory {
             timestamp,
             source,
             cwd,
+            origin,
         };
 
         // Write to disk first (crash-safe)
@@ -641,6 +708,18 @@ impl ShellHistory {
     ///
     /// If query is empty, returns most recent unique commands.
     pub fn search_with_indices(&self, query: &str, limit: usize) -> Vec<HistorySearchResult> {
+        self.search_with_indices_scoped(query, limit, &HistoryScope::All)
+    }
+
+    /// Like [`search_with_indices`](Self::search_with_indices), but weights
+    /// results by origin: `Only` filters to a single host, `Prefer` downranks
+    /// off-host entries (see [`OFF_HOST_PENALTY`]), and `All` is unweighted.
+    pub fn search_with_indices_scoped(
+        &self,
+        query: &str,
+        limit: usize,
+        scope: &HistoryScope,
+    ) -> Vec<HistorySearchResult> {
         let entries = self.entries.read().unwrap();
         let order = self.entry_order.read().unwrap();
 
@@ -668,6 +747,9 @@ impl ShellHistory {
 
         for (idx, id) in order.iter().enumerate() {
             if let Some(entry) = entries.get(id) {
+                if !scope_includes(scope, &entry.origin) {
+                    continue;
+                }
                 let stats = command_stats.entry(&entry.command).or_insert(CommandStats {
                     count: 0,
                     most_recent_idx: idx,
@@ -691,6 +773,9 @@ impl ShellHistory {
             let mut results = Vec::new();
             for id in order.iter().rev() {
                 if let Some(entry) = entries.get(id) {
+                    if !scope_includes(scope, &entry.origin) {
+                        continue;
+                    }
                     if seen_commands.insert(entry.command.clone()) {
                         let stats = command_stats.get(entry.command.as_str());
                         let mut breakdown = ScoreBreakdown::default();
@@ -708,6 +793,7 @@ impl ShellHistory {
                             }
                         }
 
+                        breakdown.off_host_penalty = scope_penalty(scope, &entry.origin);
                         let score = breakdown.total();
                         results.push(HistorySearchResult {
                             entry: entry.clone(),
@@ -730,6 +816,9 @@ impl ShellHistory {
             .iter()
             .filter_map(|id| {
                 let entry = entries.get(id)?;
+                if !scope_includes(scope, &entry.origin) {
+                    return None;
+                }
                 let (score, indices) = self.matcher.fuzzy_indices(&entry.command, query)?;
                 Some((id, entry, score, indices))
             })
@@ -774,6 +863,9 @@ impl ShellHistory {
                     let recency_factor = stats.most_recent_idx as f64 / (total_entries - 1) as f64;
                     breakdown.recency_bonus = (recency_factor * MAX_RECENCY_BONUS as f64) as i64;
                 }
+
+                // Origin weighting (downrank off-host entries under `Prefer`).
+                breakdown.off_host_penalty = scope_penalty(scope, &entry.origin);
 
                 let score = breakdown.total();
                 Some(HistorySearchResult {
@@ -841,6 +933,7 @@ impl ShellHistory {
                 killed: false,
                 duration_ms: None,
                 cwd: None,
+                origin: Origin::Local,
             };
 
             let mut entries = self.entries.write().unwrap();
@@ -915,6 +1008,7 @@ impl ShellHistory {
                 killed: false,
                 duration_ms: None,
                 cwd: None,
+                origin: Origin::Local,
             };
 
             let mut entries = self.entries.write().unwrap();
@@ -1016,6 +1110,7 @@ impl ShellHistory {
                         timestamp,
                         source: entry.source,
                         cwd: entry.cwd.clone(),
+                        origin: entry.origin.clone(),
                     };
 
                     let mut line = serde_json::to_string(&exec_event)?;
@@ -1179,6 +1274,130 @@ mod tests {
 
         let entry = history.get(&id).unwrap();
         assert!(entry.killed);
+    }
+
+    fn host(name: &str) -> Origin {
+        Origin::Remote(protocol::HostId(name.to_string()))
+    }
+
+    #[test]
+    fn test_origin_defaults_to_local() {
+        let dir = tempdir().unwrap();
+        let history = ShellHistory::new(dir.path().join("history.log")).unwrap();
+        let id = history
+            .record_command("ls".to_string(), CommandSource::Human)
+            .unwrap();
+        assert_eq!(history.get(&id).unwrap().origin, Origin::Local);
+    }
+
+    #[test]
+    fn test_origin_persists_across_reload() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("history.log");
+
+        let id = {
+            let history = ShellHistory::new(&log_path).unwrap();
+            history
+                .record_command_with_origin(
+                    "make".to_string(),
+                    CommandSource::Human,
+                    None,
+                    host("build"),
+                )
+                .unwrap()
+        };
+
+        // Reload from disk and confirm the origin survived serialization.
+        let history = ShellHistory::new(&log_path).unwrap();
+        assert_eq!(history.get(&id).unwrap().origin, host("build"));
+    }
+
+    #[test]
+    fn test_local_entries_omit_origin_on_disk() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("history.log");
+
+        let history = ShellHistory::new(&log_path).unwrap();
+        history
+            .record_command("echo hi".to_string(), CommandSource::Human)
+            .unwrap();
+        history
+            .record_command_with_origin("make".to_string(), CommandSource::Human, None, host("build"))
+            .unwrap();
+
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        // Local command: no `origin` key (keeps the on-disk format unchanged for
+        // existing logs). Remote command: tagged.
+        assert!(!lines[0].contains("origin"), "local entry should omit origin: {}", lines[0]);
+        assert!(lines[1].contains("\"origin\""), "remote entry should record origin: {}", lines[1]);
+        assert!(lines[1].contains("build"));
+    }
+
+    #[test]
+    fn test_scope_only_filters_by_host() {
+        let dir = tempdir().unwrap();
+        let history = ShellHistory::new(dir.path().join("history.log")).unwrap();
+
+        history
+            .record_command("git status".to_string(), CommandSource::Human)
+            .unwrap();
+        history
+            .record_command_with_origin(
+                "git push".to_string(),
+                CommandSource::Human,
+                None,
+                host("build"),
+            )
+            .unwrap();
+
+        let only_build =
+            history.search_with_indices_scoped("git", 10, &HistoryScope::Only(host("build")));
+        assert_eq!(only_build.len(), 1);
+        assert_eq!(only_build[0].entry.command, "git push");
+
+        let only_local =
+            history.search_with_indices_scoped("git", 10, &HistoryScope::Only(Origin::Local));
+        assert_eq!(only_local.len(), 1);
+        assert_eq!(only_local[0].entry.command, "git status");
+    }
+
+    #[test]
+    fn test_scope_prefer_downranks_off_host() {
+        let dir = tempdir().unwrap();
+        let history = ShellHistory::new(dir.path().join("history.log")).unwrap();
+
+        // Two equally-matchable commands run once each, one local, one remote.
+        let local = history
+            .record_command("deploy thing".to_string(), CommandSource::Human)
+            .unwrap();
+        let remote = history
+            .record_command_with_origin(
+                "deploy other".to_string(),
+                CommandSource::Human,
+                None,
+                host("build"),
+            )
+            .unwrap();
+        history.record_exit(&local, 0, 1).unwrap();
+        history.record_exit(&remote, 0, 1).unwrap();
+
+        // Preferring `build`, the remote command should rank first; preferring
+        // local flips it. (All-scope leaves recency to decide.)
+        let prefer_build =
+            history.search_with_indices_scoped("deploy", 10, &HistoryScope::Prefer(host("build")));
+        assert_eq!(prefer_build[0].entry.command, "deploy other");
+        assert_eq!(prefer_build[0].score_breakdown.off_host_penalty, 0);
+        // The off-host (local) entry carries the penalty.
+        let local_hit = prefer_build
+            .iter()
+            .find(|r| r.entry.command == "deploy thing")
+            .unwrap();
+        assert_eq!(local_hit.score_breakdown.off_host_penalty, OFF_HOST_PENALTY);
+
+        let prefer_local = history
+            .search_with_indices_scoped("deploy", 10, &HistoryScope::Prefer(Origin::Local));
+        assert_eq!(prefer_local[0].entry.command, "deploy thing");
     }
 
     #[test]
