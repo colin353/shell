@@ -16,10 +16,14 @@
 //!   which is what lets a long-running process survive a disconnect.
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
@@ -91,7 +95,7 @@ struct IncomingClient {
     size: (u16, u16),
 }
 
-pub fn run(socket_path: &Path) -> io::Result<()> {
+pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
     // Replace any stale socket from a previous (dead) daemon.
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
@@ -107,6 +111,10 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
         )
     })?;
     compositor.set_synchronized_output(true);
+    if bare {
+        // Persistent remote-session daemon embedded in a remote pane: no chrome.
+        compositor.set_status_bar_visible(false);
+    }
     compositor.render();
 
     // Accept connections on a background thread so the main loop never blocks on
@@ -118,6 +126,20 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
     }
 
     let mut current: Option<Receiver<ClientMsg>> = None;
+    // A clone of the attached client's stream for sending control frames
+    // (RenameWindow, SessionEnded) that don't go through the render sink.
+    let mut control: Option<UnixStream> = None;
+    let mut last_name = compositor.active_tab().name.clone();
+
+    // Persist indefinitely while detached by default (the point of a remote
+    // session). `SHELL_SESSION_IDLE_EXIT_SECS` bounds that — tests set it so the
+    // detached daemon they spawn cleans itself up.
+    let idle_exit: Option<Duration> = std::env::var("SHELL_SESSION_IDLE_EXIT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs);
+    let mut had_client = false;
+    let mut detached_since: Option<Instant> = None;
 
     let exit = loop {
         // Attach a newly-arrived client (taking over from any existing one).
@@ -142,8 +164,12 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
             };
             if codec::write_frame(&mut stream, &resync).is_ok() {
                 if let Ok(clone) = stream.try_clone() {
+                    control = stream.try_clone().ok();
                     sink.lock().unwrap().attach(Box::new(clone));
                     current = Some(incoming.input);
+                    last_name = compositor.active_tab().name.clone();
+                    had_client = true;
+                    detached_since = None;
                 }
             }
         }
@@ -163,9 +189,12 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
                         compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
                         compositor.force_full_redraw();
                     }
+                    Ok(ClientMsg::RequestResync) => compositor.force_full_redraw(),
+                    Ok(ClientMsg::UpdateLocalEnv { vars }) => apply_env_defaults(&vars),
                     Ok(ClientMsg::Detach) => {
                         sink.lock().unwrap().detach();
                         current = None;
+                        control = None;
                         break;
                     }
                     Ok(_) => {} // Hello / smart-mode messages: ignored by the dumb daemon
@@ -174,13 +203,42 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
                         // Reader thread ended: the client is gone.
                         sink.lock().unwrap().detach();
                         current = None;
+                        control = None;
                         break;
                     }
                 }
             }
         }
+
+        // Forward a window rename (e.g. rename-window) to the client's tab.
+        let name = compositor.active_tab().name.clone();
+        if name != last_name {
+            last_name = name.clone();
+            if let Some(c) = control.as_mut() {
+                let _ = codec::write_frame(c, &ServerMsg::RenameWindow { name });
+            }
+        }
+
         if should_exit {
+            // Tell the client this was a deliberate exit, so it returns to the
+            // local shell rather than auto-reconnecting.
+            if let Some(c) = control.as_mut() {
+                let _ = codec::write_frame(c, &ServerMsg::SessionEnded);
+            }
             break true;
+        }
+
+        // Idle-exit: clean up if we've been client-less too long (only after a
+        // client has ever attached, so we don't race the first connect).
+        if current.is_some() {
+            detached_since = None;
+        } else if had_client {
+            let since = *detached_since.get_or_insert_with(Instant::now);
+            if let Some(limit) = idle_exit {
+                if since.elapsed() >= limit {
+                    break false;
+                }
+            }
         }
 
         // Always drive PTYs/shell output, attached or not.
@@ -309,6 +367,103 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compositor: {e:?}")))?;
     }
     Ok(())
+}
+
+/// Bridge stdin/stdout to a persistent daemon's Unix socket, spawning the
+/// daemon (detached) if it isn't already running.
+///
+/// This is what a remote pane runs over ssh (`ssh <host> shell bridge ...`).
+/// The daemon outlives this process and the ssh link, so the session survives a
+/// disconnect; reconnecting just re-runs the bridge and reattaches.
+pub fn run_bridge(socket_path: &Path) -> io::Result<()> {
+    let stream = connect_or_spawn(socket_path)?;
+
+    // Pump bytes both directions, unbuffered. stdin<-ssh -> daemon socket;
+    // daemon socket -> stdout -> ssh.
+    let to_daemon = stream.try_clone()?;
+    let from_daemon = stream;
+
+    let pump_in = std::thread::spawn(move || {
+        let mut stdin = dup_file(0).expect("dup stdin");
+        let mut sock = to_daemon;
+        pump(&mut stdin, &mut sock);
+        // ssh closed our stdin: signal the daemon's reader so it detaches this
+        // client (but keeps running).
+        let _ = sock.shutdown(Shutdown::Write);
+    });
+
+    // Daemon -> stdout. Returns when the daemon closes the socket.
+    let mut stdout = dup_file(1)?;
+    let mut sock = from_daemon;
+    pump(&mut sock, &mut stdout);
+
+    let _ = pump_in.join();
+    Ok(())
+}
+
+/// Connect to the daemon socket, spawning a detached daemon first if needed.
+fn connect_or_spawn(socket_path: &Path) -> io::Result<UnixStream> {
+    if let Ok(s) = UnixStream::connect(socket_path) {
+        return Ok(s);
+    }
+    spawn_detached_daemon(socket_path)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(s) = UnixStream::connect(socket_path) {
+            return Ok(s);
+        }
+        if Instant::now() > deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote session daemon did not start",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Spawn `shell daemon --socket <S> --bare` detached from this process (and the
+/// ssh session), so it persists across disconnects.
+fn spawn_detached_daemon(socket_path: &Path) -> io::Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let exe = std::env::current_exe()?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("daemon")
+        .arg("--socket")
+        .arg(socket_path)
+        .arg("--bare")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        // New session: detach from ssh's controlling terminal and process group
+        // so a SIGHUP on disconnect doesn't kill the daemon.
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn()?; // detached child; we don't reap it
+    Ok(())
+}
+
+/// Copy bytes from `from` to `to`, flushing each chunk, until EOF/error.
+fn pump<R: Read, W: Write>(from: &mut R, to: &mut W) {
+    let mut buf = [0u8; 65536];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if to.write_all(&buf[..n]).and_then(|_| to.flush()).is_err() {
+                    break;
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
 }
 
 /// Apply forwarded local env vars as *defaults*: a var is set only if the

@@ -115,7 +115,7 @@ fn daemon_handshakes_renders_executes_and_reattaches() {
 
     let sock_for_daemon = sock.clone();
     std::thread::spawn(move || {
-        let _ = shell::server::run(&sock_for_daemon);
+        let _ = shell::server::run(&sock_for_daemon, false);
     });
     wait_for_socket(&sock);
 

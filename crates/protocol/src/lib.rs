@@ -228,6 +228,10 @@ pub enum ServerMsg {
     RenameWindow {
         name: String,
     },
+    /// The remote session ended deliberately (e.g. the shell exited). The client
+    /// should NOT auto-reconnect — a dropped link sends no such message, which is
+    /// how a recoverable disconnect is told apart from a clean exit.
+    SessionEnded,
 
     /// Dual-write: mirror this entry into the local log (rewritten to
     /// `Remote(host)`), so closing a remote pane still leaves its commands in

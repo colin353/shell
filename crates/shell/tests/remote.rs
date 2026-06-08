@@ -101,6 +101,7 @@ fn remote_pane_runs_a_shell_over_stdio_transport() {
     // the real built `shell` binary.
     std::env::set_var("HOME", dir.path());
     std::env::set_var("SHELL_DAEMON_STDIO_CMD", env!("CARGO_BIN_EXE_shell"));
+    std::env::set_var("SHELL_SESSION_IDLE_EXIT_SECS", "8");
     // Forward a marker var so we can confirm env merge on the remote.
     std::fs::write(
         dir.path().join(".shell_env"),
@@ -111,7 +112,7 @@ fn remote_pane_runs_a_shell_over_stdio_transport() {
     let sock = dir.path().join("outer.sock");
     let sock_for_daemon = sock.clone();
     std::thread::spawn(move || {
-        let _ = shell::server::run(&sock_for_daemon);
+        let _ = shell::server::run(&sock_for_daemon, false);
     });
     wait_for_socket(&sock);
 

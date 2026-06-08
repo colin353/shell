@@ -21,6 +21,7 @@ fn ctrl_c_in_remote_pane_is_not_handled_by_local_shell() {
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", dir.path());
     std::env::set_var("SHELL_DAEMON_STDIO_CMD", env!("CARGO_BIN_EXE_shell"));
+    std::env::set_var("SHELL_SESSION_IDLE_EXIT_SECS", "8");
 
     let sink: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(std::io::sink()));
     let mut comp = Compositor::with_output(80, 24, sink).unwrap();

@@ -1,23 +1,26 @@
 //! A remote shell session backing a pane, reached over a child-process stdio
-//! transport.
+//! transport that bridges to a *persistent* remote daemon.
 //!
-//! `RemoteProcess` spawns a transport command whose stdin/stdout speak the
-//! protocol: for a real host that's `ssh <target> shell daemon --stdio`; the
-//! special target `local`/`self` runs this binary in stdio-daemon mode (used by
-//! tests and local experimentation). It presents a PTY-like surface to the pane
-//! — `read()` yields decoded ANSI for the emulator, `write()` frames keystrokes
-//! as input — so the existing poll/render machinery drives it unchanged.
-//!
-//! No cross-disconnect persistence yet: if the transport dies, the session ends
-//! and the pane returns to its local shell. A persistent remote session (a
-//! bridge to a detached remote daemon) is a later step.
+//! `RemoteProcess` spawns `ssh <target> shell bridge --session <id>` (or, for
+//! `local`/`self`, this binary's `bridge` directly). The bridge ensures a
+//! detached `shell daemon --socket <S> --bare` is running on the far side and
+//! pumps the protocol to it. Because the daemon outlives the ssh link, a dropped
+//! connection is recoverable: on transport EOF the `RemoteProcess` re-dials the
+//! same session (with backoff) and the daemon repaints via `GridResync`. Only a
+//! deliberate `SessionEnded` (the remote shell exited) tears the pane down and
+//! returns it to the local shell.
 
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use protocol::codec::{self, FrameReader};
 use protocol::{ClientMode, ClientMsg, Hello, ServerMsg, PROTOCOL_VERSION};
+
+const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 pub struct RemoteProcess {
     child: Child,
@@ -29,52 +32,33 @@ pub struct RemoteProcess {
     pending: Vec<u8>,
     /// A window-rename pushed by the remote, awaiting the local compositor.
     pending_title: Option<String>,
-    eof: bool,
-    exit_code: Option<i32>,
-    #[allow(dead_code)]
+
+    // --- Reconnect parameters (the session is identified by `session_id`). ---
     target: String,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    env: Vec<(String, String)>,
+
+    // --- State ---
+    /// The session ended deliberately (SessionEnded) — stop and return to local.
+    ended: bool,
+    backoff: Duration,
+    /// Earliest time we may attempt the next reconnect.
+    next_attempt: Option<Instant>,
 }
 
 impl RemoteProcess {
-    /// Connect to `target`, handshake, and forward `env` for the remote merge.
+    /// Connect to `target`, starting (or reattaching to) a persistent session.
     pub fn connect(
         target: &str,
         cols: u16,
         rows: u16,
         env: &[(String, String)],
     ) -> io::Result<Self> {
-        let mut command = build_command(target)?;
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        let mut child = command.spawn()?;
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-
-        // Non-blocking handshake: send Hello and the forwarded env right away,
-        // but DON'T wait for Welcome — otherwise connecting (e.g. an
-        // auto-connected split) would freeze the whole compositor on ssh setup.
-        // The Welcome/GridResync arrive on stdout and are consumed by `read()`.
-        codec::write_frame(
-            &mut stdin,
-            &ClientMsg::Hello(Hello {
-                version: PROTOCOL_VERSION,
-                mode: ClientMode::Dumb,
-                size: (cols, rows),
-            }),
-        )?;
-        if !env.is_empty() {
-            let _ = codec::write_frame(
-                &mut stdin,
-                &ClientMsg::UpdateLocalEnv { vars: env.to_vec() },
-            );
-        }
-
-        // From here the pane polls stdout; make reads non-blocking.
-        let stdout_fd = stdout.as_raw_fd();
-        set_nonblocking(stdout_fd)?;
-
+        let session_id = new_session_id();
+        let (child, stdin, stdout, stdout_fd) =
+            spawn_transport(target, &session_id, cols, rows, env)?;
         Ok(RemoteProcess {
             child,
             stdin,
@@ -83,34 +67,50 @@ impl RemoteProcess {
             frames: FrameReader::new(),
             pending: Vec::new(),
             pending_title: None,
-            eof: false,
-            exit_code: None,
             target: target.to_string(),
+            session_id,
+            cols,
+            rows,
+            env: env.to_vec(),
+            ended: false,
+            backoff: INITIAL_BACKOFF,
+            next_attempt: None,
         })
     }
 
-    /// fd the compositor polls for readability.
+    /// fd the compositor polls for readability (changes across reconnects).
     pub fn as_raw_fd(&self) -> RawFd {
         self.stdout_fd
     }
 
+    /// PID of the current transport (bridge/ssh) process. Exposed mainly so a
+    /// test can kill it to simulate a dropped link.
+    pub fn transport_pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Read decoded ANSI for the pane's emulator. Mirrors `PtyProcess::read`:
-    /// `Ok(Some(0))` = EOF, `Ok(None)` = nothing available right now.
+    /// `Ok(Some(0))` = the session ended (return to local), `Ok(None)` = nothing
+    /// available right now (including while reconnecting).
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
         if !self.pending.is_empty() {
             return Ok(Some(self.drain_pending(buf)));
         }
-        if self.eof {
+        if self.ended {
             return Ok(Some(0));
         }
 
         let mut scratch = [0u8; 8192];
         match self.stdout.read(&mut scratch) {
             Ok(0) => {
-                self.eof = true;
-                Ok(Some(0))
+                // Transport closed without a SessionEnded: a dropped link.
+                self.try_reconnect();
+                Ok(None)
             }
             Ok(n) => {
+                // Healthy data flow resets the backoff.
+                self.backoff = INITIAL_BACKOFF;
+                self.next_attempt = None;
                 self.frames.push(&scratch[..n]);
                 while let Some(msg) = self.frames.next_frame::<ServerMsg>()? {
                     match msg {
@@ -119,6 +119,7 @@ impl RemoteProcess {
                             .pending
                             .extend_from_slice(&emulator::render_snapshot_to_ansi(&grid)),
                         ServerMsg::RenameWindow { name } => self.pending_title = Some(name),
+                        ServerMsg::SessionEnded => self.ended = true,
                         _ => {}
                     }
                 }
@@ -129,8 +130,44 @@ impl RemoteProcess {
                 }
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e),
+            Err(_) => {
+                self.try_reconnect();
+                Ok(None)
+            }
         }
+    }
+
+    /// Re-dial the same session after a dropped link, subject to backoff. A
+    /// successful re-dial just swaps in the new transport; the daemon (which
+    /// persisted) repaints via GridResync once the link is up.
+    fn try_reconnect(&mut self) {
+        if self.ended {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(t) = self.next_attempt {
+            if now < t {
+                return;
+            }
+        }
+        self.next_attempt = Some(now + self.backoff);
+        self.backoff = (self.backoff * 2).min(MAX_BACKOFF);
+
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+
+        if let Ok((child, stdin, stdout, fd)) =
+            spawn_transport(&self.target, &self.session_id, self.cols, self.rows, &self.env)
+        {
+            self.child = child;
+            self.stdin = stdin;
+            self.stdout = stdout;
+            self.stdout_fd = fd;
+            self.frames = FrameReader::new();
+            self.pending.clear();
+        }
+        // On failure we keep the (dead) handles; the next poll's EOF re-enters
+        // here after the backoff.
     }
 
     fn drain_pending(&mut self, buf: &mut [u8]) -> usize {
@@ -140,27 +177,31 @@ impl RemoteProcess {
         n
     }
 
-    /// Forward keystrokes to the remote as a framed input message.
+    /// Forward keystrokes to the remote. Best-effort: a write during a dropped
+    /// link is lost (we don't buffer/predict), and the screen resyncs on
+    /// reconnect.
     pub fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        codec::write_frame(
+        let _ = codec::write_frame(
             &mut self.stdin,
             &ClientMsg::Input {
                 bytes: data.to_vec(),
             },
-        )?;
+        );
         Ok(data.len())
     }
 
-    /// Tell the remote its size changed.
+    /// Tell the remote its size changed (remembered for reconnects).
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
-        codec::write_frame(&mut self.stdin, &ClientMsg::Resize { cols, rows })
+        self.cols = cols;
+        self.rows = rows;
+        let _ = codec::write_frame(&mut self.stdin, &ClientMsg::Resize { cols, rows });
+        Ok(())
     }
 
-    /// Ask the remote to repaint its authoritative screen (recovers from any
-    /// local drift). The fresh paint arrives on stdout and is applied by
-    /// `read()`.
+    /// Ask the remote to repaint its authoritative screen.
     pub fn request_resync(&mut self) -> io::Result<()> {
-        codec::write_frame(&mut self.stdin, &ClientMsg::RequestResync)
+        let _ = codec::write_frame(&mut self.stdin, &ClientMsg::RequestResync);
+        Ok(())
     }
 
     /// Take a pending window-rename pushed by the remote, if any.
@@ -168,61 +209,100 @@ impl RemoteProcess {
         self.pending_title.take()
     }
 
-    /// Exit code if the transport (and thus the remote session) has ended.
+    /// Exit code if the session ended deliberately. Returns `None` while a
+    /// dropped link is being retried, so the pane stays remote and reconnects.
     pub fn try_wait(&mut self) -> Option<i32> {
-        if let Some(code) = self.exit_code {
-            return Some(code);
-        }
-        match self.child.try_wait() {
-            Ok(Some(status)) => {
-                let code = status.code().unwrap_or(128);
-                self.exit_code = Some(code);
-                Some(code)
-            }
-            _ => None,
+        if self.ended {
+            Some(0)
+        } else {
+            None
         }
     }
 }
 
 impl Drop for RemoteProcess {
     fn drop(&mut self) {
-        // Closing stdin signals the transport to exit; also kill it outright so
-        // an `ssh` process can't linger.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// Build the transport command for a target.
+/// Spawn the transport, send the handshake (non-blocking — we don't wait for
+/// Welcome), and return the process handles.
+fn spawn_transport(
+    target: &str,
+    session_id: &str,
+    cols: u16,
+    rows: u16,
+    env: &[(String, String)],
+) -> io::Result<(Child, ChildStdin, ChildStdout, RawFd)> {
+    let mut command = build_command(target, session_id)?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut child = command.spawn()?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+
+    codec::write_frame(
+        &mut stdin,
+        &ClientMsg::Hello(Hello {
+            version: PROTOCOL_VERSION,
+            mode: ClientMode::Dumb,
+            size: (cols, rows),
+        }),
+    )?;
+    if !env.is_empty() {
+        let _ = codec::write_frame(
+            &mut stdin,
+            &ClientMsg::UpdateLocalEnv { vars: env.to_vec() },
+        );
+    }
+
+    let stdout_fd = stdout.as_raw_fd();
+    set_nonblocking(stdout_fd)?;
+    Ok((child, stdin, stdout, stdout_fd))
+}
+
+/// Build the bridge transport command for a target+session.
 ///
-/// `local`/`self` run an in-process stdio daemon: normally this binary, but
-/// `SHELL_DAEMON_STDIO_CMD` can point at a specific `shell` binary (tests set it,
-/// since under `cargo test` `current_exe()` is the test harness, not `shell`).
-fn build_command(target: &str) -> io::Result<Command> {
+/// `local`/`self` run this binary's `bridge` (override the binary with
+/// `SHELL_DAEMON_STDIO_CMD`, which tests point at the built `shell`). Anything
+/// else is `ssh -T <target> <remote-bin> bridge --session <id>`, with
+/// `SHELL_REMOTE_BIN` overriding the remote binary name/path.
+fn build_command(target: &str, session_id: &str) -> io::Result<Command> {
     if target == "local" || target == "self" {
         let exe = match std::env::var_os("SHELL_DAEMON_STDIO_CMD") {
             Some(path) => std::path::PathBuf::from(path),
             None => std::env::current_exe()?,
         };
         let mut c = Command::new(exe);
-        c.args(["daemon", "--stdio", "--bare"]);
+        c.args(["bridge", "--session", session_id]);
         Ok(c)
     } else {
-        // The remote binary, default `shell` (found on the remote PATH).
-        // `SHELL_REMOTE_BIN` overrides it with an explicit path (e.g. `~/shell`),
-        // useful when `shell` isn't on the non-interactive login PATH.
         let remote_bin = std::env::var("SHELL_REMOTE_BIN").unwrap_or_else(|_| "shell".to_string());
         let mut c = Command::new("ssh");
-        // -T: do not allocate a remote PTY, so the binary protocol on stdio
-        // isn't mangled by terminal line discipline.
         c.arg("-T")
             .arg(target)
             .arg(remote_bin)
-            .arg("daemon")
-            .arg("--stdio")
-            .arg("--bare");
+            .arg("bridge")
+            .arg("--session")
+            .arg(session_id);
         Ok(c)
     }
+}
+
+/// A process-unique session id (host pid + time + counter). Not a secret; the
+/// session socket is owner-only on the remote.
+fn new_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}-{:x}-{:x}", std::process::id(), nanos, n)
 }
 
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {

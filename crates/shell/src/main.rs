@@ -22,10 +22,11 @@ fn main() -> ExitCode {
         }
         Some("daemon") => {
             let rest = &args[1..];
+            let bare = rest.iter().any(|a| a == "--bare");
             let result = if rest.iter().any(|a| a == "--stdio") {
-                server::run_stdio(rest.iter().any(|a| a == "--bare"))
+                server::run_stdio(bare)
             } else {
-                server::run(&socket_path(rest))
+                server::run(&socket_path(rest), bare)
             };
             match result {
                 Ok(()) => ExitCode::SUCCESS,
@@ -42,6 +43,17 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        // Stdio<->socket bridge to a persistent (bare) daemon. Run remotely as
+        // `ssh <host> shell bridge --socket <S>`; ensures the daemon exists,
+        // then pumps. When the ssh link dies the bridge dies but the daemon
+        // (detached) lives, so the session survives a disconnect.
+        Some("bridge") => match server::run_bridge(&socket_path(&args[1..])) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("shell bridge: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some("-h") | Some("--help") | Some("help") => {
             print_usage();
             ExitCode::SUCCESS
@@ -54,14 +66,23 @@ fn main() -> ExitCode {
     }
 }
 
-/// Resolve the socket path from `--socket <path>`, else the per-user default.
+/// Resolve the socket path from `--socket <path>` or `--session <id>` (resolved
+/// to a per-session path in the runtime dir), else the per-user default.
 fn socket_path(args: &[String]) -> PathBuf {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
-        if arg == "--socket" {
-            if let Some(path) = it.next() {
-                return PathBuf::from(path);
+        match arg.as_str() {
+            "--socket" => {
+                if let Some(path) = it.next() {
+                    return PathBuf::from(path);
+                }
             }
+            "--session" => {
+                if let Some(id) = it.next() {
+                    return common::session_socket_path(id);
+                }
+            }
+            _ => {}
         }
     }
     common::default_socket_path()
