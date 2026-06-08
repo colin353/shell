@@ -15,7 +15,9 @@
 //!   and *always* calls `poll_once` — so PTYs keep flowing even while detached,
 //!   which is what lets a long-running process survive a disconnect.
 
+use std::fs::File;
 use std::io::{self, Write};
+use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -27,29 +29,30 @@ use protocol::{
 };
 
 /// A `Write` sink that frames everything written into `ServerMsg::Render` frames
-/// and forwards them to the currently-attached client. With no client attached,
-/// output is dropped — a reattaching client is fully repainted via
-/// `force_full_redraw`, so nothing is lost.
+/// and forwards them to the currently-attached client (a Unix socket for
+/// `daemon`, stdout for `daemon --stdio`). With no client attached, output is
+/// dropped — a reattaching client is fully repainted via `GridResync`, so
+/// nothing is lost.
 struct ClientSink {
-    stream: Option<UnixStream>,
+    writer: Option<Box<dyn Write + Send>>,
     buf: Vec<u8>,
 }
 
 impl ClientSink {
     fn new() -> Self {
         ClientSink {
-            stream: None,
+            writer: None,
             buf: Vec::new(),
         }
     }
 
-    fn attach(&mut self, stream: UnixStream) {
-        self.stream = Some(stream);
+    fn attach(&mut self, writer: Box<dyn Write + Send>) {
+        self.writer = Some(writer);
         self.buf.clear();
     }
 
     fn detach(&mut self) {
-        self.stream = None;
+        self.writer = None;
         self.buf.clear();
     }
 }
@@ -67,12 +70,12 @@ impl Write for ClientSink {
             return Ok(());
         }
         let bytes = std::mem::take(&mut self.buf);
-        if let Some(stream) = self.stream.as_mut() {
+        if let Some(writer) = self.writer.as_mut() {
             let frame = codec::to_frame(&ServerMsg::Render { bytes });
             // A write error means the client vanished mid-render; drop it and
             // wait for the reader thread to report the disconnect.
-            if stream.write_all(&frame).and_then(|_| stream.flush()).is_err() {
-                self.stream = None;
+            if writer.write_all(&frame).and_then(|_| writer.flush()).is_err() {
+                self.writer = None;
             }
         }
         Ok(())
@@ -139,7 +142,7 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
             };
             if codec::write_frame(&mut stream, &resync).is_ok() {
                 if let Ok(clone) = stream.try_clone() {
-                    sink.lock().unwrap().attach(clone);
+                    sink.lock().unwrap().attach(Box::new(clone));
                     current = Some(incoming.input);
                 }
             }
@@ -190,6 +193,122 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
     let _ = std::fs::remove_file(socket_path);
     let _ = exit;
     Ok(())
+}
+
+/// Serve a single client over stdin/stdout — the transport used when a remote
+/// pane runs `ssh <host> shell daemon --stdio`. There is exactly one connection;
+/// when stdin closes (the ssh pipe died), this process exits.
+///
+/// Unlike the socket daemon this does not persist across disconnects — a
+/// persistent remote session (bridge + detached daemon) is a later step.
+pub fn run_stdio() -> io::Result<()> {
+    // Own dup'd copies of stdin/stdout so we get unbuffered, independently
+    // closeable handles (and never touch the global buffered Stdin/Stdout).
+    let mut handshake_in = dup_file(0)?;
+    let mut handshake_out = dup_file(1)?;
+
+    let hello = match codec::read_frame::<_, ClientMsg>(&mut handshake_in)? {
+        Some(ClientMsg::Hello(h)) => h,
+        _ => return Ok(()), // no/!Hello: nothing to serve
+    };
+    let (cols, rows) = hello.size;
+
+    codec::write_frame(
+        &mut handshake_out,
+        &ServerMsg::Welcome(Welcome {
+            version: PROTOCOL_VERSION,
+            session: SessionId(1),
+            host: HostId(hostname()),
+        }),
+    )?;
+
+    let sink = Arc::new(Mutex::new(ClientSink::new()));
+    let mut compositor = compositor::Compositor::with_output(
+        (cols.max(1)) as usize,
+        (rows.max(1)) as usize,
+        sink.clone(),
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compositor: {e:?}")))?;
+    compositor.set_synchronized_output(true);
+
+    // Refresh + snapshot while the sink is detached (output dropped), then paint
+    // the client with a GridResync; afterwards live deltas stream as Render.
+    compositor.render();
+    let snapshot = compositor.grid_snapshot();
+    codec::write_frame(
+        &mut handshake_out,
+        &ServerMsg::GridResync {
+            pane: PaneId(0),
+            grid: snapshot,
+        },
+    )?;
+    sink.lock().unwrap().attach(Box::new(dup_file(1)?));
+
+    // Reader thread: stdin -> ClientMsg.
+    let (tx, rx) = mpsc::channel::<ClientMsg>();
+    let mut reader = dup_file(0)?;
+    std::thread::spawn(move || loop {
+        match codec::read_frame::<_, ClientMsg>(&mut reader) {
+            Ok(Some(m)) => {
+                if tx.send(m).is_err() {
+                    break;
+                }
+            }
+            Ok(None) | Err(_) => break,
+        }
+    });
+
+    loop {
+        let mut exit = false;
+        loop {
+            match rx.try_recv() {
+                Ok(ClientMsg::Input { bytes }) => {
+                    if compositor.handle_input(&bytes) {
+                        exit = true;
+                        break;
+                    }
+                }
+                Ok(ClientMsg::Resize { cols, rows }) => {
+                    compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
+                    compositor.force_full_redraw();
+                }
+                Ok(ClientMsg::UpdateLocalEnv { vars }) => apply_env_defaults(&vars),
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    exit = true; // stdin closed: transport died
+                    break;
+                }
+            }
+        }
+        if exit {
+            break;
+        }
+        compositor
+            .poll_once(10)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compositor: {e:?}")))?;
+    }
+    Ok(())
+}
+
+/// Apply forwarded local env vars as *defaults*: a var is set only if the
+/// (remote) process doesn't already have it, so the remote layer wins — the
+/// merge semantics we want for a remote pane.
+fn apply_env_defaults(vars: &[(String, String)]) {
+    for (key, value) in vars {
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, value);
+        }
+    }
+}
+
+/// Duplicate a raw fd into an owned, unbuffered `File`.
+fn dup_file(fd: RawFd) -> io::Result<File> {
+    let dup = unsafe { libc::dup(fd) };
+    if dup < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(dup) })
 }
 
 /// Accept connections, handshake each, and forward ready ones to the main loop.

@@ -343,6 +343,9 @@ impl PaneCell {
                 if let Some(ref proc) = pane.subprocess {
                     let _ = proc.resize(self.width as u16, self.height as u16);
                 }
+                if let Some(remote) = pane.remote.as_mut() {
+                    let _ = remote.resize(self.width as u16, self.height as u16);
+                }
             }
             PaneCellInner::VSplit(cells) => {
                 // Vertical split - divide width evenly, accounting for borders
@@ -1021,6 +1024,9 @@ impl PaneCell {
                 if let Some(ref proc) = pane.subprocess {
                     let _ = proc.resize(old_width as u16, old_height as u16);
                 }
+                if let Some(remote) = pane.remote.as_mut() {
+                    let _ = remote.resize(old_width as u16, old_height as u16);
+                }
                 pane.shell.resize(old_width as u16, old_height as u16);
 
                 // Create a new pane with a new shell
@@ -1546,6 +1552,9 @@ impl PaneCell {
                 if let Some(ref proc) = pane.subprocess {
                     let _ = proc.resize(width as u16, height as u16);
                 }
+                if let Some(remote) = pane.remote.as_mut() {
+                    let _ = remote.resize(width as u16, height as u16);
+                }
             }
             PaneCellInner::VSplit(cells) => {
                 // Distribute width evenly among children, reserving 1 column for each border
@@ -1611,6 +1620,9 @@ impl PaneCell {
                     pane.shell.resize(width as u16, height as u16);
                     if let Some(ref proc) = pane.subprocess {
                         let _ = proc.resize(width as u16, height as u16);
+                    }
+                    if let Some(remote) = pane.remote.as_mut() {
+                        let _ = remote.resize(width as u16, height as u16);
                     }
                 }
             }

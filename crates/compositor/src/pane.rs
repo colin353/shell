@@ -152,6 +152,9 @@ pub struct Pane {
     pub shell: libshell::Shell,
     /// Currently running subprocess (if any) - takes over PTY when active
     pub subprocess: Option<pty::PtyProcess>,
+    /// Active remote session (if any) - takes over the pane when connected.
+    /// Mutually exclusive with `subprocess`.
+    pub remote: Option<crate::remote::RemoteProcess>,
     /// Whether we sent SIGINT to the subprocess (to display CTRL+C instead of exit code)
     pub sent_sigint: bool,
     /// Temp file for edit-in-editor feature (CTRL+X CTRL+E)
@@ -197,6 +200,7 @@ impl Pane {
             terminal_emulator,
             shell,
             subprocess: None,
+            remote: None,
             sent_sigint: false,
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
@@ -231,6 +235,7 @@ impl Pane {
             terminal_emulator,
             shell,
             subprocess: None,
+            remote: None,
             sent_sigint: false,
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
@@ -256,6 +261,11 @@ impl Pane {
     ///
     /// Returns a `PaneInputResult` indicating what action the compositor should take.
     pub fn handle_input(&mut self, input: &[u8]) -> PaneInputResult {
+        if let Some(remote) = self.remote.as_mut() {
+            // Connected to a remote session: forward keystrokes verbatim.
+            let _ = remote.write(input);
+            return PaneInputResult::None;
+        }
         if self.subprocess.is_some() {
             self.record_subprocess_typeahead(input);
             let Some(ref mut proc) = self.subprocess else {
@@ -384,6 +394,35 @@ impl Pane {
                 }
                 PaneInputResult::Rerender
             }
+            libshell::ShellAction::Connect {
+                output,
+                target,
+                env,
+            } => {
+                // Write pending output (e.g. the newline after the command).
+                if !output.is_empty() {
+                    self.terminal_emulator.process(&output);
+                }
+
+                let width = self.terminal_emulator.grid().cols as u16;
+                let height = self.terminal_emulator.grid().rows as u16;
+
+                self.subprocess_typeahead.clear();
+                match crate::remote::RemoteProcess::connect(&target, width, height, &env) {
+                    Ok(remote) => {
+                        self.remote = Some(remote);
+                    }
+                    Err(e) => {
+                        let error_msg = format!("connect error: {}\r\n", e);
+                        self.terminal_emulator.process(error_msg.as_bytes());
+                        // Treat as an immediately-failed command so the prompt
+                        // returns and the exit is recorded.
+                        let prompt = self.shell.subprocess_exited(1);
+                        self.terminal_emulator.process(&prompt);
+                    }
+                }
+                PaneInputResult::Rerender
+            }
             libshell::ShellAction::Exit => {
                 // Shell wants to exit - could close the pane
                 // For now, just show a message
@@ -408,6 +447,10 @@ impl Pane {
     }
 
     fn read_and_process_internal(&mut self, debug: bool) {
+        if self.remote.is_some() {
+            self.read_and_process_remote();
+            return;
+        }
         if let Some(ref proc) = self.subprocess {
             // Read all available data from subprocess
             loop {
@@ -495,6 +538,41 @@ impl Pane {
         }
     }
 
+    /// Drain output from the active remote session into the emulator, and on
+    /// transport exit return the pane to its local shell.
+    fn read_and_process_remote(&mut self) {
+        loop {
+            let result = match self.remote.as_mut() {
+                Some(remote) => remote.read(&mut self.read_buffer),
+                None => break,
+            };
+            match result {
+                Ok(Some(0)) => break, // EOF
+                Ok(Some(n)) => {
+                    self.terminal_emulator.process(&self.read_buffer[..n]);
+                    let responses = self.terminal_emulator.drain_responses();
+                    if !responses.is_empty() {
+                        if let Some(remote) = self.remote.as_mut() {
+                            for response in responses {
+                                let _ = remote.write(&response);
+                            }
+                        }
+                    }
+                }
+                Ok(None) => break, // nothing available right now
+                Err(_) => break,
+            }
+        }
+
+        // If the transport ended, tear down and return to the local shell.
+        if let Some(exit_code) = self.remote.as_mut().and_then(|r| r.try_wait()) {
+            self.remote = None;
+            self.terminal_emulator.grid_mut().cursor_visible = true;
+            let output = self.shell.subprocess_exited(exit_code);
+            self.terminal_emulator.process(&output);
+        }
+    }
+
     /// Check if the pane is still active (shell hasn't exited).
     pub fn is_running(&self) -> bool {
         // Pane is running if shell hasn't exited
@@ -562,9 +640,13 @@ impl Pane {
         }
     }
 
-    /// Get the subprocess PTY file descriptor for polling (if any).
+    /// Get the file descriptor to poll for this pane's active backend (remote
+    /// session or local subprocess), if any.
     pub fn subprocess_fd(&self) -> Option<std::os::fd::RawFd> {
         use std::os::fd::AsRawFd;
+        if let Some(remote) = self.remote.as_ref() {
+            return Some(remote.as_raw_fd());
+        }
         self.subprocess.as_ref().map(|p| p.as_raw_fd())
     }
 

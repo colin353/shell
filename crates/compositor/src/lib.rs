@@ -18,12 +18,14 @@ pub mod compositor;
 pub mod error;
 pub mod pane;
 pub mod pane_cell;
+pub mod remote;
 pub mod tab;
 pub mod types;
 
 pub use compositor::Compositor;
 pub use error::CompositorError;
 pub use pane::{CtrlCResult, Pane, SearchMatch, UrlMatch};
+pub use remote::RemoteProcess;
 pub use pane_cell::{PaneCell, PaneCellInner};
 pub use tab::Tab;
 pub use types::{CompositorEvent, Direction, SplitDirection};

@@ -20,13 +20,21 @@ fn main() -> ExitCode {
             standalone::run();
             ExitCode::SUCCESS
         }
-        Some("daemon") => match server::run(&socket_path(&args[1..])) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("shell daemon: {e}");
-                ExitCode::FAILURE
+        Some("daemon") => {
+            let rest = &args[1..];
+            let result = if rest.iter().any(|a| a == "--stdio") {
+                server::run_stdio()
+            } else {
+                server::run(&socket_path(rest))
+            };
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("shell daemon: {e}");
+                    ExitCode::FAILURE
+                }
             }
-        },
+        }
         Some("attach") => match client::run(&socket_path(&args[1..])) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

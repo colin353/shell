@@ -217,6 +217,20 @@ pub enum ShellAction {
         name: String,
     },
 
+    /// Shell wants to connect this pane to a remote host. The compositor should
+    /// spawn the remote transport and route the pane's I/O to it (like
+    /// `SpawnSubprocess`, but the "process" is a remote shell session). When the
+    /// remote ends, call `Shell::subprocess_exited()`.
+    Connect {
+        /// Output to write before connecting (e.g. the newline after the command).
+        output: Vec<u8>,
+        /// Connection target: `user@host`, or `local`/`self` for an in-process
+        /// stdio daemon (used by tests and local experimentation).
+        target: String,
+        /// Local environment to forward to the remote (merged remote-wins).
+        env: Vec<(String, String)>,
+    },
+
     /// Shell wants to exit.
     Exit,
 
@@ -541,6 +555,17 @@ impl Shell {
                             output,
                             temp_file,
                             editor,
+                        };
+                    }
+                    ShellAction::Connect {
+                        output: _,
+                        target,
+                        env,
+                    } => {
+                        return ShellAction::Connect {
+                            output,
+                            target,
+                            env,
                         };
                     }
                     other => return other,
@@ -2373,6 +2398,28 @@ impl Shell {
 
                 self.refresh_history_cache();
                 output.extend(self.get_prompt().as_bytes());
+            }
+            "connect" => {
+                let target = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
+                if target.is_empty() {
+                    output.extend(b"connect: usage: connect <user@host|local>\r\n");
+                    if let Some(id) = history_id {
+                        self.backend.record_exit(&id, 1, 0);
+                    }
+                    self.refresh_history_cache();
+                    output.extend(self.get_prompt().as_bytes());
+                } else {
+                    // Track like a subprocess so subprocess_exited() records the
+                    // exit when the remote session ends.
+                    self.current_command_id = history_id.clone();
+                    self.command_start_time = Some(std::time::Instant::now());
+                    self.pending_action = Some(ShellAction::Connect {
+                        output: vec![],
+                        target,
+                        env: shell_env_snapshot(),
+                    });
+                    // Remote takes over; don't show a prompt.
+                }
             }
             _ => {
                 // External command - request subprocess spawn
