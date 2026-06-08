@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use unicode_width::UnicodeWidthChar;
 
+pub mod backend;
 mod diagnostics;
 mod environment;
 pub mod file_finder;
@@ -27,6 +28,7 @@ pub mod history;
 pub mod picker;
 mod syntax;
 
+pub use backend::{LocalBackend, ShellBackend};
 pub use diagnostics::{
     clear_global_diagnostic_flag, global_diagnostic_flags, set_global_diagnostic_flag,
     GlobalDiagnosticFlag,
@@ -372,7 +374,8 @@ impl Default for ShellCore {
 /// }
 /// ```
 pub struct Shell {
-    core: Arc<ShellCore>,
+    /// The shell "brain": syntax/completion/history/exec, local or remote.
+    backend: Box<dyn ShellBackend>,
     /// Terminal dimensions
     cols: u16,
     rows: u16,
@@ -409,10 +412,6 @@ pub struct Shell {
     /// Saved cursor position when entering a picker mode
     saved_cursor_pos: Option<usize>,
 
-    // --- Syntax highlighting and completion ---
-    /// Syntax highlighter and completion engine
-    syntax_handler: syntax::SyntaxHandler,
-
     /// Whether we're waiting for CTRL+E after CTRL+X (for edit-in-editor)
     waiting_for_ctrl_x_combo: bool,
 
@@ -437,18 +436,25 @@ impl Shell {
     /// Returns the shell and initial output (the prompt) that should be
     /// written to the terminal.
     pub fn with_core(core: Arc<ShellCore>, cols: u16, rows: u16) -> (Self, Vec<u8>) {
+        Self::with_backend(Box::new(LocalBackend::new(core)), cols, rows)
+    }
+
+    /// Create a shell over an explicit backend (local or remote).
+    ///
+    /// Returns the shell and initial output (the prompt) to write to the
+    /// terminal.
+    pub fn with_backend(
+        backend: Box<dyn ShellBackend>,
+        cols: u16,
+        rows: u16,
+    ) -> (Self, Vec<u8>) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
 
         // Build initial history cache
-        let history_cache: Vec<String> = core
-            .history()
-            .recent(1000)
-            .into_iter()
-            .map(|e| e.command)
-            .collect();
+        let history_cache: Vec<String> = backend.recent_commands(1000);
 
         let shell = Shell {
-            core,
+            backend,
             cols,
             rows,
             input_buffer: String::new(),
@@ -467,8 +473,6 @@ impl Shell {
             picker_state: None,
             saved_input_buffer: None,
             saved_cursor_pos: None,
-            // Syntax highlighting
-            syntax_handler: syntax::SyntaxHandler::new(),
             // CTRL+X combo state
             waiting_for_ctrl_x_combo: false,
             // UTF-8 multi-byte sequence buffer
@@ -479,20 +483,9 @@ impl Shell {
         (shell, prompt.into_bytes())
     }
 
-    /// Get a reference to the shared ShellCore
-    pub fn core(&self) -> &Arc<ShellCore> {
-        &self.core
-    }
-
     /// Refresh the history cache (call this after executing a command)
     fn refresh_history_cache(&mut self) {
-        self.history_cache = self
-            .core
-            .history()
-            .recent(1000)
-            .into_iter()
-            .map(|e| e.command)
-            .collect();
+        self.history_cache = self.backend.recent_commands(1000);
         self.history_position = 0;
         self.saved_input = None;
     }
@@ -581,9 +574,7 @@ impl Shell {
                 .map(|t| t.elapsed().as_millis() as u64)
                 .unwrap_or(0);
 
-            if let Err(e) = self.core.record_exit(&id, exit_code, duration_ms) {
-                eprintln!("Warning: failed to record exit status: {}", e);
-            }
+            self.backend.record_exit(&id, exit_code, duration_ms);
         }
 
         // Refresh history cache for arrow key navigation
@@ -608,9 +599,7 @@ impl Shell {
     pub fn subprocess_killed(&mut self) -> Vec<u8> {
         // Record as killed in history
         if let Some(id) = self.current_command_id.take() {
-            if let Err(e) = self.core.mark_killed(&id) {
-                eprintln!("Warning: failed to mark command as killed: {}", e);
-            }
+            self.backend.mark_killed(&id);
         }
         self.command_start_time = None;
 
@@ -672,7 +661,7 @@ impl Shell {
                 result.push_str(&self.get_continuation_prompt());
             }
             // Highlight just this line
-            result.push_str(&self.syntax_handler.highlight(line, &self.cwd));
+            result.push_str(&self.backend.highlight(line, &self.cwd));
         }
 
         result
@@ -866,7 +855,7 @@ impl Shell {
             0x0c => {
                 let mut output = b"\x1b[2J\x1b[H".to_vec(); // Clear screen and home
                 output.extend(self.get_prompt().as_bytes());
-                let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
+                let highlighted = self.backend.highlight(&self.input_buffer, &self.cwd);
                 output.extend(highlighted.as_bytes());
                 // Position cursor correctly using display width
                 let total_display_width = self.display_width(&self.input_buffer);
@@ -1229,7 +1218,7 @@ impl Shell {
     fn handle_tab_completion(&mut self) -> Option<Vec<u8>> {
         // Get all completions
         let completions_data =
-            self.syntax_handler
+            self.backend
                 .completions_full(&self.input_buffer, self.cursor_pos, &self.cwd);
 
         let Some((completions, replace_start, replace_end)) = completions_data else {
@@ -1363,7 +1352,7 @@ impl Shell {
             output.extend(b"\x1b[K");
 
             // Get highlighted version of just the current line
-            let highlighted = self.syntax_handler.highlight(current_line, &self.cwd);
+            let highlighted = self.backend.highlight(current_line, &self.cwd);
             output.extend(highlighted.as_bytes());
 
             // Move cursor back to correct position within current line
@@ -1389,7 +1378,7 @@ impl Shell {
             output.extend(b"\x1b[K");
 
             // Get highlighted version of input
-            let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
+            let highlighted = self.backend.highlight(&self.input_buffer, &self.cwd);
 
             // Write the highlighted input
             output.extend(highlighted.as_bytes());
@@ -1433,7 +1422,7 @@ impl Shell {
         output.extend(b"\x1b[K");
 
         // Get highlighted version of input
-        let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
+        let highlighted = self.backend.highlight(&self.input_buffer, &self.cwd);
 
         // Write the highlighted input
         output.extend(highlighted.as_bytes());
@@ -1685,7 +1674,7 @@ impl Shell {
 
         // Get the word under the cursor
         let (word, replace_start, replace_end) = self
-            .syntax_handler
+            .backend
             .word_at_cursor(&self.input_buffer, self.cursor_pos)
             .unwrap_or_else(|| (String::new(), self.cursor_pos, self.cursor_pos));
 
@@ -1850,9 +1839,12 @@ impl Shell {
         if let Some(ref mut state) = self.picker_state {
             let items = match &state.mode {
                 PickerMode::HistorySearch => self
-                    .core
-                    .history()
-                    .search_with_indices(&self.input_buffer, picker::MAX_VISIBLE_ITEMS)
+                    .backend
+                    .history_search(
+                        &self.input_buffer,
+                        picker::MAX_VISIBLE_ITEMS,
+                        &protocol::HistoryScope::All,
+                    )
                     .into_iter()
                     .map(PickerItem::History)
                     .collect(),
@@ -2223,7 +2215,7 @@ impl Shell {
     /// Clear the picker UI and redraw the prompt
     fn clear_picker_ui_and_redraw(&mut self, ui_lines: usize) -> Vec<u8> {
         let prompt = self.get_prompt();
-        let highlighted = self.syntax_handler.highlight(&self.input_buffer, &self.cwd);
+        let highlighted = self.backend.highlight(&self.input_buffer, &self.cwd);
         picker::clear_picker_ui(
             ui_lines,
             &prompt,
@@ -2246,17 +2238,11 @@ impl Shell {
         }
 
         // Record command in history (crash-safe, synced to disk)
-        let history_id = match self.core.record_command(
+        let history_id = self.backend.record_command(
             command.clone(),
             CommandSource::Human,
             Some(self.cwd.to_string_lossy().to_string()),
-        ) {
-            Ok(id) => Some(id),
-            Err(e) => {
-                eprintln!("Warning: failed to record command in history: {}", e);
-                None
-            }
-        };
+        );
 
         // Parse command
         let parts: Vec<&str> = command.split_whitespace().collect();
@@ -2290,7 +2276,7 @@ impl Shell {
 
                 // Record exit for builtin
                 if let Some(id) = history_id {
-                    let _ = self.core.record_exit(&id, exit_code, 0);
+                    self.backend.record_exit(&id, exit_code, 0);
                 }
 
                 // Refresh history after command
@@ -2302,7 +2288,7 @@ impl Shell {
 
                 // Record exit for builtin
                 if let Some(id) = history_id {
-                    let _ = self.core.record_exit(&id, 0, 0);
+                    self.backend.record_exit(&id, 0, 0);
                 }
 
                 self.refresh_history_cache();
@@ -2316,14 +2302,14 @@ impl Shell {
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(20);
 
-                let entries = self.core.history().recent(limit);
-                for (i, entry) in entries.iter().rev().enumerate() {
-                    output.extend(format!("{:5}  {}\r\n", i + 1, entry.command).as_bytes());
+                let entries = self.backend.recent_commands(limit);
+                for (i, command) in entries.iter().rev().enumerate() {
+                    output.extend(format!("{:5}  {}\r\n", i + 1, command).as_bytes());
                 }
 
                 // Record exit for builtin
                 if let Some(id) = history_id {
-                    let _ = self.core.record_exit(&id, 0, 0);
+                    self.backend.record_exit(&id, 0, 0);
                 }
 
                 self.refresh_history_cache();
@@ -2334,7 +2320,7 @@ impl Shell {
 
                 // Record exit for builtin
                 if let Some(id) = history_id {
-                    let _ = self.core.record_exit(&id, 0, 0);
+                    self.backend.record_exit(&id, 0, 0);
                 }
 
                 self.should_exit = true;
@@ -2345,14 +2331,14 @@ impl Shell {
                     output.extend(b"rename-window: missing name argument\r\n");
                     // Record exit for builtin with error
                     if let Some(id) = history_id {
-                        let _ = self.core.record_exit(&id, 1, 0);
+                        self.backend.record_exit(&id, 1, 0);
                     }
                     self.refresh_history_cache();
                     output.extend(self.get_prompt().as_bytes());
                 } else {
                     // Record exit for builtin
                     if let Some(id) = history_id {
-                        let _ = self.core.record_exit(&id, 0, 0);
+                        self.backend.record_exit(&id, 0, 0);
                     }
                     self.refresh_history_cache();
                     // Output will be combined with this action in handle_input
@@ -2382,7 +2368,7 @@ impl Shell {
                 };
 
                 if let Some(id) = history_id {
-                    let _ = self.core.record_exit(&id, exit_code, 0);
+                    self.backend.record_exit(&id, exit_code, 0);
                 }
 
                 self.refresh_history_cache();
@@ -2467,5 +2453,66 @@ mod tests {
 
         // Relative paths without special chars
         assert_eq!(expand_path("foo/bar"), PathBuf::from("foo/bar"));
+    }
+
+    /// Build a shell over a throwaway history file so tests don't touch the
+    /// real `~/.myshell_history.log`. Returns the temp dir guard too, since it
+    /// must outlive the shell.
+    fn test_shell() -> (Shell, Arc<ShellCore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Arc::new(ShellCore::with_history_path(dir.path().join("history.log")).unwrap());
+        let (shell, _prompt) = Shell::with_core(core.clone(), 80, 24);
+        (shell, core, dir)
+    }
+
+    /// Typing a command line drives highlighting through the backend and
+    /// produces (non-empty) echoed output rather than a control action.
+    #[test]
+    fn typing_highlights_through_backend() {
+        let (mut shell, _core, _dir) = test_shell();
+        match shell.handle_input(b"ls") {
+            ShellAction::Output(bytes) => assert!(!bytes.is_empty()),
+            _ => panic!("typing should produce Output"),
+        }
+    }
+
+    /// Executing a non-builtin asks the compositor to spawn a subprocess and
+    /// records the command in history via the backend (default Local origin).
+    #[test]
+    fn executing_command_spawns_and_records_history() {
+        let (mut shell, core, _dir) = test_shell();
+
+        let mut spawned = None;
+        for &b in b"ls -la\r" {
+            if let ShellAction::SpawnSubprocess { command, args, .. } = shell.handle_input(&[b]) {
+                spawned = Some((command, args));
+            }
+        }
+
+        let (command, args) = spawned.expect("ls should spawn a subprocess");
+        assert_eq!(command, "ls");
+        assert_eq!(args, vec!["-la".to_string()]);
+
+        let recent = core.history().recent(10);
+        assert_eq!(recent[0].command, "ls -la");
+        assert_eq!(recent[0].origin, protocol::Origin::Local);
+    }
+
+    /// A builtin (`pwd`) is handled inline (Output, not a spawn) and is still
+    /// recorded through the backend.
+    #[test]
+    fn builtin_records_history_through_backend() {
+        let (mut shell, core, _dir) = test_shell();
+
+        for &b in b"pwd\r" {
+            let action = shell.handle_input(&[b]);
+            assert!(
+                !matches!(action, ShellAction::SpawnSubprocess { .. }),
+                "pwd is a builtin and must not spawn"
+            );
+        }
+
+        let recent = core.history().recent(10);
+        assert_eq!(recent[0].command, "pwd");
     }
 }
