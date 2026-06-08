@@ -641,6 +641,14 @@ impl Pane {
     /// - `KilledSubprocess`: Forwarded CTRL+C to the running subprocess
     /// - `ClearedInput`: Cleared the shell input buffer (or showed ^C on empty line)
     pub fn handle_ctrl_c(&mut self) -> CtrlCResult {
+        if let Some(remote) = self.remote.as_mut() {
+            // Remote session owns the screen (it may be in a history picker, an
+            // app, or at a prompt). Forward the interrupt and let the remote
+            // decide; never run the local shell handler, which would paint a
+            // local prompt over the remote content.
+            let _ = remote.write(&[0x03]);
+            return CtrlCResult::ClearedInput;
+        }
         if let Some(ref mut proc) = self.subprocess {
             // CTRL+C - forward to subprocess via PTY
             // The TTY driver will handle SIGINT generation based on terminal settings
@@ -668,6 +676,12 @@ impl Pane {
     /// - `KilledSubprocess`: Sent EOF to the running subprocess
     /// - `ClosePane`: Input was empty, caller should close this pane
     pub fn handle_ctrl_d(&mut self) -> CtrlCResult {
+        if let Some(remote) = self.remote.as_mut() {
+            // Forward EOF to the remote (e.g. exits the remote shell, which then
+            // returns this pane to the local shell). Don't close the pane here.
+            let _ = remote.write(&[0x04]);
+            return CtrlCResult::ClearedInput;
+        }
         if let Some(ref proc) = self.subprocess {
             // CTRL+D - send EOF to subprocess
             let _ = proc.write(&[0x04]);
