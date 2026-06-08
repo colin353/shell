@@ -824,13 +824,8 @@ impl Shell {
             // Backspace (0x7f) or Ctrl+H (0x08)
             0x7f | 0x08 => {
                 if self.cursor_pos > 0 {
-                    let old_pos = self.cursor_pos;
-                    let char_to_delete = self.input_buffer.chars().nth(self.cursor_pos - 1);
-
-                    // Compute display width of cursor position BEFORE delete
-                    // This is the width we need to move back to get to start of input
-                    let old_display_width =
-                        self.display_width_of_chars(&self.input_buffer, old_pos);
+                    // Capture the caret position before mutating the buffer.
+                    let old_caret = self.caret_phys(self.cursor_pos);
 
                     self.cursor_pos -= 1;
                     // cursor_pos is a character index, convert to byte offset for remove
@@ -842,15 +837,9 @@ impl Shell {
                         .unwrap_or(self.input_buffer.len());
                     self.input_buffer.remove(byte_pos);
 
-                    // Check if we deleted a newline - need special handling
-                    if char_to_delete == Some('\n') {
-                        // We deleted a newline, need to move cursor up and re-render
-                        Some(self.render_after_newline_delete(old_pos))
-                    } else {
-                        // Re-render the entire line with syntax highlighting
-                        // Use the pre-computed display width
-                        Some(self.render_highlighted_input_with_display_width(old_display_width))
-                    }
+                    // Re-render the whole line (handles wrapped lines and the
+                    // case where a hard newline was deleted).
+                    Some(self.render_line_from(old_caret))
                 } else {
                     None
                 }
@@ -879,17 +868,9 @@ impl Shell {
             // Ctrl+L - clear screen
             0x0c => {
                 let mut output = b"\x1b[2J\x1b[H".to_vec(); // Clear screen and home
-                output.extend(self.get_prompt().as_bytes());
-                let highlighted = self.backend.highlight(&self.input_buffer, &self.cwd);
-                output.extend(highlighted.as_bytes());
-                // Position cursor correctly using display width
-                let total_display_width = self.display_width(&self.input_buffer);
-                let cursor_display_width =
-                    self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
-                let move_back = total_display_width.saturating_sub(cursor_display_width);
-                if move_back > 0 {
-                    output.extend(format!("\x1b[{}D", move_back).as_bytes());
-                }
+                output.extend(self.render_full_multiline_input().as_bytes());
+                // Position the caret correctly (wrap-aware).
+                output.extend(self.reposition_to_cursor());
                 Some(output)
             }
             // Ctrl+A - move to beginning of line
@@ -911,7 +892,8 @@ impl Shell {
             0x09 => self.handle_tab_completion(),
             // Regular printable ASCII character
             0x20..=0x7e => {
-                let old_pos = self.cursor_pos;
+                // Capture the terminal caret position before mutating the buffer.
+                let old_caret = self.caret_phys(self.cursor_pos);
                 // cursor_pos is a character index, convert to byte offset
                 let byte_pos = self
                     .input_buffer
@@ -922,9 +904,8 @@ impl Shell {
                 self.input_buffer.insert(byte_pos, byte as char);
                 self.cursor_pos += 1;
 
-                // Re-render the entire line with syntax highlighting
-                // Use old_pos since terminal cursor hasn't moved yet
-                Some(self.render_highlighted_input_from(old_pos))
+                // Re-render the entire line (wrap-aware) with syntax highlighting.
+                Some(self.render_line_from(old_caret))
             }
             // UTF-8 multi-byte sequence handling
             // UTF-8 leading bytes: 0xC0-0xDF (2-byte), 0xE0-0xEF (3-byte), 0xF0-0xF7 (4-byte)
@@ -981,7 +962,7 @@ impl Shell {
         match std::str::from_utf8(&bytes) {
             Ok(s) => {
                 // Valid UTF-8 - insert the character(s)
-                let old_pos = self.cursor_pos;
+                let old_caret = self.caret_phys(self.cursor_pos);
                 for c in s.chars() {
                     // cursor_pos is a character index, need to find byte offset
                     let byte_pos = self
@@ -993,7 +974,7 @@ impl Shell {
                     self.input_buffer.insert(byte_pos, c);
                     self.cursor_pos += 1;
                 }
-                Some(self.render_highlighted_input_from(old_pos))
+                Some(self.render_line_from(old_caret))
             }
             Err(_) => {
                 // Invalid UTF-8, discard
@@ -1152,31 +1133,24 @@ impl Shell {
 
     /// Replace the current input line with new content
     fn replace_input_line(&mut self, new_content: &str) -> Vec<u8> {
-        // Compute display width of old cursor position BEFORE changing buffer
-        let old_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+        // Capture the caret position before changing the buffer.
+        let old_caret = self.caret_phys(self.cursor_pos);
 
         // Update state
         self.input_buffer = new_content.to_string();
         self.cursor_pos = self.input_buffer.chars().count();
 
-        // Re-render with syntax highlighting using pre-computed display width
-        self.render_highlighted_input_with_display_width(old_display_width)
+        // Re-render the whole line (wrap-aware).
+        self.render_line_from(old_caret)
     }
 
     /// Move cursor right
     fn cursor_right(&mut self) -> Option<Vec<u8>> {
         let char_count = self.input_buffer.chars().count();
         if self.cursor_pos < char_count {
-            // Get the character at current position to determine its width
-            let char_at_cursor = self.input_buffer.chars().nth(self.cursor_pos);
-            let width = char_at_cursor.and_then(|c| c.width()).unwrap_or(1);
+            let old_caret = self.caret_phys(self.cursor_pos);
             self.cursor_pos += 1;
-            // Move cursor by the character's display width
-            if width > 1 {
-                Some(format!("\x1b[{}C", width).into_bytes())
-            } else {
-                Some(b"\x1b[C".to_vec())
-            }
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1185,16 +1159,9 @@ impl Shell {
     /// Move cursor left
     fn cursor_left(&mut self) -> Option<Vec<u8>> {
         if self.cursor_pos > 0 {
-            // Get the character we're moving past to determine its width
-            let char_before_cursor = self.input_buffer.chars().nth(self.cursor_pos - 1);
-            let width = char_before_cursor.and_then(|c| c.width()).unwrap_or(1);
+            let old_caret = self.caret_phys(self.cursor_pos);
             self.cursor_pos -= 1;
-            // Move cursor by the character's display width
-            if width > 1 {
-                Some(format!("\x1b[{}D", width).into_bytes())
-            } else {
-                Some(b"\x1b[D".to_vec())
-            }
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1203,14 +1170,9 @@ impl Shell {
     /// Move cursor to start of line
     fn cursor_home(&mut self) -> Option<Vec<u8>> {
         if self.cursor_pos > 0 {
-            // Move by display width, not character count
-            let display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            let old_caret = self.caret_phys(self.cursor_pos);
             self.cursor_pos = 0;
-            if display_width > 0 {
-                Some(format!("\x1b[{}D", display_width).into_bytes())
-            } else {
-                None
-            }
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1220,17 +1182,9 @@ impl Shell {
     fn cursor_end(&mut self) -> Option<Vec<u8>> {
         let char_count = self.input_buffer.chars().count();
         if self.cursor_pos < char_count {
-            // Calculate display width from cursor to end
-            let current_display_width =
-                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
-            let total_display_width = self.display_width(&self.input_buffer);
-            let remaining_width = total_display_width.saturating_sub(current_display_width);
+            let old_caret = self.caret_phys(self.cursor_pos);
             self.cursor_pos = char_count;
-            if remaining_width > 0 {
-                Some(format!("\x1b[{}C", remaining_width).into_bytes())
-            } else {
-                None
-            }
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1257,9 +1211,8 @@ impl Shell {
         // If exactly one completion, insert it directly
         if completions.len() == 1 {
             let (_, text, kind) = &completions[0];
-            // Compute display width BEFORE modifying buffer
-            let old_display_width =
-                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            // Capture the caret position BEFORE modifying the buffer.
+            let old_caret = self.caret_phys(self.cursor_pos);
 
             // Add trailing space unless it's a directory
             let is_directory = matches!(kind, syntax::CompletionKind::Directory);
@@ -1276,8 +1229,8 @@ impl Shell {
             // Update cursor position to end of inserted completion
             self.cursor_pos = replace_start + completion_text.len();
 
-            // Re-render with syntax highlighting
-            return Some(self.render_highlighted_input_with_display_width(old_display_width));
+            // Re-render the whole line (wrap-aware).
+            return Some(self.render_line_from(old_caret));
         }
 
         // Multiple completions - check if there's a common prefix we can complete first
@@ -1286,13 +1239,12 @@ impl Shell {
 
         if common_prefix.len() > current_word.len() {
             // There's a common prefix longer than what's typed - complete to that first
-            // Compute display width BEFORE modifying buffer
-            let old_display_width =
-                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            // Capture the caret position BEFORE modifying the buffer.
+            let old_caret = self.caret_phys(self.cursor_pos);
             self.input_buffer
                 .replace_range(replace_start..replace_end, &common_prefix);
             self.cursor_pos = replace_start + common_prefix.len();
-            return Some(self.render_highlighted_input_with_display_width(old_display_width));
+            return Some(self.render_line_from(old_caret));
         }
 
         // No common prefix to extend - show the picker
@@ -1335,168 +1287,169 @@ impl Shell {
         Some(self.render_picker_ui())
     }
 
-    /// Render the current input line with syntax highlighting.
+    /// Visible (printed) width of a string, ignoring ANSI escape sequences.
     ///
-    /// `old_cursor_pos` is where the terminal cursor currently is (in input buffer coordinates).
-    /// Returns ANSI escape sequences to re-render the input properly.
+    /// Used to measure the on-screen width of prompts, which contain SGR color
+    /// codes that occupy no columns.
+    fn visible_width(s: &str) -> usize {
+        let mut width = 0;
+        let mut chars = s.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                // Skip a CSI sequence: ESC '[' ... final-byte (0x40..=0x7e)
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    // Other escapes: skip the following byte conservatively
+                    chars.next();
+                }
+            } else {
+                width += ch.width().unwrap_or(0);
+            }
+        }
+        width
+    }
+
+    /// Visible width of the primary prompt (first input line).
+    fn prompt_width(&self) -> usize {
+        Self::visible_width(&self.get_prompt())
+    }
+
+    /// Visible width of the continuation prompt (lines after a hard newline).
+    fn cont_prompt_width(&self) -> usize {
+        Self::visible_width(&self.get_continuation_prompt())
+    }
+
+    /// Compute the physical (row, col) pen position *before* each character of
+    /// the input buffer, plus the final pen position after the last character.
     ///
-    /// For single-line input: moves cursor to start, clears line, writes highlighted text.
-    /// For multi-line input: only re-renders the current line (after the last newline).
-    fn render_highlighted_input_from(&mut self, old_cursor_pos: usize) -> Vec<u8> {
-        let mut output = Vec::new();
+    /// Rows are counted from the row containing the primary prompt (row 0).
+    /// This models the terminal's layout exactly: the prompt occupies the
+    /// leading columns, hard newlines (`\n`) move to a fresh row prefixed by the
+    /// continuation prompt, and long lines soft-wrap at the terminal width using
+    /// alacritty's delayed-wrap rules (a character that would overflow the line
+    /// is pushed to the next row, matching wide-character handling at the edge).
+    ///
+    /// Returns a vector of length `char_count + 1`. Entry `i` is the pen state
+    /// just before character `i`; the last entry is the pen after all input.
+    /// A column equal to the terminal width denotes a pending wrap.
+    fn line_pens(&self) -> Vec<(usize, usize)> {
+        let cols = (self.cols as usize).max(1);
+        let prompt_w = self.prompt_width();
+        let cont_w = self.cont_prompt_width();
 
-        // Check if we have multi-line input
-        if let Some(last_newline) = self.input_buffer.rfind('\n') {
-            // Multi-line input: only re-render the current line (after the last newline)
-            let current_line_start = last_newline + 1;
-            let current_line = &self.input_buffer[current_line_start..];
+        let mut row = prompt_w / cols;
+        let mut col = prompt_w % cols;
 
-            // Calculate cursor position within the current line (in characters)
-            let cursor_in_current_line = if self.cursor_pos > current_line_start {
-                self.cursor_pos - current_line_start
+        let mut pens = Vec::with_capacity(self.input_buffer.len() + 1);
+        for ch in self.input_buffer.chars() {
+            pens.push((row, col));
+            if ch == '\n' {
+                // Hard newline: CR/LF to a fresh row, then the continuation prompt.
+                row += 1 + cont_w / cols;
+                col = cont_w % cols;
             } else {
-                0
-            };
+                let w = ch.width().unwrap_or(0);
+                // Delayed wrap: a glyph that does not fit is pushed to the next row.
+                if col + w > cols {
+                    row += 1;
+                    col = 0;
+                }
+                col += w;
+            }
+        }
+        // Final pen position (after the last character).
+        pens.push((row, col));
+        pens
+    }
 
-            // Calculate old cursor position within the current line (in characters)
-            let old_cursor_in_current_line = if old_cursor_pos > current_line_start {
-                old_cursor_pos - current_line_start
+    /// Physical (row, col) of the visible caret when the logical cursor is at
+    /// `cursor_pos` (a character index into the input buffer).
+    ///
+    /// Rows are relative to the primary prompt row. A caret sitting at the very
+    /// end of a line that exactly fills the terminal width uses the delayed-wrap
+    /// resting position (last column of the current row); a caret in the middle
+    /// of the line at a wrap boundary resolves to the start of the next row.
+    fn caret_phys(&self, cursor_pos: usize) -> (usize, usize) {
+        let cols = (self.cols as usize).max(1);
+        let pens = self.line_pens();
+        let last = pens.len() - 1;
+        let k = cursor_pos.min(last);
+        let (row, col) = pens[k];
+        if k == last {
+            // Resting position at end-of-input (delayed wrap).
+            if col >= cols {
+                (row, cols - 1)
             } else {
-                0
-            };
-
-            // Move cursor to start of current line (after continuation prompt)
-            // Need to move by display width (columns), not character count
-            let old_cursor_display_width =
-                self.display_width_of_chars(current_line, old_cursor_in_current_line);
-            if old_cursor_display_width > 0 {
-                output.extend(format!("\x1b[{}D", old_cursor_display_width).as_bytes());
+                (row, col)
             }
-
-            // Clear from cursor to end of line
-            output.extend(b"\x1b[K");
-
-            // Get highlighted version of just the current line
-            let highlighted = self.backend.highlight(current_line, &self.cwd);
-            output.extend(highlighted.as_bytes());
-
-            // Move cursor back to correct position within current line
-            // Calculate display width from cursor to end of line
-            let total_display_width = self.display_width(current_line);
-            let cursor_display_width =
-                self.display_width_of_chars(current_line, cursor_in_current_line);
-            let move_back_columns = total_display_width.saturating_sub(cursor_display_width);
-            if move_back_columns > 0 {
-                output.extend(format!("\x1b[{}D", move_back_columns).as_bytes());
-            }
+        } else if col >= cols {
+            // Mid-line wrap boundary: caret belongs at the start of the next row.
+            (row + 1, 0)
         } else {
-            // Single-line input: original behavior
-            // Move cursor to start of input area (after prompt)
-            // Need to move by display width (columns), not character count
-            let old_cursor_display_width =
-                self.display_width_of_chars(&self.input_buffer, old_cursor_pos);
-            if old_cursor_display_width > 0 {
-                output.extend(format!("\x1b[{}D", old_cursor_display_width).as_bytes());
-            }
-
-            // Clear from cursor to end of line
-            output.extend(b"\x1b[K");
-
-            // Get highlighted version of input
-            let highlighted = self.backend.highlight(&self.input_buffer, &self.cwd);
-
-            // Write the highlighted input
-            output.extend(highlighted.as_bytes());
-
-            // Move cursor back to correct position
-            // Calculate display width from cursor to end of buffer
-            let total_display_width = self.display_width(&self.input_buffer);
-            let cursor_display_width =
-                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
-            let move_back_columns = total_display_width.saturating_sub(cursor_display_width);
-            if move_back_columns > 0 {
-                output.extend(format!("\x1b[{}D", move_back_columns).as_bytes());
-            }
+            (row, col)
         }
+    }
 
+    /// Emit the cursor movement to go from the terminal's resting position
+    /// (immediately after the whole prompt + input has been printed) to the
+    /// caret position for the current `cursor_pos`.
+    fn reposition_to_cursor(&self) -> Vec<u8> {
+        let end = self.caret_phys(usize::MAX); // resting end position
+        let target = self.caret_phys(self.cursor_pos);
+        let mut output = Vec::new();
+        if target == end {
+            // Already at the right spot; importantly this preserves a pending
+            // wrap so the next typed character wraps instead of overwriting.
+            return output;
+        }
+        if target.0 < end.0 {
+            output.extend(format!("\x1b[{}A", end.0 - target.0).into_bytes());
+        } else if target.0 > end.0 {
+            output.extend(format!("\x1b[{}B", target.0 - end.0).into_bytes());
+        }
+        output.push(b'\r');
+        if target.1 > 0 {
+            output.extend(format!("\x1b[{}C", target.1).into_bytes());
+        }
         output
     }
 
-    /// Render the current input line with syntax highlighting.
-    /// Assumes terminal cursor is at self.cursor_pos.
-    fn render_highlighted_input(&mut self) -> Vec<u8> {
-        let pos = self.cursor_pos;
-        self.render_highlighted_input_from(pos)
-    }
-
-    /// Render the current input line with syntax highlighting, using a pre-computed display width.
-    /// Used after backspace when the buffer has already been modified.
-    fn render_highlighted_input_with_display_width(
-        &mut self,
-        old_cursor_display_width: usize,
-    ) -> Vec<u8> {
+    /// Re-render the entire input line (prompt + buffer) in a wrap-aware way.
+    ///
+    /// `old_caret` is the terminal caret's physical position (row, col relative
+    /// to the prompt row) *before* the buffer/cursor were mutated — capture it
+    /// with [`Shell::caret_phys`] prior to editing. The line is redrawn by
+    /// returning to the prompt row, clearing to the end of the screen, printing
+    /// the prompt and highlighted input (letting the terminal soft-wrap), and
+    /// then repositioning the caret for the new `cursor_pos`.
+    fn render_line_from(&mut self, old_caret: (usize, usize)) -> Vec<u8> {
         let mut output = Vec::new();
 
-        // For single-line input (no multi-line support in this variant for now)
-        // Move cursor to start of input area (after prompt)
-        if old_cursor_display_width > 0 {
-            output.extend(format!("\x1b[{}D", old_cursor_display_width).as_bytes());
+        // 1. Return to the prompt row, column 0.
+        if old_caret.0 > 0 {
+            output.extend(format!("\x1b[{}A", old_caret.0).into_bytes());
         }
+        output.push(b'\r');
 
-        // Clear from cursor to end of line
-        output.extend(b"\x1b[K");
+        // 2. Clear everything from here to the end of the screen.
+        output.extend_from_slice(b"\x1b[J");
 
-        // Get highlighted version of input
-        let highlighted = self.backend.highlight(&self.input_buffer, &self.cwd);
-
-        // Write the highlighted input
-        output.extend(highlighted.as_bytes());
-
-        // Move cursor back to correct position
-        // Calculate display width from cursor to end of buffer
-        let total_display_width = self.display_width(&self.input_buffer);
-        let cursor_display_width = self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
-        let move_back_columns = total_display_width.saturating_sub(cursor_display_width);
-        if move_back_columns > 0 {
-            output.extend(format!("\x1b[{}D", move_back_columns).as_bytes());
-        }
-
-        output
-    }
-
-    /// Calculate the display width (in terminal columns) of the first `char_count` characters.
-    /// Wide characters (CJK, emoji) count as 2 columns.
-    fn display_width_of_chars(&self, text: &str, char_count: usize) -> usize {
-        text.chars()
-            .take(char_count)
-            .map(|c| c.width().unwrap_or(0))
-            .sum()
-    }
-
-    /// Calculate the total display width (in terminal columns) of a string.
-    fn display_width(&self, text: &str) -> usize {
-        text.chars().map(|c| c.width().unwrap_or(0)).sum()
-    }
-
-    /// Render after deleting a newline character.
-    /// This needs to move the cursor up to the previous line and re-render.
-    fn render_after_newline_delete(&mut self, _old_cursor_pos: usize) -> Vec<u8> {
-        let mut output = Vec::new();
-
-        // Move cursor up one line
-        output.extend(b"\x1b[A");
-
-        // Move cursor to beginning of line
-        output.extend(b"\r");
-
-        // Clear from cursor to end of screen (clears current line and all lines below)
-        output.extend(b"\x1b[J");
-
-        // Re-render the full multi-line input from the prompt
+        // 3. Reprint the prompt(s) and highlighted input.
         output.extend(self.render_full_multiline_input().as_bytes());
 
+        // 4. Move the caret from the resting end position to the cursor.
+        output.extend(self.reposition_to_cursor());
+
         output
     }
+
 
     /// Move cursor forward one word (Alt+F)
     fn forward_word(&mut self) -> Option<Vec<u8>> {
@@ -1516,9 +1469,9 @@ impl Shell {
         }
 
         if new_pos > self.cursor_pos {
-            let move_right = new_pos - self.cursor_pos;
+            let old_caret = self.caret_phys(self.cursor_pos);
             self.cursor_pos = new_pos;
-            Some(format!("\x1b[{}C", move_right).into_bytes())
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1543,9 +1496,9 @@ impl Shell {
         }
 
         if new_pos < self.cursor_pos {
-            let move_left = self.cursor_pos - new_pos;
+            let old_caret = self.caret_phys(self.cursor_pos);
             self.cursor_pos = new_pos;
-            Some(format!("\x1b[{}D", move_left).into_bytes())
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1557,12 +1510,11 @@ impl Shell {
             return None;
         }
 
-        let old_pos = self.cursor_pos;
         let chars: Vec<char> = self.input_buffer.chars().collect();
         let mut new_pos = self.cursor_pos;
 
-        // Compute display width BEFORE modifying buffer
-        let old_display_width = self.display_width_of_chars(&self.input_buffer, old_pos);
+        // Capture the caret position BEFORE modifying the buffer.
+        let old_caret = self.caret_phys(self.cursor_pos);
 
         // Skip word boundaries before cursor
         while new_pos > 0 && is_word_boundary(chars[new_pos - 1]) {
@@ -1590,8 +1542,8 @@ impl Shell {
             self.input_buffer.drain(byte_start..byte_end);
             self.cursor_pos = new_pos;
 
-            // Re-render with syntax highlighting using pre-computed display width
-            Some(self.render_highlighted_input_with_display_width(old_display_width))
+            // Re-render the whole line (wrap-aware).
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1606,6 +1558,9 @@ impl Shell {
 
         let start = self.cursor_pos;
         let mut end = self.cursor_pos;
+
+        // Capture the caret position BEFORE modifying the buffer.
+        let old_caret = self.caret_phys(self.cursor_pos);
 
         // Skip word characters (non-boundaries)
         while end < chars.len() && !is_word_boundary(chars[end]) {
@@ -1632,8 +1587,8 @@ impl Shell {
                 .unwrap_or(self.input_buffer.len());
             self.input_buffer.drain(byte_start..byte_end);
 
-            // Re-render with syntax highlighting
-            Some(self.render_highlighted_input())
+            // Re-render the whole line (wrap-aware).
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1643,6 +1598,8 @@ impl Shell {
     fn kill_to_end(&mut self) -> Option<Vec<u8>> {
         let char_count = self.input_buffer.chars().count();
         if self.cursor_pos < char_count {
+            // Capture the caret position BEFORE modifying the buffer.
+            let old_caret = self.caret_phys(self.cursor_pos);
             // Find byte position from character position
             let byte_pos = self
                 .input_buffer
@@ -1651,7 +1608,9 @@ impl Shell {
                 .map(|(i, _)| i)
                 .unwrap_or(self.input_buffer.len());
             self.input_buffer.truncate(byte_pos);
-            Some(b"\x1b[K".to_vec()) // Clear to end of line
+            // Re-render the whole line: a simple "clear to end of line" is wrong
+            // once the killed text spans multiple wrapped rows.
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }
@@ -1660,9 +1619,8 @@ impl Shell {
     /// Kill (delete) from cursor to beginning of line (Ctrl+U)
     fn kill_to_beginning(&mut self) -> Option<Vec<u8>> {
         if self.cursor_pos > 0 {
-            // Compute display width BEFORE modifying buffer
-            let old_display_width =
-                self.display_width_of_chars(&self.input_buffer, self.cursor_pos);
+            // Capture the caret position BEFORE modifying the buffer.
+            let old_caret = self.caret_phys(self.cursor_pos);
             // Convert character position to byte position
             let byte_pos = self
                 .input_buffer
@@ -1673,8 +1631,8 @@ impl Shell {
             self.input_buffer.drain(0..byte_pos);
             self.cursor_pos = 0;
 
-            // Re-render with syntax highlighting using pre-computed display width
-            Some(self.render_highlighted_input_with_display_width(old_display_width))
+            // Re-render the whole line (wrap-aware).
+            Some(self.render_line_from(old_caret))
         } else {
             None
         }

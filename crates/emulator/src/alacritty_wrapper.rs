@@ -113,6 +113,18 @@ impl AlacrittyEmulator {
         text
     }
 
+    /// Whether the given visible row soft-wraps into the next row.
+    ///
+    /// alacritty marks the last cell of a wrapped row with `WRAPLINE`; a logical
+    /// line is a run of consecutive rows where each non-final row reports `true`.
+    pub fn line_wrapped(&self, row: usize) -> bool {
+        if row >= self.rows || self.cols == 0 {
+            return false;
+        }
+        let point = Point::new(AlacLine(row as i32), Column(self.cols - 1));
+        self.term.grid()[point].flags.contains(CellFlags::WRAPLINE)
+    }
+
     /// Resize the terminal
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.cols = cols;
@@ -331,7 +343,6 @@ mod tests {
         let line = emu.get_line_text(0);
         assert!(line.starts_with("Hello, World!"));
     }
-
     #[test]
     fn test_cursor_position() {
         let mut emu = AlacrittyEmulator::new(80, 24);

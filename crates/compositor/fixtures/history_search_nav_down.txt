@@ -8,17 +8,17 @@
                                                                                 
                                                                                 
                                                                                 
-    curl -fsSL https://gh.io/copilot-install | bash                             
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/mkasberg/ghos..
-     [200~/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/mkasber..
-    sudo /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/mkasberg..
-    sudo apt install git                                                        
-    git clone https://github.com/colin353/shell.git                             
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+    git clone https://github.com/colin353/shell                                 
+    git checkout alacritty-core                                                 
   ✗ git push origin main                                                        
   ✓ git commit -m 'Initial commit'                                              
   ✓ git log --oneline                                                           
-> ✓ git status                                                                  
-(reverse-i-search)`git' [1/10]                                                  
+>   git status                                                                  
+(reverse-i-search)`git' [1/6]                                                   
 compositor ➜ git                                                                
                                                                                 
  0 shell                                                       2025-01-01 12:00 

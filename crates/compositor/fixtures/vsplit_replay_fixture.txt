@@ -1,7 +1,7 @@
-compositor ➜printf 'LEFT_PANE_MARKER\n'│compositor ➜printf 'RIGHT_PANE_MARKER\n'
+compositor ➜ printf 'LEFT_PANE_MARKER\n│compositor ➜ printf 'RIGHT_PANE_MARKER\n
+'                                      │'                                       
 LEFT_PANE_MARKER                       │RIGHT_PANE_MARKER                       
 compositor ➜                           │compositor ➜                            
-                                       │                                        
                                        │                                        
                                        │                                        
                                        │                                        

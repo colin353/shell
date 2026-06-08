@@ -14,6 +14,78 @@ use std::sync::{Arc, Mutex};
 /// Clock function type for getting current time (allows mocking in tests)
 pub type ClockFn = Box<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>;
 
+/// Display width of a string in terminal columns (wide chars count as 2).
+fn str_display_width(text: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    text.width()
+}
+
+/// Write `text` into `grid` starting at column `x` on row `y`, painting every cell
+/// with `attrs`. Stops before reaching `max_x` (exclusive) and returns the column
+/// after the last cell written.
+///
+/// Wide (2-column) characters are written as a leading glyph cell followed by a
+/// `is_wide_char_spacer` cell, mirroring how the terminal emulator stores them.
+/// This is required for correctness: `compute_delta` advances its cursor by each
+/// glyph's display width, so a wide char placed without its spacer would shift
+/// every following cell by one column (and a full repaint would not repair it).
+/// Zero-width / control characters are skipped.
+fn write_str_to_grid(
+    grid: &mut emulator::TerminalGrid,
+    mut x: usize,
+    y: usize,
+    text: &str,
+    attrs: &emulator::CellAttributes,
+    max_x: usize,
+) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if w == 0 {
+            continue;
+        }
+        // Don't paint a glyph that would overflow the available region.
+        if x + w > max_x {
+            break;
+        }
+        grid.set_cell(x, y, emulator::Cell::new(ch, attrs.clone()));
+        if w == 2 {
+            let mut spacer = emulator::Cell::new(' ', attrs.clone());
+            spacer.is_wide_char_spacer = true;
+            grid.set_cell(x + 1, y, spacer);
+        }
+        x += w;
+    }
+    x
+}
+
+/// Truncate `text` so its display width does not exceed `max_width`, appending an
+/// ellipsis ("...") when truncation occurs. Operates on whole characters, so it
+/// never splits a multi-byte UTF-8 sequence.
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if str_display_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        // No room for content alongside the ellipsis; just emit as many dots as fit.
+        return ".".repeat(max_width);
+    }
+    let budget = max_width - 3;
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push_str("...");
+    out
+}
+
 fn find_prefix_key(input: &[u8]) -> Option<(usize, usize)> {
     for index in 0..input.len() {
         if input[index] == 0x02 {
@@ -189,6 +261,77 @@ fn host_mouse_sequence(mode: MouseMode) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_to_width_leaves_short_text() {
+        assert_eq!(truncate_to_width("https://x", 20), "https://x");
+    }
+
+    #[test]
+    fn truncate_to_width_adds_ellipsis() {
+        assert_eq!(truncate_to_width("abcdefghij", 7), "abcd...");
+        assert_eq!(str_display_width(&truncate_to_width("abcdefghij", 7)), 7);
+    }
+
+    #[test]
+    fn truncate_to_width_never_splits_multibyte() {
+        // A URL with wide (2-col) characters: truncation must respect display width
+        // and never panic on a byte boundary.
+        let url = "https://例え.test/路径/page";
+        for max in 0..=str_display_width(url) + 2 {
+            let out = truncate_to_width(url, max);
+            assert!(out.is_char_boundary(out.len())); // trivially true, but proves no panic
+            assert!(str_display_width(&out) <= max.max(0));
+        }
+    }
+
+    #[test]
+    fn write_str_to_grid_inserts_wide_char_spacer() {
+        let mut grid = emulator::TerminalGrid::new(12, 1);
+        let attrs = emulator::CellAttributes::default();
+        // "中" is width 2; the next written cell must land at column 2, not 1.
+        let next_x = write_str_to_grid(&mut grid, 0, 0, "中A", &attrs, 12);
+        assert_eq!(next_x, 3);
+        assert_eq!(grid.get_cell(0, 0).character, '中');
+        assert!(!grid.get_cell(0, 0).is_wide_char_spacer);
+        assert!(grid.get_cell(1, 0).is_wide_char_spacer);
+        assert_eq!(grid.get_cell(2, 0).character, 'A');
+    }
+
+    #[test]
+    fn write_str_to_grid_respects_max_x() {
+        let mut grid = emulator::TerminalGrid::new(12, 1);
+        let attrs = emulator::CellAttributes::default();
+        // Only room for 1 column before max_x; a width-2 glyph must not be placed.
+        let next_x = write_str_to_grid(&mut grid, 0, 0, "中", &attrs, 1);
+        assert_eq!(next_x, 0);
+        assert_eq!(grid.get_cell(0, 0).character, ' ');
+    }
+
+    #[test]
+    fn status_bar_style_wide_text_survives_delta_roundtrip() {
+        // Regression for the status-bar desync: a wide char placed via write_str_to_grid
+        // must reproduce exactly through compute_delta applied to a real terminal, with
+        // every following cell aligned. (Placing it without a spacer shifted them.)
+        let cols = 20;
+        let mut grid = emulator::TerminalGrid::new(cols, 1);
+        let attrs = emulator::CellAttributes::default();
+        write_str_to_grid(&mut grid, 0, 0, " 0 例 shell ", &attrs, cols);
+
+        let blank = emulator::TerminalGrid::new(cols, 1);
+        let delta = emulator::compute_delta(&blank, &grid);
+        let mut real = emulator::TerminalEmulator::new(cols, 1);
+        real.process(&delta);
+
+        for x in 0..cols {
+            let r = real.grid().get_cell(x, 0);
+            let m = grid.get_cell(x, 0);
+            let rc = if r.character.is_control() { ' ' } else { r.character };
+            let mc = if m.character.is_control() { ' ' } else { m.character };
+            assert_eq!(rc, mc, "char mismatch at column {x}");
+            assert_eq!(r.attrs, m.attrs, "attr mismatch at column {x}");
+        }
+    }
 
     #[test]
     fn parses_sgr_mouse_event() {
@@ -1449,16 +1592,14 @@ impl Compositor {
                 (false, false) => bar_attrs.clone(),
             };
 
-            for ch in tab_text.chars() {
-                if x_pos < cols {
-                    self.global_emulator.grid_mut().set_cell(
-                        x_pos,
-                        status_bar_y,
-                        emulator::Cell::new(ch, attrs.clone()),
-                    );
-                    x_pos += 1;
-                }
-            }
+            x_pos = write_str_to_grid(
+                self.global_emulator.grid_mut(),
+                x_pos,
+                status_bar_y,
+                &tab_text,
+                &attrs,
+                cols,
+            );
         }
 
         // Check if we're in search mode (sub-mode of scrollback) first
@@ -1472,36 +1613,16 @@ impl Compositor {
             if let Some((query, current_idx, total)) =
                 self.tabs[self.active_tab].root.get_search_info()
             {
-                // Show search query on the left after tabs
-                let search_prefix = " / ";
-                for ch in search_prefix.chars() {
-                    if x_pos < cols {
-                        self.global_emulator.grid_mut().set_cell(
-                            x_pos,
-                            status_bar_y,
-                            emulator::Cell::new(ch, search_attrs.clone()),
-                        );
-                        x_pos += 1;
-                    }
-                }
-                for ch in query.chars() {
-                    if x_pos < cols {
-                        self.global_emulator.grid_mut().set_cell(
-                            x_pos,
-                            status_bar_y,
-                            emulator::Cell::new(ch, search_attrs.clone()),
-                        );
-                        x_pos += 1;
-                    }
-                }
-                // Add trailing space
-                if x_pos < cols {
-                    self.global_emulator.grid_mut().set_cell(
-                        x_pos,
-                        status_bar_y,
-                        emulator::Cell::new(' ', search_attrs.clone()),
-                    );
-                }
+                // Show search query on the left after tabs (plus a trailing space)
+                let search_text = format!(" / {} ", query);
+                write_str_to_grid(
+                    self.global_emulator.grid_mut(),
+                    x_pos,
+                    status_bar_y,
+                    &search_text,
+                    &search_attrs,
+                    cols,
+                );
 
                 // Show match count on the right
                 let match_text = if total == 0 {
@@ -1514,17 +1635,15 @@ impl Compositor {
                     format!(" {}/{} ", current_display, total)
                 };
 
-                let text_start_x = cols.saturating_sub(match_text.len());
-                for (i, ch) in match_text.chars().enumerate() {
-                    let x = text_start_x + i;
-                    if x < cols {
-                        self.global_emulator.grid_mut().set_cell(
-                            x,
-                            status_bar_y,
-                            emulator::Cell::new(ch, search_attrs.clone()),
-                        );
-                    }
-                }
+                let text_start_x = cols.saturating_sub(str_display_width(&match_text));
+                write_str_to_grid(
+                    self.global_emulator.grid_mut(),
+                    text_start_x,
+                    status_bar_y,
+                    &match_text,
+                    &search_attrs,
+                    cols,
+                );
                 return;
             }
             return;
@@ -1540,68 +1659,57 @@ impl Compositor {
 
             if let Some((current_idx, _total)) = self.tabs[self.active_tab].root.get_url_info() {
                 // Show URL mode label on the left after tabs
-                let url_label = " URL ";
-                for ch in url_label.chars() {
-                    if x_pos < cols {
-                        self.global_emulator.grid_mut().set_cell(
-                            x_pos,
-                            status_bar_y,
-                            emulator::Cell::new(ch, url_attrs.clone()),
-                        );
-                        x_pos += 1;
-                    }
-                }
+                x_pos = write_str_to_grid(
+                    self.global_emulator.grid_mut(),
+                    x_pos,
+                    status_bar_y,
+                    " URL ",
+                    &url_attrs,
+                    cols,
+                );
 
                 // Show current URL if selected (truncated if too long)
                 if let Some(url) = self.tabs[self.active_tab].root.get_current_url() {
                     // Calculate available space for URL (leave room for hint on right)
                     let hint_text = " j/k:nav Enter:open ";
-                    let available = cols.saturating_sub(x_pos).saturating_sub(hint_text.len());
+                    let hint_width = str_display_width(hint_text);
+                    let url_max_x = cols.saturating_sub(hint_width);
+                    let available = url_max_x.saturating_sub(x_pos);
 
-                    let display_url = if url.len() > available && available > 3 {
-                        format!("{}...", &url[..available.saturating_sub(3)])
-                    } else {
-                        url.clone()
-                    };
-
-                    for ch in display_url.chars() {
-                        if x_pos < cols.saturating_sub(hint_text.len()) {
-                            self.global_emulator.grid_mut().set_cell(
-                                x_pos,
-                                status_bar_y,
-                                emulator::Cell::new(ch, url_attrs.clone()),
-                            );
-                            x_pos += 1;
-                        }
-                    }
+                    // Truncate by display width on character boundaries (never panics
+                    // on multi-byte URLs, unlike byte-slicing).
+                    let display_url = truncate_to_width(&url, available);
+                    write_str_to_grid(
+                        self.global_emulator.grid_mut(),
+                        x_pos,
+                        status_bar_y,
+                        &display_url,
+                        &url_attrs,
+                        url_max_x,
+                    );
 
                     // Show hint text on the right (only if we have a URL selected)
                     if current_idx.is_some() {
-                        let text_start_x = cols.saturating_sub(hint_text.len());
-                        for (i, ch) in hint_text.chars().enumerate() {
-                            let x = text_start_x + i;
-                            if x < cols {
-                                self.global_emulator.grid_mut().set_cell(
-                                    x,
-                                    status_bar_y,
-                                    emulator::Cell::new(ch, url_attrs.clone()),
-                                );
-                            }
-                        }
+                        let text_start_x = cols.saturating_sub(hint_width);
+                        write_str_to_grid(
+                            self.global_emulator.grid_mut(),
+                            text_start_x,
+                            status_bar_y,
+                            hint_text,
+                            &url_attrs,
+                            cols,
+                        );
                     }
                 } else {
                     // No URL selected
-                    let no_url_text = " No URLs found ";
-                    for ch in no_url_text.chars() {
-                        if x_pos < cols {
-                            self.global_emulator.grid_mut().set_cell(
-                                x_pos,
-                                status_bar_y,
-                                emulator::Cell::new(ch, url_attrs.clone()),
-                            );
-                            x_pos += 1;
-                        }
-                    }
+                    write_str_to_grid(
+                        self.global_emulator.grid_mut(),
+                        x_pos,
+                        status_bar_y,
+                        " No URLs found ",
+                        &url_attrs,
+                        cols,
+                    );
                 }
                 return;
             }
@@ -1622,17 +1730,15 @@ impl Compositor {
                 let current_line = scrollback_len.saturating_sub(scroll_offset);
                 let scroll_text = format!(" SCROLL {}/{} ", current_line, scrollback_len);
 
-                let text_start_x = cols.saturating_sub(scroll_text.len());
-                for (i, ch) in scroll_text.chars().enumerate() {
-                    let x = text_start_x + i;
-                    if x < cols {
-                        self.global_emulator.grid_mut().set_cell(
-                            x,
-                            status_bar_y,
-                            emulator::Cell::new(ch, scroll_attrs.clone()),
-                        );
-                    }
-                }
+                let text_start_x = cols.saturating_sub(str_display_width(&scroll_text));
+                write_str_to_grid(
+                    self.global_emulator.grid_mut(),
+                    text_start_x,
+                    status_bar_y,
+                    &scroll_text,
+                    &scroll_attrs,
+                    cols,
+                );
                 return;
             }
             return;
@@ -1646,7 +1752,8 @@ impl Compositor {
 
         let diagnostics = libshell::global_diagnostic_flags();
         let diagnostics_width = diagnostics.len() * 2;
-        let time_start_x = cols.saturating_sub(diagnostics_width + right_text.len());
+        let time_start_x =
+            cols.saturating_sub(diagnostics_width + str_display_width(&right_text));
         let mut right_x = time_start_x;
 
         for flag in diagnostics {
@@ -1680,16 +1787,14 @@ impl Compositor {
             }
         }
 
-        for (i, ch) in right_text.chars().enumerate() {
-            let x = right_x + i;
-            if x < cols {
-                self.global_emulator.grid_mut().set_cell(
-                    x,
-                    status_bar_y,
-                    emulator::Cell::new(ch, bar_attrs.clone()),
-                );
-            }
-        }
+        write_str_to_grid(
+            self.global_emulator.grid_mut(),
+            right_x,
+            status_bar_y,
+            &right_text,
+            &bar_attrs,
+            cols,
+        );
     }
 
     /// Get a reference to the root pane cell of the active tab.

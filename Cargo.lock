@@ -142,6 +142,7 @@ dependencies = [
  "protocol",
  "pty",
  "regex",
+ "unicode-width",
 ]
 
 [[package]]

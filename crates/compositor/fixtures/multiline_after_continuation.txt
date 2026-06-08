@@ -1,4 +1,4 @@
-compositor ➜ ls \                                                               
+compositor ➜ ls                                                                 
 > -lah                                                                          
                                                                                 
                                                                                 

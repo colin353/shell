@@ -1123,7 +1123,8 @@ impl PaneCell {
                         return None;
                     }
                     for (i, m) in pane.url_matches.iter().enumerate() {
-                        if m.line_index == line_index && col >= m.start_col && col < m.end_col {
+                        // `contains` handles URLs that span multiple wrapped rows.
+                        if m.contains(line_index, col) {
                             let is_current = Some(i) == pane.current_url_index;
                             return Some(is_current);
                         }
@@ -1673,7 +1674,8 @@ impl PaneCell {
                         return None;
                     }
                     for (i, m) in pane.url_matches.iter().enumerate() {
-                        if m.line_index == line_index && col >= m.start_col && col < m.end_col {
+                        // `contains` handles URLs that span multiple wrapped rows.
+                        if m.contains(line_index, col) {
                             let is_current = Some(i) == pane.current_url_index;
                             return Some(is_current);
                         }
