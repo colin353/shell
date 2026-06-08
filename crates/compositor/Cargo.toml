@@ -8,6 +8,7 @@ emulator.path = "../emulator"
 pty.path = "../pty"
 libvim.path = "../libvim"
 libshell.path = "../libshell"
+protocol.path = "../protocol"
 nix = { version = "0.29", features = ["fs"] }
 libc = "0.2"
 chrono = "0.4"

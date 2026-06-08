@@ -139,6 +139,7 @@ dependencies = [
  "libshell",
  "libvim",
  "nix",
+ "protocol",
  "pty",
  "regex",
 ]
@@ -218,6 +219,7 @@ name = "emulator"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "protocol",
  "pty",
  "serde",
  "serde_json",
@@ -846,6 +848,7 @@ name = "shell"
 version = "0.1.0"
 dependencies = [
  "compositor",
+ "emulator",
  "libc",
  "nix",
  "protocol",

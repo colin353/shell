@@ -77,6 +77,35 @@ fn expect_welcome(stream: &mut UnixStream) {
     }
 }
 
+/// Read frames until a `GridResync` arrives (the (re)attach repaint) and return
+/// its snapshot.
+fn expect_grid_resync(stream: &mut UnixStream, timeout: Duration) -> protocol::GridSnapshot {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let deadline = Instant::now() + timeout;
+    let mut frames = FrameReader::new();
+    let mut buf = [0u8; 65536];
+    while Instant::now() < deadline {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                frames.push(&buf[..n]);
+                while let Some(msg) = frames.next_frame::<ServerMsg>().unwrap() {
+                    if let ServerMsg::GridResync { grid, .. } = msg {
+                        return grid;
+                    }
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => panic!("socket read error: {e}"),
+        }
+    }
+    panic!("expected a GridResync within {timeout:?}");
+}
+
 #[test]
 fn daemon_handshakes_renders_executes_and_reattaches() {
     let dir = tempfile::tempdir().unwrap();
@@ -90,14 +119,18 @@ fn daemon_handshakes_renders_executes_and_reattaches() {
     });
     wait_for_socket(&sock);
 
-    // --- Attach #1: handshake + prompt renders. ---
+    // --- Attach #1: handshake + GridResync paints the prompt. ---
     let mut stream = UnixStream::connect(&sock).unwrap();
     codec::write_frame(&mut stream, &hello((80, 24))).unwrap();
     expect_welcome(&mut stream);
 
-    // The force_full_redraw on attach paints the prompt; expect *some* render.
-    let prompt = read_renders_until(&mut stream, b"\x1b[", Duration::from_secs(3));
-    assert!(!prompt.is_empty(), "expected an initial render of the prompt");
+    // On attach the daemon sends the authoritative screen as a GridSnapshot.
+    let snap = expect_grid_resync(&mut stream, Duration::from_secs(3));
+    assert_eq!((snap.cols, snap.rows), (80, 24));
+    let grid = emulator::TerminalGrid::from_snapshot(&snap).expect("snapshot must decode");
+    // The snapshot must paint to ANSI without error (and be non-trivial).
+    assert!(!emulator::render_snapshot_to_ansi(&snap).is_empty());
+    let _ = grid;
 
     // --- Execute a command and see its output stream back. ---
     codec::write_frame(
@@ -117,13 +150,19 @@ fn daemon_handshakes_renders_executes_and_reattaches() {
     drop(stream);
     std::thread::sleep(Duration::from_millis(100));
 
-    // --- Attach #2: a fresh client gets a full repaint of the live session. ---
+    // --- Attach #2: a fresh client gets a GridResync of the live session,
+    // and it must still contain the output produced before the detach. ---
     let mut stream2 = UnixStream::connect(&sock).unwrap();
     codec::write_frame(&mut stream2, &hello((80, 24))).unwrap();
     expect_welcome(&mut stream2);
-    let repaint = read_renders_until(&mut stream2, b"\x1b[", Duration::from_secs(3));
+    let snap2 = expect_grid_resync(&mut stream2, Duration::from_secs(3));
+    let grid2 = emulator::TerminalGrid::from_snapshot(&snap2).expect("snapshot must decode");
+    let screen: String = (0..grid2.rows)
+        .map(|r| grid2.get_line_text(r))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        !repaint.is_empty(),
-        "reattaching client should receive a full repaint"
+        screen.contains("phase1onerocks"),
+        "reattach snapshot should still show the earlier output; got:\n{screen}"
     );
 }

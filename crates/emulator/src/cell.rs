@@ -1,7 +1,9 @@
 //! Cell types for the terminal grid
 
+use serde::{Deserialize, Serialize};
+
 /// A color for text or background
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Color {
     Black,
     Red,
@@ -58,7 +60,7 @@ impl Color {
 }
 
 /// Text attributes for a cell
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellAttributes {
     pub fg_color: Option<Color>,
     pub bg_color: Option<Color>,
@@ -82,7 +84,7 @@ impl CellAttributes {
 }
 
 /// A single cell in the terminal grid
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     pub character: char,
     pub attrs: CellAttributes,

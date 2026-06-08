@@ -178,9 +178,20 @@ fn event_loop(
                 Ok(k) => {
                     frames.push(&sock_buf[..k]);
                     while let Some(msg) = frames.next_frame::<ServerMsg>()? {
-                        if let ServerMsg::Render { bytes } = msg {
-                            tty_output.write_all(&bytes)?;
-                            tty_output.flush()?;
+                        match msg {
+                            // Live delta: write the daemon's ANSI verbatim.
+                            ServerMsg::Render { bytes } => {
+                                tty_output.write_all(&bytes)?;
+                                tty_output.flush()?;
+                            }
+                            // (Re)attach: reconstruct the authoritative screen
+                            // from the snapshot and paint it.
+                            ServerMsg::GridResync { grid, .. } => {
+                                let bytes = emulator::render_snapshot_to_ansi(&grid);
+                                tty_output.write_all(&bytes)?;
+                                tty_output.flush()?;
+                            }
+                            _ => {}
                         }
                     }
                 }

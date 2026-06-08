@@ -22,7 +22,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 
 use protocol::codec::{self};
-use protocol::{ClientMsg, Hello, HostId, ServerMsg, SessionId, Welcome, PROTOCOL_VERSION};
+use protocol::{
+    ClientMsg, Hello, HostId, PaneId, ServerMsg, SessionId, Welcome, PROTOCOL_VERSION,
+};
 
 /// A `Write` sink that frames everything written into `ServerMsg::Render` frames
 /// and forwards them to the currently-attached client. With no client attached,
@@ -117,11 +119,30 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
     let exit = loop {
         // Attach a newly-arrived client (taking over from any existing one).
         if let Ok(incoming) = conn_rx.try_recv() {
-            sink.lock().unwrap().attach(incoming.sink_stream);
+            // Drop any previous client first, so the refresh render below is
+            // discarded rather than sent as a stray partial frame.
+            sink.lock().unwrap().detach();
+
             let (cols, rows) = incoming.size;
             compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
-            compositor.force_full_redraw();
-            current = Some(incoming.input);
+            // Refresh the composite at the new size (output dropped: no client
+            // attached yet), then snapshot the authoritative screen.
+            compositor.render();
+            let snapshot = compositor.grid_snapshot();
+
+            // Paint the (re)attaching client from server state via GridResync,
+            // then attach the sink so subsequent live deltas stream as Render.
+            let mut stream = incoming.sink_stream;
+            let resync = ServerMsg::GridResync {
+                pane: PaneId(0),
+                grid: snapshot,
+            };
+            if codec::write_frame(&mut stream, &resync).is_ok() {
+                if let Ok(clone) = stream.try_clone() {
+                    sink.lock().unwrap().attach(clone);
+                    current = Some(incoming.input);
+                }
+            }
         }
 
         // Drain the attached client's input.

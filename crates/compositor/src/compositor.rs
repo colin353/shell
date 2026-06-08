@@ -1663,6 +1663,15 @@ impl Compositor {
         &self.global_emulator
     }
 
+    /// Capture the current composited screen as a serializable snapshot, for
+    /// sending to a (re)attaching client as a `GridResync`.
+    ///
+    /// Reflects the most recent `render()`; call `render()` first if the screen
+    /// may be stale (e.g. just after a resize).
+    pub fn grid_snapshot(&self) -> protocol::GridSnapshot {
+        self.global_emulator.grid().to_snapshot()
+    }
+
     /// Perform a render cycle and return the rendered output.
     ///
     /// This is useful for testing - it composites all panes and returns

@@ -9,13 +9,17 @@
 mod alacritty_wrapper;
 mod cell;
 pub mod delta;
+mod snapshot;
+
+use serde::{Deserialize, Serialize};
 
 pub use alacritty_wrapper::AlacrittyEmulator;
 pub use cell::{Cell, CellAttributes, Color, Line};
 pub use delta::compute_delta;
+pub use snapshot::render_snapshot_to_ansi;
 
 /// Character set designations (for compatibility)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CharSet {
     /// US ASCII (B)
     Ascii,
@@ -62,7 +66,7 @@ impl Default for CharSet {
 
 /// Compatibility wrapper that provides a TerminalGrid-like interface
 /// backed by alacritty_terminal.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TerminalGrid {
     /// Cached cells for direct access
     cells: Vec<Vec<Cell>>,
