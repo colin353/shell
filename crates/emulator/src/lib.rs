@@ -66,6 +66,9 @@ impl Default for CharSet {
 pub struct TerminalGrid {
     /// Cached cells for direct access
     cells: Vec<Vec<Cell>>,
+    /// Per-row flag: whether the row soft-wraps into the next one (alacritty's
+    /// `WRAPLINE`). Used to reassemble logical lines that span multiple rows.
+    line_wrapped: Vec<bool>,
     pub cols: usize,
     pub rows: usize,
     pub cursor_x: usize,
@@ -91,6 +94,7 @@ impl TerminalGrid {
 
         Self {
             cells,
+            line_wrapped: vec![false; rows],
             cols,
             rows,
             cursor_x: 0,
@@ -171,6 +175,8 @@ impl TerminalGrid {
             }
         }
 
+        self.line_wrapped.resize(rows, false);
+
         self.cols = cols;
         self.rows = rows;
         self.scroll_bottom = rows.saturating_sub(1);
@@ -198,6 +204,14 @@ impl TerminalGrid {
             for x in 0..cols {
                 self.cells[y][x] = emu.get_cell(x, y);
             }
+        }
+
+        // Copy per-row soft-wrap flags so consumers can reassemble logical lines.
+        if self.line_wrapped.len() != rows {
+            self.line_wrapped.resize(rows, false);
+        }
+        for y in 0..rows {
+            self.line_wrapped[y] = emu.line_wrapped(y);
         }
 
         // Copy state
@@ -230,6 +244,13 @@ impl TerminalGrid {
     /// Get a row from the visible grid
     pub fn get_row(&self, row: usize) -> Option<&Vec<Cell>> {
         self.cells.get(row)
+    }
+
+    /// Whether the given visible row soft-wraps into the next row (i.e. its
+    /// content is the continuation of a single logical line). Rows outside the
+    /// grid return `false`.
+    pub fn line_is_wrapped(&self, row: usize) -> bool {
+        self.line_wrapped.get(row).copied().unwrap_or(false)
     }
 }
 

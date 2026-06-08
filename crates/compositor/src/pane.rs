@@ -123,18 +123,39 @@ pub struct SearchMatch {
     pub end_col: usize,
 }
 
-/// A URL match found in the terminal, storing the line index, column range, and the URL text
+/// A URL match found in the terminal.
+///
+/// A URL may span several physical rows when a long line soft-wraps. The match
+/// therefore records both a start and an end line: `(line_index, start_col)` is
+/// the first cell of the URL and `(end_line_index, end_col)` is one past its
+/// last cell. For a URL contained on a single row, `end_line_index == line_index`.
+/// Columns are display columns (cell positions), not byte offsets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UrlMatch {
-    /// Line index (negative values are scrollback lines, counting from -1 as most recent scrollback)
-    /// 0 and positive values are grid lines
+    /// Line index of the first cell (negative values are scrollback lines,
+    /// counting from -1 as most recent scrollback; 0 and positive are grid lines).
     pub line_index: isize,
-    /// Starting column of the match
+    /// Starting column of the match on `line_index`.
     pub start_col: usize,
-    /// Ending column of the match (exclusive)
+    /// Line index of the last cell of the match.
+    pub end_line_index: isize,
+    /// Ending column of the match on `end_line_index` (exclusive).
     pub end_col: usize,
-    /// The actual URL text
+    /// The actual URL text (reassembled across wrapped rows).
     pub url: String,
+}
+
+impl UrlMatch {
+    /// Whether the cell at `(line_index, col)` falls within this URL's span.
+    /// Handles URLs that span multiple wrapped rows.
+    pub fn contains(&self, line_index: isize, col: usize) -> bool {
+        if line_index < self.line_index || line_index > self.end_line_index {
+            return false;
+        }
+        let after_start = line_index > self.line_index || col >= self.start_col;
+        let before_end = line_index < self.end_line_index || col < self.end_col;
+        after_start && before_end
+    }
 }
 
 /// Direction for incremental URL search
@@ -1220,213 +1241,240 @@ impl Pane {
         }
     }
 
+    /// Total number of lines available (scrollback + visible grid).
+    fn total_url_lines(&self) -> usize {
+        let grid = self.terminal_emulator.grid();
+        grid.scrollback_len() + grid.rows
+    }
+
+    /// Whether `abs_line` soft-wraps into `abs_line + 1` (so the two rows are
+    /// part of a single logical line). Scrollback wrap data is not tracked, so
+    /// scrollback rows are treated as un-wrapped.
+    fn line_is_wrapped(&self, abs_line: usize) -> bool {
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
+        if abs_line < scrollback_len {
+            false
+        } else {
+            grid.line_is_wrapped(abs_line - scrollback_len)
+        }
+    }
+
+    /// First absolute line of the logical line that `abs_line` belongs to.
+    fn logical_line_start(&self, mut abs_line: usize) -> usize {
+        while abs_line > 0 && self.line_is_wrapped(abs_line - 1) {
+            abs_line -= 1;
+        }
+        abs_line
+    }
+
+    /// Last absolute line of the logical line beginning at `start`.
+    fn logical_line_end(&self, start: usize) -> usize {
+        let total = self.total_url_lines();
+        let mut end = start;
+        while end + 1 < total && self.line_is_wrapped(end) {
+            end += 1;
+        }
+        end
+    }
+
+    /// Reassemble the text of the logical line beginning at `start`, joining all
+    /// rows it soft-wraps across. Returns the text together with a per-character
+    /// map to the originating `(abs_line, display_col)` so regex matches can be
+    /// translated back into grid coordinates. Wide-character spacer cells are
+    /// skipped, so columns are true display columns rather than byte offsets.
+    fn build_logical_line(&self, start: usize) -> (String, Vec<(usize, usize)>) {
+        let grid = self.terminal_emulator.grid();
+        let scrollback_len = grid.scrollback_len();
+        let total = scrollback_len + grid.rows;
+
+        let mut text = String::new();
+        let mut map: Vec<(usize, usize)> = Vec::new();
+        let mut abs_line = start;
+        loop {
+            let row = if abs_line < scrollback_len {
+                grid.get_scrollback_row(abs_line)
+            } else {
+                grid.get_row(abs_line - scrollback_len)
+            };
+            if let Some(cells) = row {
+                for (col, cell) in cells.iter().enumerate() {
+                    if cell.is_wide_char_spacer {
+                        continue;
+                    }
+                    text.push(cell.character);
+                    map.push((abs_line, col));
+                }
+            }
+            if abs_line + 1 < total && self.line_is_wrapped(abs_line) {
+                abs_line += 1;
+            } else {
+                break;
+            }
+        }
+        (text, map)
+    }
+
+    /// All URLs in the logical line beginning at `start`, in left-to-right
+    /// order. Each entry is `(char_offset_in_logical_line, url_match)`.
+    fn urls_in_logical_line(&self, start: usize) -> Vec<(usize, UrlMatch)> {
+        let (text, map) = self.build_logical_line(start);
+        let mut out = Vec::new();
+        for mat in URL_REGEX.find_iter(&text) {
+            let processed = post_process_url(mat.as_str());
+            if processed.is_empty() {
+                continue;
+            }
+            let char_start = text[..mat.start()].chars().count();
+            let char_len = processed.chars().count();
+            let char_end = char_start + char_len; // exclusive
+            if char_start >= map.len() || char_end == 0 || char_end > map.len() {
+                continue;
+            }
+            let (start_abs, start_col) = map[char_start];
+            let (end_abs, end_col_cell) = map[char_end - 1];
+            out.push((
+                char_start,
+                UrlMatch {
+                    line_index: self.abs_line_to_line_index(start_abs),
+                    start_col,
+                    end_line_index: self.abs_line_to_line_index(end_abs),
+                    end_col: end_col_cell + 1,
+                    url: processed.to_string(),
+                },
+            ));
+        }
+        out
+    }
+
+    /// Character offset of `(abs_line, col)` within the logical line that begins
+    /// at `start` (number of characters lying before that cell).
+    fn cursor_offset_in_logical(&self, start: usize, abs_line: usize, col: usize) -> usize {
+        let (_, map) = self.build_logical_line(start);
+        map.iter()
+            .take_while(|(al, c)| *al < abs_line || (*al == abs_line && *c < col))
+            .count()
+    }
+
+    /// Last URL found in the nearest logical line strictly above the logical
+    /// line beginning at `start`.
+    fn last_url_above(&self, start: usize) -> Option<UrlMatch> {
+        let mut s = start;
+        while s > 0 {
+            let prev_start = self.logical_line_start(s - 1);
+            if let Some((_, um)) = self.urls_in_logical_line(prev_start).into_iter().last() {
+                return Some(um);
+            }
+            if prev_start == 0 {
+                break;
+            }
+            s = prev_start;
+        }
+        None
+    }
+
+    /// First URL found in the nearest logical line strictly below the logical
+    /// line beginning at `start`.
+    fn first_url_below(&self, start: usize) -> Option<UrlMatch> {
+        let total = self.total_url_lines();
+        let mut s = start;
+        loop {
+            let next = self.logical_line_end(s) + 1;
+            if next >= total {
+                return None;
+            }
+            if let Some((_, um)) = self.urls_in_logical_line(next).into_iter().next() {
+                return Some(um);
+            }
+            s = next;
+        }
+    }
+
     /// Find a URL starting from the current cursor position in the given direction.
     /// Returns the first URL found, or None if no URL is found.
     fn find_url_from_cursor(&self, direction: SearchDirection) -> Option<UrlMatch> {
-        let grid = self.terminal_emulator.grid();
-        let scrollback_len = grid.scrollback_len();
-        let total_lines = scrollback_len + grid.rows;
-
-        // Get cursor position (absolute line number and column)
-        let cursor_abs_line = self.vim_engine.cursor.row;
+        let total = self.total_url_lines();
+        if total == 0 {
+            return None;
+        }
+        let cursor_abs_line = self.vim_engine.cursor.row.min(total - 1);
         let cursor_col = self.vim_engine.cursor.col;
+        let cur_start = self.logical_line_start(cursor_abs_line);
+        let cursor_offset = self.cursor_offset_in_logical(cur_start, cursor_abs_line, cursor_col);
 
         match direction {
             SearchDirection::Up => {
-                // Search from cursor position going up (toward older content)
-                // First, search the current line from cursor position backward
-                if let Some(url_match) = self.find_url_in_line_before(cursor_abs_line, cursor_col) {
-                    return Some(url_match);
+                // Closest URL on the current logical line that starts before the cursor.
+                if let Some((_, um)) = self
+                    .urls_in_logical_line(cur_start)
+                    .into_iter()
+                    .rev()
+                    .find(|(off, _)| *off < cursor_offset)
+                {
+                    return Some(um);
                 }
-
-                // Then search previous lines (going up)
-                if cursor_abs_line > 0 {
-                    for abs_line in (0..cursor_abs_line).rev() {
-                        if let Some(url_match) = self.find_last_url_in_line(abs_line) {
-                            return Some(url_match);
-                        }
-                    }
-                }
+                self.last_url_above(cur_start)
             }
             SearchDirection::Down => {
-                // Search from cursor position going down (toward newer content)
-                // First, search the current line from cursor position forward
-                if let Some(url_match) = self.find_url_in_line_after(cursor_abs_line, cursor_col) {
-                    return Some(url_match);
+                // Closest URL on the current logical line at or after the cursor.
+                if let Some((_, um)) = self
+                    .urls_in_logical_line(cur_start)
+                    .into_iter()
+                    .find(|(off, _)| *off >= cursor_offset)
+                {
+                    return Some(um);
                 }
-
-                // Then search subsequent lines (going down)
-                for abs_line in (cursor_abs_line + 1)..total_lines {
-                    if let Some(url_match) = self.find_first_url_in_line(abs_line) {
-                        return Some(url_match);
-                    }
-                }
+                self.first_url_below(cur_start)
             }
         }
-
-        None
     }
 
     /// Find a URL continuing from the current URL position in the given direction.
     /// Used for next_url/prev_url navigation.
     fn find_next_url_from_current(&self, direction: SearchDirection) -> Option<UrlMatch> {
         let current_url = self.url_matches.first()?;
-        let current_abs_line = self.line_index_to_abs_line(current_url.line_index);
-
-        let grid = self.terminal_emulator.grid();
-        let scrollback_len = grid.scrollback_len();
-        let total_lines = scrollback_len + grid.rows;
+        let start_abs = self.line_index_to_abs_line(current_url.line_index);
+        let cur_start = self.logical_line_start(start_abs);
 
         match direction {
             SearchDirection::Up => {
-                // Search for the next URL going up (toward older content)
-                // First check current line for a URL before the current one
-                if let Some(url_match) =
-                    self.find_url_in_line_before(current_abs_line, current_url.start_col)
+                let cur_off =
+                    self.cursor_offset_in_logical(cur_start, start_abs, current_url.start_col);
+                if let Some((_, um)) = self
+                    .urls_in_logical_line(cur_start)
+                    .into_iter()
+                    .rev()
+                    .find(|(off, _)| *off < cur_off)
                 {
-                    return Some(url_match);
+                    return Some(um);
                 }
-
-                // Then search previous lines
-                if current_abs_line > 0 {
-                    for abs_line in (0..current_abs_line).rev() {
-                        if let Some(url_match) = self.find_last_url_in_line(abs_line) {
-                            return Some(url_match);
-                        }
-                    }
-                }
+                self.last_url_above(cur_start)
             }
             SearchDirection::Down => {
-                // Search for the next URL going down (toward newer content)
-                // First check current line for a URL after the current one
-                if let Some(url_match) =
-                    self.find_url_in_line_after(current_abs_line, current_url.end_col)
+                let end_abs = self.line_index_to_abs_line(current_url.end_line_index);
+                let cur_end_off =
+                    self.cursor_offset_in_logical(cur_start, end_abs, current_url.end_col);
+                if let Some((_, um)) = self
+                    .urls_in_logical_line(cur_start)
+                    .into_iter()
+                    .find(|(off, _)| *off >= cur_end_off)
                 {
-                    return Some(url_match);
+                    return Some(um);
                 }
-
-                // Then search subsequent lines
-                for abs_line in (current_abs_line + 1)..total_lines {
-                    if let Some(url_match) = self.find_first_url_in_line(abs_line) {
-                        return Some(url_match);
-                    }
-                }
+                self.first_url_below(cur_start)
             }
         }
-
-        None
     }
 
-    /// Get the line text for an absolute line number
-    fn get_line_text(&self, abs_line: usize) -> Option<String> {
-        let grid = self.terminal_emulator.grid();
-        let scrollback_len = grid.scrollback_len();
-
-        if abs_line < scrollback_len {
-            grid.get_scrollback_row(abs_line)
-                .map(|row| row.iter().map(|c| c.character).collect())
-        } else {
-            let grid_row = abs_line - scrollback_len;
-            grid.get_row(grid_row)
-                .map(|row| row.iter().map(|c| c.character).collect())
-        }
-    }
-
-    /// Find the first URL in a line
+    /// Find the first URL in the logical line containing `abs_line`.
+    /// (Used by tests to inspect a single line's first match.)
+    #[cfg(test)]
     fn find_first_url_in_line(&self, abs_line: usize) -> Option<UrlMatch> {
-        let line_text = self.get_line_text(abs_line)?;
-        let line_index = self.abs_line_to_line_index(abs_line);
-
-        for mat in URL_REGEX.find_iter(&line_text) {
-            let processed_url = post_process_url(mat.as_str());
-            if processed_url.is_empty() {
-                continue;
-            }
-            let processed_end_col = mat.start() + processed_url.len();
-            return Some(UrlMatch {
-                line_index,
-                start_col: mat.start(),
-                end_col: processed_end_col,
-                url: processed_url.to_string(),
-            });
-        }
-
-        None
-    }
-
-    /// Find the last URL in a line
-    fn find_last_url_in_line(&self, abs_line: usize) -> Option<UrlMatch> {
-        let line_text = self.get_line_text(abs_line)?;
-        let line_index = self.abs_line_to_line_index(abs_line);
-
-        let mut last_match: Option<UrlMatch> = None;
-        for mat in URL_REGEX.find_iter(&line_text) {
-            let processed_url = post_process_url(mat.as_str());
-            if processed_url.is_empty() {
-                continue;
-            }
-            let processed_end_col = mat.start() + processed_url.len();
-            last_match = Some(UrlMatch {
-                line_index,
-                start_col: mat.start(),
-                end_col: processed_end_col,
-                url: processed_url.to_string(),
-            });
-        }
-
-        last_match
-    }
-
-    /// Find a URL in a line that starts before the given column
-    fn find_url_in_line_before(&self, abs_line: usize, before_col: usize) -> Option<UrlMatch> {
-        let line_text = self.get_line_text(abs_line)?;
-        let line_index = self.abs_line_to_line_index(abs_line);
-
-        let mut last_match: Option<UrlMatch> = None;
-        for mat in URL_REGEX.find_iter(&line_text) {
-            let processed_url = post_process_url(mat.as_str());
-            if processed_url.is_empty() {
-                continue;
-            }
-            // Only consider URLs that start before the given column
-            if mat.start() >= before_col {
-                break;
-            }
-            let processed_end_col = mat.start() + processed_url.len();
-            last_match = Some(UrlMatch {
-                line_index,
-                start_col: mat.start(),
-                end_col: processed_end_col,
-                url: processed_url.to_string(),
-            });
-        }
-
-        last_match
-    }
-
-    /// Find a URL in a line that starts at or after the given column
-    fn find_url_in_line_after(&self, abs_line: usize, after_col: usize) -> Option<UrlMatch> {
-        let line_text = self.get_line_text(abs_line)?;
-        let line_index = self.abs_line_to_line_index(abs_line);
-
-        for mat in URL_REGEX.find_iter(&line_text) {
-            let processed_url = post_process_url(mat.as_str());
-            if processed_url.is_empty() {
-                continue;
-            }
-            // Only consider URLs that start at or after the given column
-            if mat.start() >= after_col {
-                let processed_end_col = mat.start() + processed_url.len();
-                return Some(UrlMatch {
-                    line_index,
-                    start_col: mat.start(),
-                    end_col: processed_end_col,
-                    url: processed_url.to_string(),
-                });
-            }
-        }
-
-        None
+        let start = self.logical_line_start(abs_line);
+        self.urls_in_logical_line(start)
+            .into_iter()
+            .next()
+            .map(|(_, um)| um)
     }
 
     /// Jump to the next URL (toward bottom/more recent, j key)
@@ -1515,6 +1563,285 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Bug B: wrap-aware line editing (regression coverage).
+    // ------------------------------------------------------------------
+
+    /// Width (in columns) of the prompt currently shown on row 0, derived from
+    /// where the terminal cursor sits immediately after the prompt is printed.
+    fn prompt_cols(pane: &Pane) -> usize {
+        pane.terminal_emulator.grid().cursor_x
+    }
+
+    /// The resting (row, col) the terminal cursor should occupy after `total`
+    /// columns have been printed on a terminal `cols` wide (delayed-wrap rules).
+    fn resting(total: usize, cols: usize) -> (usize, usize) {
+        if total > 0 && total % cols == 0 {
+            (total / cols - 1, cols - 1)
+        } else {
+            (total / cols, total % cols)
+        }
+    }
+
+    fn type_str(pane: &mut Pane, s: &str) {
+        for &b in s.as_bytes() {
+            pane.handle_input(&[b]);
+        }
+    }
+
+    fn joined_screen(pane: &Pane) -> String {
+        let g = pane.terminal_emulator.grid();
+        (0..g.rows)
+            .map(|r| g.get_line_text(r))
+            .collect::<Vec<_>>()
+            .join("")
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn test_wrapped_input_renders_once_and_cursor_at_end() {
+        let cols = 20;
+        let mut pane = Pane::new(cols, 10);
+        let p = prompt_cols(&pane);
+        let input = "abcdefghijklmnopqrstuvwxyz0123"; // 30 chars -> wraps over 3 rows
+        type_str(&mut pane, input);
+
+        let screen = joined_screen(&pane);
+        assert!(
+            screen.ends_with(input),
+            "rendered line should end with the typed input, got {screen:?}"
+        );
+        assert_eq!(
+            screen.matches(input).count(),
+            1,
+            "input must appear exactly once (no runaway re-render): {screen:?}"
+        );
+
+        let g = pane.terminal_emulator.grid();
+        assert_eq!(
+            (g.cursor_y, g.cursor_x),
+            resting(p + input.chars().count(), cols),
+            "cursor should rest just past the last typed character"
+        );
+    }
+
+    #[test]
+    fn test_navigation_across_wrap_boundary() {
+        let cols = 20;
+        let mut pane = Pane::new(cols, 10);
+        let p = prompt_cols(&pane);
+        let input = "abcdefghijklmnopqrstuvwxyz0123";
+        type_str(&mut pane, input);
+
+        // Home (Ctrl+A) returns to the first row, right after the prompt.
+        pane.handle_input(&[0x01]);
+        {
+            let g = pane.terminal_emulator.grid();
+            assert_eq!(
+                (g.cursor_y, g.cursor_x),
+                (0, p),
+                "Ctrl+A should return to the prompt row"
+            );
+        }
+
+        // End (Ctrl+E) returns to the end again.
+        pane.handle_input(&[0x05]);
+        {
+            let g = pane.terminal_emulator.grid();
+            assert_eq!(
+                (g.cursor_y, g.cursor_x),
+                resting(p + input.chars().count(), cols),
+                "Ctrl+E should return to the end of the wrapped input"
+            );
+        }
+
+        // Left arrow three times moves the caret back three cells (crossing a
+        // wrap boundary), not just within the last physical row.
+        for _ in 0..3 {
+            pane.handle_input(&[0x1b, b'[', b'D']);
+        }
+        let g = pane.terminal_emulator.grid();
+        let abs = p + input.chars().count() - 3;
+        assert_eq!(
+            (g.cursor_y, g.cursor_x),
+            (abs / cols, abs % cols),
+            "Left arrow should move back across the wrap boundary"
+        );
+    }
+
+    #[test]
+    fn test_backspace_unwraps_without_filling_screen() {
+        let cols = 20;
+        let mut pane = Pane::new(cols, 10);
+        let p = prompt_cols(&pane);
+        let input = "abcdefghijklmnopqrstuvwxyz0123"; // 3 rows
+        type_str(&mut pane, input);
+
+        // Delete 15 characters; the input should shrink back to fewer rows.
+        for _ in 0..15 {
+            pane.handle_input(&[0x7f]);
+        }
+
+        let remaining = &input[..input.len() - 15];
+        let screen = joined_screen(&pane);
+        assert!(
+            screen.ends_with(remaining),
+            "after backspaces the line should end with the remaining input, got {screen:?}"
+        );
+
+        let g = pane.terminal_emulator.grid();
+        let non_blank = (0..g.rows)
+            .filter(|&r| !g.get_line_text(r).trim().is_empty())
+            .count();
+        assert!(
+            non_blank <= 2,
+            "remaining input should occupy at most 2 rows, found {non_blank}"
+        );
+        assert_eq!(
+            (g.cursor_y, g.cursor_x),
+            resting(p + remaining.chars().count(), cols),
+            "cursor should rest at the end of the shortened input"
+        );
+    }
+
+    #[test]
+    fn test_midline_insert_reflows_wrapped_line() {
+        let cols = 20;
+        let mut pane = Pane::new(cols, 10);
+        let p = prompt_cols(&pane);
+        type_str(&mut pane, "abcdefghijklmnopqrstuvwxyz0123");
+
+        // Move to the very beginning, then insert a character. Everything must
+        // reflow and the caret must end up one cell past the prompt.
+        pane.handle_input(&[0x01]); // Ctrl+A
+        pane.handle_input(&[b'Z']);
+
+        let screen = joined_screen(&pane);
+        assert!(
+            screen.ends_with("Zabcdefghijklmnopqrstuvwxyz0123"),
+            "insertion at start should reflow the whole wrapped line, got {screen:?}"
+        );
+
+        let g = pane.terminal_emulator.grid();
+        let abs = p + 1; // prompt + the single inserted char 'Z'
+        assert_eq!(
+            (g.cursor_y, g.cursor_x),
+            (abs / cols, abs % cols),
+            "caret should sit just after the inserted character"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for known bugs (currently FAILING by design).
+    // ------------------------------------------------------------------
+
+    /// BUG A (reported): When a URL is long enough to wrap onto a second
+    /// terminal row, `Ctrl+B u` only captures the portion on the first row.
+    ///
+    /// Here a 30-character URL is printed onto a 20-column terminal, so it
+    /// occupies row 0 (cols 0..20) and row 1 (cols 0..10). URL mode should
+    /// reconstruct the whole URL, but only the first row is returned.
+    #[test]
+    fn test_url_spanning_wrapped_lines_is_captured_in_full() {
+        let mut pane = Pane::new(20, 10);
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator
+            .process(b"https://example.com/abcdefghij");
+
+        pane.enter_scrollback_mode();
+        pane.enter_url_mode();
+
+        assert_eq!(
+            pane.get_current_url(),
+            Some("https://example.com/abcdefghij"),
+            "a URL that wraps across two rows should be captured in full, \
+             not truncated at the wrap point"
+        );
+    }
+
+    /// BUG A (highlight): the selected URL span must cover *both* rows it wraps
+    /// across, so the highlight is not limited to the first row.
+    #[test]
+    fn test_wrapped_url_highlight_spans_both_rows() {
+        let mut pane = Pane::new(20, 10);
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator
+            .process(b"https://example.com/abcdefghij"); // 30 chars -> rows 0 and 1
+
+        pane.enter_scrollback_mode();
+        pane.enter_url_mode();
+
+        let m = pane
+            .get_url_matches()
+            .first()
+            .expect("a URL match should be present");
+
+        assert_eq!(m.line_index, 0, "URL should start on row 0");
+        assert_eq!(m.end_line_index, 1, "URL should extend onto row 1");
+        // A cell on the first row (within the URL) is part of the match.
+        assert!(m.contains(0, 5), "first-row cell should be highlighted");
+        // A cell on the wrapped second row is also part of the match.
+        assert!(m.contains(1, 5), "second-row cell should be highlighted");
+        // A cell past the end of the URL on the second row is not.
+        assert!(
+            !m.contains(1, 15),
+            "cells beyond the URL must not be highlighted"
+        );
+    }
+
+    /// BUG B (reported): Typing past the wrap point re-emits the entire input
+    /// line on every keystroke without accounting for line wrapping, so the
+    /// screen fills up with copies of the input instead of wrapping once.
+    ///
+    /// On a 20-column terminal, the prompt plus 40 characters should occupy
+    /// only a handful of rows. With the bug, all 10 rows fill up.
+    #[test]
+    fn test_typing_past_wrap_point_does_not_fill_screen() {
+        let mut pane = Pane::new(20, 10);
+        for _ in 0..40 {
+            pane.handle_input(&[b'a']);
+        }
+
+        let grid = pane.terminal_emulator.grid();
+        let non_blank = (0..grid.rows)
+            .filter(|&r| !grid.get_line_text(r).trim().is_empty())
+            .count();
+
+        assert!(
+            non_blank <= 4,
+            "prompt + 40 chars on a 20-col screen should wrap to a few rows, \
+             but {} of {} rows are filled (runaway re-rendering)",
+            non_blank,
+            grid.rows
+        );
+    }
+
+    /// BUG D: URL match columns are computed from UTF-8 byte offsets rather
+    /// than display columns. When a multibyte character precedes the URL on a
+    /// line, the highlighted region is shifted, mis-aligning the highlight.
+    ///
+    /// "café " is 5 display columns but 6 UTF-8 bytes, so the reported
+    /// `start_col` is 6 instead of 5.
+    #[test]
+    fn test_url_match_column_accounts_for_multibyte_prefix() {
+        let mut pane = Pane::new(40, 5);
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator
+            .process("café https://example.com".as_bytes());
+
+        let m = pane
+            .find_first_url_in_line(0)
+            .expect("URL should be found on the line");
+
+        assert_eq!(
+            m.start_col, 5,
+            "start_col should be the display column where the URL begins \
+             (5), not the UTF-8 byte offset ({})",
+            m.start_col
+        );
+    }
 
     #[test]
     fn test_url_regex_basic() {
