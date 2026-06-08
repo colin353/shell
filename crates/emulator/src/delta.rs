@@ -228,14 +228,24 @@ fn emit_cell_batch(
             *current_attrs = cell.attrs.clone();
         }
 
-        // Emit the character
+        // Emit the character. Cells can hold a control character as a marker —
+        // notably a TAB, stored where the cursor passed over (the cell is
+        // visually blank). Emitting it literally would desync the cursor: the
+        // receiving terminal advances a TAB to the next tab stop while we only
+        // count one column, shifting the rest of the batch. Emit a space (the
+        // cell's visual content) so the byte stream matches our width tracking.
+        let glyph = if cell.character.is_control() {
+            ' '
+        } else {
+            cell.character
+        };
         let mut buf = [0u8; 4];
-        let s = cell.character.encode_utf8(&mut buf);
+        let s = glyph.encode_utf8(&mut buf);
         output.extend_from_slice(s.as_bytes());
 
         // Advance cursor by the character's display width
         // Wide characters (CJK, emoji, etc.) are 2 columns wide
-        let char_width = cell.character.width().unwrap_or(1);
+        let char_width = glyph.width().unwrap_or(1);
         *cursor_x += char_width;
 
         // Re-enable autowrap if we disabled it
@@ -461,6 +471,38 @@ mod tests {
 
         // Should contain cursor movement
         assert!(delta.windows(4).any(|w| w == b"\x1b[6;"));
+    }
+
+    #[test]
+    fn test_tab_cell_does_not_shift_following_cells() {
+        use crate::TerminalEmulator;
+
+        // `next` has a TAB: 'a' at col 0, the tab marker at col 1, 'b' at the
+        // next tab stop (col 8).
+        let mut e_next = TerminalEmulator::new(16, 2);
+        e_next.process(b"a\tb");
+        let next = e_next.grid().clone();
+
+        // `prev` is full of content, so EVERY cell differs from `next` — the tab
+        // and the cells after it land in a single delta batch with no blank gap
+        // to resync the cursor. This is the post-vim case that exposed the bug.
+        let mut e = TerminalEmulator::new(16, 2);
+        e.process(b"################");
+        let prev = e.grid().clone();
+
+        let delta = compute_delta(&prev, &next);
+
+        // Apply the delta to a terminal currently in `prev`; it must become `next`.
+        e.process(&delta);
+        let g = e.grid();
+        assert_eq!(g.get_cell(0, 0).character, 'a');
+        assert_eq!(g.get_cell(8, 0).character, 'b', "'b' must stay at the tab stop");
+        for x in 1..8 {
+            assert_eq!(g.get_cell(x, 0).character, ' ', "col {x} should be blank");
+        }
+        for x in 9..16 {
+            assert_eq!(g.get_cell(x, 0).character, ' ', "col {x} should be blank");
+        }
     }
 
     #[test]
