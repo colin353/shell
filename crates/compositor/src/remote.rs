@@ -290,14 +290,19 @@ fn spawn_transport(
 ///
 /// `local`/`self` run this binary directly (override with
 /// `SHELL_DAEMON_STDIO_CMD`, which tests point at the built `shell`). Anything
-/// else is `ssh -T <target> sh -c '<bootstrap>' <args>`, with `SHELL_REMOTE_BIN`
-/// overriding the remote binary name/path.
+/// else is `ssh -T <target> <bootstrap>`, with `SHELL_REMOTE_BIN` overriding the
+/// remote binary name/path.
 ///
 /// The bootstrap sources `~/.shell_env` before exec'ing the binary. That file's
 /// `export NAME=value` lines are POSIX-sourceable, so this puts the binary's dir
 /// on PATH the same way an in-session command sees it — without it, a
 /// non-interactive ssh runs with a bare PATH and can't find `shell` if it lives
 /// somewhere only an rc file (or `~/.shell_env`) adds.
+///
+/// Critically, the whole bootstrap is passed as a *single* ssh argument: ssh
+/// joins multiple command args with spaces and re-parses the result through the
+/// remote login shell, so a multi-arg `sh -c '<script>' …` form would lose its
+/// quoting on the far side. We build one string and shell-quote each `arg`.
 fn build_remote_command(target: &str, args: &[&str]) -> io::Result<Command> {
     if target == "local" || target == "self" {
         let exe = match std::env::var_os("SHELL_DAEMON_STDIO_CMD") {
@@ -309,21 +314,37 @@ fn build_remote_command(target: &str, args: &[&str]) -> io::Result<Command> {
         Ok(c)
     } else {
         let remote_bin = std::env::var("SHELL_REMOTE_BIN").unwrap_or_else(|_| "shell".to_string());
-        // `args` arrive as "$@" ($1..); the `sh -c` arg after the script is $0.
-        let script =
-            format!(r#"[ -f "$HOME/.shell_env" ] && . "$HOME/.shell_env"; exec {remote_bin} "$@""#);
-        let mut c = Command::new("ssh");
-        c.arg("-T")
-            .arg(target)
-            .arg("sh")
-            .arg("-c")
-            .arg(script)
-            .arg("shell-bootstrap");
+        // One string for the remote login shell: source ~/.shell_env (for PATH),
+        // then exec the binary with the (quoted) args. `remote_bin` is left
+        // unquoted so a `~`/`$VAR` in SHELL_REMOTE_BIN still expands remotely.
+        let mut remote_cmd =
+            String::from(r#"[ -f "$HOME/.shell_env" ] && . "$HOME/.shell_env"; exec "#);
+        remote_cmd.push_str(&remote_bin);
         for a in args {
-            c.arg(a);
+            remote_cmd.push(' ');
+            remote_cmd.push_str(&shell_single_quote(a));
         }
+        let mut c = Command::new("ssh");
+        c.arg("-T").arg(target).arg(remote_cmd);
         Ok(c)
     }
+}
+
+/// Quote `s` for a POSIX shell by wrapping it in single quotes (closing,
+/// escaping each embedded `'`, reopening). Safe for arbitrary content — session
+/// names, in particular, are caller-supplied.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str(r"'\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// List persistent sessions on `target` as `(name, age)`. Blocks on the ssh
