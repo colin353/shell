@@ -275,8 +275,14 @@ fn spawn_transport(
 ///
 /// `local`/`self` run this binary directly (override with
 /// `SHELL_DAEMON_STDIO_CMD`, which tests point at the built `shell`). Anything
-/// else is `ssh -T <target> <remote-bin> <args>`, with `SHELL_REMOTE_BIN`
+/// else is `ssh -T <target> sh -c '<bootstrap>' <args>`, with `SHELL_REMOTE_BIN`
 /// overriding the remote binary name/path.
+///
+/// The bootstrap sources `~/.shell_env` before exec'ing the binary. That file's
+/// `export NAME=value` lines are POSIX-sourceable, so this puts the binary's dir
+/// on PATH the same way an in-session command sees it — without it, a
+/// non-interactive ssh runs with a bare PATH and can't find `shell` if it lives
+/// somewhere only an rc file (or `~/.shell_env`) adds.
 fn build_remote_command(target: &str, args: &[&str]) -> io::Result<Command> {
     if target == "local" || target == "self" {
         let exe = match std::env::var_os("SHELL_DAEMON_STDIO_CMD") {
@@ -288,8 +294,16 @@ fn build_remote_command(target: &str, args: &[&str]) -> io::Result<Command> {
         Ok(c)
     } else {
         let remote_bin = std::env::var("SHELL_REMOTE_BIN").unwrap_or_else(|_| "shell".to_string());
+        // `args` arrive as "$@" ($1..); the `sh -c` arg after the script is $0.
+        let script =
+            format!(r#"[ -f "$HOME/.shell_env" ] && . "$HOME/.shell_env"; exec {remote_bin} "$@""#);
         let mut c = Command::new("ssh");
-        c.arg("-T").arg(target).arg(remote_bin);
+        c.arg("-T")
+            .arg(target)
+            .arg("sh")
+            .arg("-c")
+            .arg(script)
+            .arg("shell-bootstrap");
         for a in args {
             c.arg(a);
         }
