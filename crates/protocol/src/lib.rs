@@ -114,6 +114,9 @@ pub enum ClientMsg {
     /// Ask the daemon to repaint the authoritative screen from scratch (used by
     /// `Ctrl-b r` when a pane is remote, to recover from any local drift).
     RequestResync,
+    /// Ask the daemon to terminate this session (used by `sessions kill`). Sent
+    /// as the first frame on a fresh connection instead of `Hello`.
+    Shutdown,
 
     /// Dumb-mode: a raw keystroke stream (daemon owns line editing).
     Input {

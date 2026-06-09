@@ -119,7 +119,7 @@ pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
 
     // Accept connections on a background thread so the main loop never blocks on
     // a slow or stalled client handshake.
-    let (conn_tx, conn_rx) = mpsc::channel::<IncomingClient>();
+    let (conn_tx, conn_rx) = mpsc::channel::<Incoming>();
     {
         let host = host.clone();
         std::thread::spawn(move || accept_loop(listener, conn_tx, host));
@@ -142,36 +142,48 @@ pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
     let mut detached_since: Option<Instant> = None;
 
     let exit = loop {
-        // Attach a newly-arrived client (taking over from any existing one).
-        if let Ok(incoming) = conn_rx.try_recv() {
-            // Drop any previous client first, so the refresh render below is
-            // discarded rather than sent as a stray partial frame.
-            sink.lock().unwrap().detach();
+        // Honor a shutdown request (`sessions kill`): tell any attached pane the
+        // session is over (so it returns to local instead of reconnecting), then
+        // exit.
+        match conn_rx.try_recv() {
+            Ok(Incoming::Shutdown) => {
+                if let Some(c) = control.as_mut() {
+                    let _ = codec::write_frame(c, &ServerMsg::SessionEnded);
+                }
+                break false;
+            }
+            Ok(Incoming::Client(incoming)) => {
+                // Attach a newly-arrived client (taking over from any existing
+                // one). Drop the previous client first, so the refresh render
+                // below is discarded rather than sent as a stray partial frame.
+                sink.lock().unwrap().detach();
 
-            let (cols, rows) = incoming.size;
-            compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
-            // Refresh the composite at the new size (output dropped: no client
-            // attached yet), then snapshot the authoritative screen.
-            compositor.render();
-            let snapshot = compositor.grid_snapshot();
+                let (cols, rows) = incoming.size;
+                compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
+                // Refresh the composite at the new size (output dropped: no
+                // client yet), then snapshot the authoritative screen.
+                compositor.render();
+                let snapshot = compositor.grid_snapshot();
 
-            // Paint the (re)attaching client from server state via GridResync,
-            // then attach the sink so subsequent live deltas stream as Render.
-            let mut stream = incoming.sink_stream;
-            let resync = ServerMsg::GridResync {
-                pane: PaneId(0),
-                grid: snapshot,
-            };
-            if codec::write_frame(&mut stream, &resync).is_ok() {
-                if let Ok(clone) = stream.try_clone() {
-                    control = stream.try_clone().ok();
-                    sink.lock().unwrap().attach(Box::new(clone));
-                    current = Some(incoming.input);
-                    last_name = compositor.active_tab().name.clone();
-                    had_client = true;
-                    detached_since = None;
+                // Paint the (re)attaching client via GridResync, then attach the
+                // sink so subsequent live deltas stream as Render.
+                let mut stream = incoming.sink_stream;
+                let resync = ServerMsg::GridResync {
+                    pane: PaneId(0),
+                    grid: snapshot,
+                };
+                if codec::write_frame(&mut stream, &resync).is_ok() {
+                    if let Ok(clone) = stream.try_clone() {
+                        control = stream.try_clone().ok();
+                        sink.lock().unwrap().attach(Box::new(clone));
+                        current = Some(incoming.input);
+                        last_name = compositor.active_tab().name.clone();
+                        had_client = true;
+                        detached_since = None;
+                    }
                 }
             }
+            Err(_) => {}
         }
 
         // Drain the attached client's input.
@@ -369,6 +381,69 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// `shell sessions [list|kill <name>]`: manage persistent session daemons on
+/// this machine (run remotely via `ssh <host> shell sessions ...`).
+pub fn run_sessions(args: &[String]) -> io::Result<()> {
+    match args.first().map(String::as_str).unwrap_or("list") {
+        "list" | "ls" => sessions_list(),
+        "kill" => {
+            let name = args.get(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "usage: sessions kill <name>")
+            })?;
+            sessions_kill(name)
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unknown sessions command `{other}` (try: list, kill <name>)"),
+        )),
+    }
+}
+
+fn sessions_list() -> io::Result<()> {
+    let mut sessions = crate::common::session_sockets();
+    sessions.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut any = false;
+    for (name, path) in sessions {
+        if UnixStream::connect(&path).is_err() {
+            // Stale socket from a killed/crashed daemon: clean it up.
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        any = true;
+        let age = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| format!("{}s", d.as_secs()))
+            .unwrap_or_else(|| "?".into());
+        // name<TAB>age — human-readable and easy to parse for a picker.
+        println!("{name}\t{age}");
+    }
+    if !any {
+        eprintln!("(no sessions)");
+    }
+    Ok(())
+}
+
+fn sessions_kill(name: &str) -> io::Result<()> {
+    let path = crate::common::session_socket_path(name);
+    match UnixStream::connect(&path) {
+        Ok(mut s) => {
+            let _ = codec::write_frame(&mut s, &ClientMsg::Shutdown);
+            // Give the daemon a moment to exit and remove its own socket.
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = std::fs::remove_file(&path);
+            println!("killed session {name}");
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            eprintln!("no live session `{name}`");
+        }
+    }
+    Ok(())
+}
+
 /// Bridge stdin/stdout to a persistent daemon's Unix socket, spawning the
 /// daemon (detached) if it isn't already running.
 ///
@@ -487,7 +562,13 @@ fn dup_file(fd: RawFd) -> io::Result<File> {
 }
 
 /// Accept connections, handshake each, and forward ready ones to the main loop.
-fn accept_loop(listener: UnixListener, conn_tx: mpsc::Sender<IncomingClient>, host: HostId) {
+/// A handshaked connection: a client attaching, or a request to terminate.
+enum Incoming {
+    Client(IncomingClient),
+    Shutdown,
+}
+
+fn accept_loop(listener: UnixListener, conn_tx: mpsc::Sender<Incoming>, host: HostId) {
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
@@ -504,10 +585,12 @@ fn accept_loop(listener: UnixListener, conn_tx: mpsc::Sender<IncomingClient>, ho
     }
 }
 
-/// Read `Hello`, reply `Welcome`, and spawn the reader thread.
-fn handshake(stream: UnixStream, host: &HostId) -> io::Result<IncomingClient> {
+/// First frame is either `Shutdown` (terminate the session) or `Hello` (attach,
+/// reply `Welcome`, spawn the reader thread).
+fn handshake(stream: UnixStream, host: &HostId) -> io::Result<Incoming> {
     let mut hs = stream.try_clone()?;
     let size = match codec::read_frame::<_, ClientMsg>(&mut hs)? {
+        Some(ClientMsg::Shutdown) => return Ok(Incoming::Shutdown),
         Some(ClientMsg::Hello(Hello { version, size, .. })) => {
             let welcome = ServerMsg::Welcome(Welcome {
                 version: PROTOCOL_VERSION,
@@ -544,11 +627,11 @@ fn handshake(stream: UnixStream, host: &HostId) -> io::Result<IncomingClient> {
         }
     });
 
-    Ok(IncomingClient {
+    Ok(Incoming::Client(IncomingClient {
         input: rx,
         sink_stream: stream,
         size,
-    })
+    }))
 }
 
 /// Best-effort restrict the socket to the owning user (0600).

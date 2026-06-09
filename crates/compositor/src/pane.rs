@@ -421,6 +421,7 @@ impl Pane {
             libshell::ShellAction::Connect {
                 output,
                 target,
+                session,
                 env,
             } => {
                 // Write pending output (e.g. the newline after the command).
@@ -428,7 +429,7 @@ impl Pane {
                     self.terminal_emulator.process(&output);
                 }
 
-                match self.connect_remote(&target, &env) {
+                match self.connect_remote_session(&target, session.as_deref(), &env) {
                     Ok(()) => PaneInputResult::ConnectedRemote(target),
                     Err(e) => {
                         let error_msg = format!("connect error: {}\r\n", e);
@@ -560,10 +561,21 @@ impl Pane {
     /// Reusable by the `connect` builtin and by auto-connected splits in a
     /// remote-owned tab. Returns `Err` if spawning the transport fails.
     pub fn connect_remote(&mut self, target: &str, env: &[(String, String)]) -> std::io::Result<()> {
+        self.connect_remote_session(target, None, env)
+    }
+
+    /// Like [`connect_remote`](Self::connect_remote), but to a named session
+    /// (reattach-or-create). `None` makes a fresh per-pane session.
+    pub fn connect_remote_session(
+        &mut self,
+        target: &str,
+        session: Option<&str>,
+        env: &[(String, String)],
+    ) -> std::io::Result<()> {
         let width = self.terminal_emulator.grid().cols as u16;
         let height = self.terminal_emulator.grid().rows as u16;
         self.subprocess_typeahead.clear();
-        let remote = crate::remote::RemoteProcess::connect(target, width, height, env)?;
+        let remote = crate::remote::RemoteProcess::connect(target, session, width, height, env)?;
         self.remote = Some(remote);
         Ok(())
     }

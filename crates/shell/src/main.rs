@@ -54,6 +54,15 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        // List/kill persistent session daemons (run remotely via
+        // `ssh <host> shell sessions ...`).
+        Some("sessions") => match server::run_sessions(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("shell sessions: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some("-h") | Some("--help") | Some("help") => {
             print_usage();
             ExitCode::SUCCESS
@@ -91,8 +100,11 @@ fn socket_path(args: &[String]) -> PathBuf {
 fn print_usage() {
     eprintln!(
         "usage:\n  \
-         shell                       run the standalone shell\n  \
-         shell daemon [--socket P]   run a headless daemon\n  \
-         shell attach [--socket P]   attach to a daemon"
+         shell                          run the standalone shell\n  \
+         shell daemon [--socket P]      run a headless daemon\n  \
+         shell attach [--socket P]      attach to a daemon\n  \
+         shell bridge --session <id>    bridge stdio to a persistent session\n  \
+         shell sessions [list|kill <n>] manage persistent sessions\n\
+         \nIn the shell: `connect <host> [session]` to open/reattach a remote pane."
     );
 }

@@ -227,6 +227,9 @@ pub enum ShellAction {
         /// Connection target: `user@host`, or `local`/`self` for an in-process
         /// stdio daemon (used by tests and local experimentation).
         target: String,
+        /// Optional session name (reattach-or-create). `None` makes a fresh
+        /// per-pane session.
+        session: Option<String>,
         /// Local environment to forward to the remote (merged remote-wins).
         env: Vec<(String, String)>,
     },
@@ -560,11 +563,13 @@ impl Shell {
                     ShellAction::Connect {
                         output: _,
                         target,
+                        session,
                         env,
                     } => {
                         return ShellAction::Connect {
                             output,
                             target,
+                            session,
                             env,
                         };
                     }
@@ -2359,8 +2364,12 @@ impl Shell {
             }
             "connect" => {
                 let target = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
+                // Optional session name: `connect <host> [name]`. A named session
+                // is reattach-or-create, so it can be recovered after the local
+                // side is lost; with no name a fresh per-pane session is made.
+                let session = parts.get(2).map(|s| s.to_string());
                 if target.is_empty() {
-                    output.extend(b"connect: usage: connect <user@host|local>\r\n");
+                    output.extend(b"connect: usage: connect <user@host|local> [session]\r\n");
                     if let Some(id) = history_id {
                         self.backend.record_exit(&id, 1, 0);
                     }
@@ -2374,6 +2383,7 @@ impl Shell {
                     self.pending_action = Some(ShellAction::Connect {
                         output: vec![],
                         target,
+                        session,
                         env: shell_env_snapshot(),
                     });
                     // Remote takes over; don't show a prompt.

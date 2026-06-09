@@ -50,13 +50,19 @@ pub struct RemoteProcess {
 
 impl RemoteProcess {
     /// Connect to `target`, starting (or reattaching to) a persistent session.
+    /// A named `session` is reattach-or-create; `None` makes a fresh per-pane
+    /// session.
     pub fn connect(
         target: &str,
+        session: Option<&str>,
         cols: u16,
         rows: u16,
         env: &[(String, String)],
     ) -> io::Result<Self> {
-        let session_id = new_session_id();
+        let session_id = session
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(new_session_id);
         let (child, stdin, stdout, stdout_fd) =
             spawn_transport(target, &session_id, cols, rows, env)?;
         Ok(RemoteProcess {
