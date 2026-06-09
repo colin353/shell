@@ -105,6 +105,114 @@ fn mirrored_core() -> (Arc<libshell::ShellCore>, Arc<libshell::HistoryMirror>) {
     (core, mirror)
 }
 
+/// Build and configure the daemon's compositor and its history mirror. Shared by
+/// the socket (`run`) and stdio (`run_stdio`) daemons, which differ only in the
+/// initial size and whether synchronized-output sequences are emitted.
+fn build_compositor(
+    cols: usize,
+    rows: usize,
+    sink: Arc<Mutex<ClientSink>>,
+    synchronized_output: bool,
+    bare: bool,
+) -> io::Result<(compositor::Compositor, Arc<libshell::HistoryMirror>)> {
+    let (core, history_mirror) = mirrored_core();
+    let mut compositor =
+        compositor::Compositor::with_core(cols, rows, sink, core).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("failed to create compositor: {e:?}"),
+            )
+        })?;
+    compositor.set_synchronized_output(synchronized_output);
+    if bare {
+        // No chrome: a persistent/embedded daemon living inside a remote pane.
+        compositor.set_status_bar_visible(false);
+    }
+    Ok((compositor, history_mirror))
+}
+
+/// What a client message asks the daemon loop to do after it's applied.
+enum MsgOutcome {
+    /// Keep serving.
+    Continue,
+    /// The shell exited at top level (e.g. Ctrl-D): tear the session down.
+    Exit,
+    /// The client asked to detach (socket transport); stdio treats this as a
+    /// no-op since its connection is the process's lifetime.
+    Detach,
+}
+
+/// Apply a client message that both transports handle identically (input,
+/// resize, resync, env merge). Transport-specific concerns — detaching the sink,
+/// reacting to a dropped connection — are left to the caller via [`MsgOutcome`].
+fn apply_client_msg(compositor: &mut compositor::Compositor, msg: ClientMsg) -> MsgOutcome {
+    match msg {
+        ClientMsg::Input { bytes } => {
+            if compositor.handle_input(&bytes) {
+                return MsgOutcome::Exit;
+            }
+        }
+        ClientMsg::Resize { cols, rows } => {
+            compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
+            compositor.force_full_redraw();
+        }
+        ClientMsg::RequestResync => compositor.force_full_redraw(),
+        ClientMsg::UpdateLocalEnv { vars } => apply_env_defaults(&vars),
+        ClientMsg::Detach => return MsgOutcome::Detach,
+        // Hello / smart-mode messages: ignored by the dumb daemon.
+        _ => {}
+    }
+    MsgOutcome::Continue
+}
+
+/// Forward per-iteration control-channel traffic to the attached client:
+/// mirrored history entries (for local dual-write) and a window rename.
+///
+/// `last_name` advances even with no client attached, so a rename that happens
+/// while detached is consumed rather than replayed on reattach (the screen is
+/// repainted via `GridResync` regardless). With no client (`out` is `None`) the
+/// mirror is left to accumulate (capped) until one reattaches.
+fn forward_pending(
+    out: Option<&mut dyn Write>,
+    compositor: &compositor::Compositor,
+    history_mirror: &libshell::HistoryMirror,
+    last_name: &mut String,
+) {
+    let name = compositor.active_tab().name.clone();
+    let rename = if name != *last_name {
+        *last_name = name.clone();
+        Some(name)
+    } else {
+        None
+    };
+
+    let Some(out) = out else { return };
+    for entry in history_mirror.drain() {
+        let _ = codec::write_frame(&mut *out, &ServerMsg::HistoryRecorded { entry });
+    }
+    if let Some(name) = rename {
+        let _ = codec::write_frame(out, &ServerMsg::RenameWindow { name });
+    }
+}
+
+/// Spawn a reader thread that decodes `ClientMsg` frames off `reader` and
+/// forwards them over a channel until EOF/error. Shared by the socket handshake
+/// and the stdio daemon.
+fn spawn_reader<R: Read + Send + 'static>(mut reader: R) -> Receiver<ClientMsg> {
+    let (tx, rx) = mpsc::channel::<ClientMsg>();
+    std::thread::spawn(move || loop {
+        match codec::read_frame::<_, ClientMsg>(&mut reader) {
+            Ok(Some(msg)) => {
+                if tx.send(msg).is_err() {
+                    break;
+                }
+            }
+            Ok(None) | Err(_) => break,
+        }
+    });
+    rx
+}
+
 pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
     // Replace any stale socket from a previous (dead) daemon.
     let _ = std::fs::remove_file(socket_path);
@@ -114,19 +222,9 @@ pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
     let host = HostId(hostname());
 
     let sink = Arc::new(Mutex::new(ClientSink::new()));
-    let (core, history_mirror) = mirrored_core();
-    let mut compositor =
-        compositor::Compositor::with_core(80, 24, sink.clone(), core).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("failed to create compositor: {e:?}"),
-            )
-        })?;
-    compositor.set_synchronized_output(true);
-    if bare {
-        // Persistent remote-session daemon embedded in a remote pane: no chrome.
-        compositor.set_status_bar_visible(false);
-    }
+    // Socket daemon renders to a real client terminal, so synchronized output
+    // (BSU/ESU) is wanted here.
+    let (mut compositor, history_mirror) = build_compositor(80, 24, sink.clone(), true, bare)?;
     compositor.render();
 
     // Accept connections on a background thread so the main loop never blocks on
@@ -198,30 +296,26 @@ pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
             Err(_) => {}
         }
 
-        // Drain the attached client's input.
+        // Drain the attached client's input. A dropped connection or an explicit
+        // Detach returns us to the detached state (the daemon keeps running); a
+        // top-level shell exit tears the session down.
         let mut should_exit = false;
         if let Some(rx) = &current {
             loop {
                 match rx.try_recv() {
-                    Ok(ClientMsg::Input { bytes }) => {
-                        if compositor.handle_input(&bytes) {
+                    Ok(msg) => match apply_client_msg(&mut compositor, msg) {
+                        MsgOutcome::Continue => {}
+                        MsgOutcome::Exit => {
                             should_exit = true;
                             break;
                         }
-                    }
-                    Ok(ClientMsg::Resize { cols, rows }) => {
-                        compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
-                        compositor.force_full_redraw();
-                    }
-                    Ok(ClientMsg::RequestResync) => compositor.force_full_redraw(),
-                    Ok(ClientMsg::UpdateLocalEnv { vars }) => apply_env_defaults(&vars),
-                    Ok(ClientMsg::Detach) => {
-                        sink.lock().unwrap().detach();
-                        current = None;
-                        control = None;
-                        break;
-                    }
-                    Ok(_) => {} // Hello / smart-mode messages: ignored by the dumb daemon
+                        MsgOutcome::Detach => {
+                            sink.lock().unwrap().detach();
+                            current = None;
+                            control = None;
+                            break;
+                        }
+                    },
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         // Reader thread ended: the client is gone.
@@ -234,23 +328,14 @@ pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
             }
         }
 
-        // Dual-write: ship commands the shell executed up to the client so they
-        // mirror into its local history. Only while attached; otherwise they
-        // buffer in the mirror (capped) until a client reattaches.
-        if let Some(c) = control.as_mut() {
-            for entry in history_mirror.drain() {
-                let _ = codec::write_frame(&mut *c, &ServerMsg::HistoryRecorded { entry });
-            }
-        }
-
-        // Forward a window rename (e.g. rename-window) to the client's tab.
-        let name = compositor.active_tab().name.clone();
-        if name != last_name {
-            last_name = name.clone();
-            if let Some(c) = control.as_mut() {
-                let _ = codec::write_frame(c, &ServerMsg::RenameWindow { name });
-            }
-        }
+        // Ship mirrored history + any window rename up the control channel (only
+        // while attached; otherwise the mirror buffers, capped, until reattach).
+        forward_pending(
+            control.as_mut().map(|c| c as &mut dyn Write),
+            &compositor,
+            &history_mirror,
+            &mut last_name,
+        );
 
         if should_exit {
             // Tell the client this was a deliberate exit, so it returns to the
@@ -314,23 +399,17 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     )?;
 
     let sink = Arc::new(Mutex::new(ClientSink::new()));
-    let (core, history_mirror) = mirrored_core();
-    let mut compositor = compositor::Compositor::with_core(
+    // Synchronized output is OFF here: this daemon's render bytes are fed into
+    // the *local* pane emulator, not a real terminal, so BSU/ESU sequences would
+    // pollute that emulator's state (the local compositor wraps the real terminal
+    // output itself).
+    let (mut compositor, history_mirror) = build_compositor(
         (cols.max(1)) as usize,
         (rows.max(1)) as usize,
         sink.clone(),
-        core,
-    )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compositor: {e:?}")))?;
-    // Do NOT enable synchronized output here: this daemon's render bytes are fed
-    // into the *local* pane emulator, not a real terminal, so BSU/ESU sequences
-    // would pollute that emulator's state (the local compositor wraps the real
-    // terminal output itself).
-    compositor.set_synchronized_output(false);
-    if bare {
-        // No chrome: this daemon is embedded inside a remote pane.
-        compositor.set_status_bar_visible(false);
-    }
+        false,
+        bare,
+    )?;
 
     // Refresh + snapshot while the sink is detached (output dropped), then paint
     // the client with a GridResync; afterwards live deltas stream as Render.
@@ -346,18 +425,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     sink.lock().unwrap().attach(Box::new(dup_file(1)?));
 
     // Reader thread: stdin -> ClientMsg.
-    let (tx, rx) = mpsc::channel::<ClientMsg>();
-    let mut reader = dup_file(0)?;
-    std::thread::spawn(move || loop {
-        match codec::read_frame::<_, ClientMsg>(&mut reader) {
-            Ok(Some(m)) => {
-                if tx.send(m).is_err() {
-                    break;
-                }
-            }
-            Ok(None) | Err(_) => break,
-        }
-    });
+    let rx = spawn_reader(dup_file(0)?);
 
     let mut last_name = compositor.active_tab().name.clone();
 
@@ -365,19 +433,15 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
         let mut exit = false;
         loop {
             match rx.try_recv() {
-                Ok(ClientMsg::Input { bytes }) => {
-                    if compositor.handle_input(&bytes) {
+                // Detach is meaningless over stdio (the connection is the
+                // process's lifetime), so it's treated like any ignored message.
+                Ok(msg) => match apply_client_msg(&mut compositor, msg) {
+                    MsgOutcome::Continue | MsgOutcome::Detach => {}
+                    MsgOutcome::Exit => {
                         exit = true;
                         break;
                     }
-                }
-                Ok(ClientMsg::Resize { cols, rows }) => {
-                    compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
-                    compositor.force_full_redraw();
-                }
-                Ok(ClientMsg::RequestResync) => compositor.force_full_redraw(),
-                Ok(ClientMsg::UpdateLocalEnv { vars }) => apply_env_defaults(&vars),
-                Ok(_) => {}
+                },
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     exit = true; // stdin closed: transport died
@@ -386,18 +450,14 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
             }
         }
 
-        // Dual-write: ship executed commands up for local history mirroring.
-        for entry in history_mirror.drain() {
-            let _ = codec::write_frame(&mut handshake_out, &ServerMsg::HistoryRecorded { entry });
-        }
-
-        // Propagate window renames (e.g. the `rename-window` builtin run inside
-        // the remote shell) up to the client's local tab.
-        let name = compositor.active_tab().name.clone();
-        if name != last_name {
-            last_name = name.clone();
-            let _ = codec::write_frame(&mut handshake_out, &ServerMsg::RenameWindow { name });
-        }
+        // Ship mirrored history + any window rename up to the client. The stdio
+        // transport is always attached, so `out` is never `None` here.
+        forward_pending(
+            Some(&mut handshake_out),
+            &compositor,
+            &history_mirror,
+            &mut last_name,
+        );
 
         if exit {
             break;
@@ -642,18 +702,7 @@ fn handshake(stream: UnixStream, host: &HostId) -> io::Result<Incoming> {
         }
     };
 
-    let (tx, rx) = mpsc::channel::<ClientMsg>();
-    let mut reader = stream.try_clone()?;
-    std::thread::spawn(move || loop {
-        match codec::read_frame::<_, ClientMsg>(&mut reader) {
-            Ok(Some(msg)) => {
-                if tx.send(msg).is_err() {
-                    break;
-                }
-            }
-            Ok(None) | Err(_) => break, // EOF or error: connection done
-        }
-    });
+    let rx = spawn_reader(stream.try_clone()?);
 
     Ok(Incoming::Client(IncomingClient {
         input: rx,
