@@ -185,6 +185,9 @@ pub struct HistoryMirror {
     pending: Mutex<HashMap<String, PendingMirror>>,
     /// Completed records awaiting the next drain.
     outbox: Mutex<Vec<HistoryRecord>>,
+    /// Set once when the outbox first overflows (so we warn once per episode
+    /// rather than per dropped record); cleared on `drain`.
+    overflow_warned: std::sync::atomic::AtomicBool,
 }
 
 struct PendingMirror {
@@ -222,6 +225,7 @@ impl HistoryMirror {
     /// the receiving client rewrites it to `Remote(host)`.
     pub fn on_exit(&self, id: &str, exit_code: Option<i32>) {
         if let Some(p) = self.pending.lock().unwrap().remove(id) {
+            use std::sync::atomic::Ordering;
             let mut out = self.outbox.lock().unwrap();
             if out.len() < MIRROR_OUTBOX_CAP {
                 out.push(HistoryRecord {
@@ -232,12 +236,22 @@ impl HistoryMirror {
                     cwd: p.cwd,
                     origin: Origin::Local,
                 });
+            } else if !self.overflow_warned.swap(true, Ordering::Relaxed) {
+                // Detached long enough to fill the buffer: drop the oldest-past-cap
+                // records and warn once. They survive in the remote's own on-disk
+                // history, so this only affects local dual-write mirroring.
+                eprintln!(
+                    "shell: history mirror buffer full ({MIRROR_OUTBOX_CAP}); \
+                     dropping mirrored records until a client reattaches"
+                );
             }
         }
     }
 
     /// Take everything buffered so far (for sending to the client).
     pub fn drain(&self) -> Vec<HistoryRecord> {
+        self.overflow_warned
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         std::mem::take(&mut *self.outbox.lock().unwrap())
     }
 }
@@ -1173,12 +1187,16 @@ impl ShellHistory {
             return Ok(());
         }
 
-        let backup_name = format!(
-            "{}.backup.{}",
-            self.log_path.file_name().unwrap().to_string_lossy(),
-            interval_index
-        );
-        let backup_path = self.log_path.parent().unwrap().join(backup_name);
+        // A path with no file name (e.g. "/" or "..") has nothing sensible to
+        // back up; skip rather than panic. Backups are best-effort.
+        let Some(file_name) = self.log_path.file_name() else {
+            return Ok(());
+        };
+        let backup_name = format!("{}.backup.{}", file_name.to_string_lossy(), interval_index);
+        let backup_path = match self.log_path.parent() {
+            Some(parent) => parent.join(backup_name),
+            None => PathBuf::from(backup_name),
+        };
 
         fs::copy(&self.log_path, &backup_path)?;
 
