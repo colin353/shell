@@ -15,9 +15,8 @@
 //! This allows subprocesses (like vim, less, etc.) to work correctly with
 //! full terminal capabilities.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use unicode_width::UnicodeWidthChar;
 
 pub mod backend;
@@ -264,8 +263,6 @@ pub enum ShellAction {
 
 /// Shared shell state that can be accessed across threads
 pub struct ShellCore {
-    #[allow(dead_code)]
-    env: RwLock<HashMap<String, String>>,
     history: ShellHistory,
     /// When set (on a daemon), every command recorded here is also captured for
     /// dual-write up to the client. `None` for an ordinary local shell.
@@ -318,7 +315,6 @@ impl ShellCore {
         }
 
         Ok(ShellCore {
-            env: RwLock::new(HashMap::new()),
             history,
             history_mirror: Mutex::new(None),
         })
