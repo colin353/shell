@@ -234,6 +234,15 @@ pub enum ShellAction {
         env: Vec<(String, String)>,
     },
 
+    /// Shell wants to open the session picker for a host: list its persistent
+    /// sessions and let the user resume or kill one. The compositor fetches the
+    /// list and drives the picker.
+    Reconnect {
+        output: Vec<u8>,
+        target: String,
+        env: Vec<(String, String)>,
+    },
+
     /// Shell wants to exit.
     Exit,
 
@@ -570,6 +579,17 @@ impl Shell {
                             output,
                             target,
                             session,
+                            env,
+                        };
+                    }
+                    ShellAction::Reconnect {
+                        output: _,
+                        target,
+                        env,
+                    } => {
+                        return ShellAction::Reconnect {
+                            output,
+                            target,
                             env,
                         };
                     }
@@ -2387,6 +2407,25 @@ impl Shell {
                         env: shell_env_snapshot(),
                     });
                     // Remote takes over; don't show a prompt.
+                }
+            }
+            "reconnect" => {
+                let target = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
+                if target.is_empty() {
+                    output.extend(b"reconnect: usage: reconnect <user@host|local>\r\n");
+                    if let Some(id) = history_id {
+                        self.backend.record_exit(&id, 1, 0);
+                    }
+                    self.refresh_history_cache();
+                    output.extend(self.get_prompt().as_bytes());
+                } else {
+                    self.current_command_id = history_id.clone();
+                    self.command_start_time = Some(std::time::Instant::now());
+                    self.pending_action = Some(ShellAction::Reconnect {
+                        output: vec![],
+                        target,
+                        env: shell_env_snapshot(),
+                    });
                 }
             }
             _ => {

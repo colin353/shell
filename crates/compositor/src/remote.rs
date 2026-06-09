@@ -242,7 +242,7 @@ fn spawn_transport(
     rows: u16,
     env: &[(String, String)],
 ) -> io::Result<(Child, ChildStdin, ChildStdout, RawFd)> {
-    let mut command = build_command(target, session_id)?;
+    let mut command = build_remote_command(target, &["bridge", "--session", session_id])?;
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -271,32 +271,59 @@ fn spawn_transport(
     Ok((child, stdin, stdout, stdout_fd))
 }
 
-/// Build the bridge transport command for a target+session.
+/// Build a command that runs the `shell` binary on `target` with `args`.
 ///
-/// `local`/`self` run this binary's `bridge` (override the binary with
+/// `local`/`self` run this binary directly (override with
 /// `SHELL_DAEMON_STDIO_CMD`, which tests point at the built `shell`). Anything
-/// else is `ssh -T <target> <remote-bin> bridge --session <id>`, with
-/// `SHELL_REMOTE_BIN` overriding the remote binary name/path.
-fn build_command(target: &str, session_id: &str) -> io::Result<Command> {
+/// else is `ssh -T <target> <remote-bin> <args>`, with `SHELL_REMOTE_BIN`
+/// overriding the remote binary name/path.
+fn build_remote_command(target: &str, args: &[&str]) -> io::Result<Command> {
     if target == "local" || target == "self" {
         let exe = match std::env::var_os("SHELL_DAEMON_STDIO_CMD") {
             Some(path) => std::path::PathBuf::from(path),
             None => std::env::current_exe()?,
         };
         let mut c = Command::new(exe);
-        c.args(["bridge", "--session", session_id]);
+        c.args(args);
         Ok(c)
     } else {
         let remote_bin = std::env::var("SHELL_REMOTE_BIN").unwrap_or_else(|_| "shell".to_string());
         let mut c = Command::new("ssh");
-        c.arg("-T")
-            .arg(target)
-            .arg(remote_bin)
-            .arg("bridge")
-            .arg("--session")
-            .arg(session_id);
+        c.arg("-T").arg(target).arg(remote_bin);
+        for a in args {
+            c.arg(a);
+        }
         Ok(c)
     }
+}
+
+/// List persistent sessions on `target` as `(name, age)`. Blocks on the ssh
+/// round-trip.
+pub fn list_sessions(target: &str) -> io::Result<Vec<(String, String)>> {
+    let mut c = build_remote_command(target, &["sessions", "list"])?;
+    c.stdin(Stdio::null()).stderr(Stdio::null());
+    let out = c.output()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut sessions = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let (name, age) = line.split_once('\t').unwrap_or((line, ""));
+        sessions.push((name.to_string(), age.to_string()));
+    }
+    Ok(sessions)
+}
+
+/// Kill the named session on `target`. Blocks on the ssh round-trip.
+pub fn kill_session(target: &str, name: &str) -> io::Result<()> {
+    let mut c = build_remote_command(target, &["sessions", "kill", name])?;
+    c.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    c.status()?;
+    Ok(())
 }
 
 /// A process-unique session id (host pid + time + counter). Not a secret; the

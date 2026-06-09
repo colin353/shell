@@ -27,6 +27,17 @@ pub enum PaneInputResult {
     ConnectedRemote(String),
 }
 
+/// State for the `reconnect` session picker: choose a persistent session on a
+/// host to resume (or kill). Lives in the pane because resuming/killing is a
+/// compositor operation and the data comes from `ssh <host> shell sessions`.
+pub struct SessionPicker {
+    target: String,
+    env: Vec<(String, String)>,
+    /// `(name, age)` for each live session.
+    sessions: Vec<(String, String)>,
+    selected: usize,
+}
+
 fn is_replayable_typeahead(input: &[u8]) -> bool {
     !input.is_empty()
         && input.iter().all(
@@ -179,6 +190,8 @@ pub struct Pane {
     /// Active remote session (if any) - takes over the pane when connected.
     /// Mutually exclusive with `subprocess`.
     pub remote: Option<crate::remote::RemoteProcess>,
+    /// Active `reconnect` session picker (if any) - intercepts input while open.
+    pub session_picker: Option<SessionPicker>,
     /// Whether we sent SIGINT to the subprocess (to display CTRL+C instead of exit code)
     pub sent_sigint: bool,
     /// Temp file for edit-in-editor feature (CTRL+X CTRL+E)
@@ -225,6 +238,7 @@ impl Pane {
             shell,
             subprocess: None,
             remote: None,
+            session_picker: None,
             sent_sigint: false,
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
@@ -260,6 +274,7 @@ impl Pane {
             shell,
             subprocess: None,
             remote: None,
+            session_picker: None,
             sent_sigint: false,
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
@@ -285,6 +300,9 @@ impl Pane {
     ///
     /// Returns a `PaneInputResult` indicating what action the compositor should take.
     pub fn handle_input(&mut self, input: &[u8]) -> PaneInputResult {
+        if self.session_picker.is_some() {
+            return self.handle_session_picker_input(input);
+        }
         if let Some(remote) = self.remote.as_mut() {
             // Connected to a remote session: forward keystrokes verbatim.
             let _ = remote.write(input);
@@ -442,6 +460,39 @@ impl Pane {
                     }
                 }
             }
+            libshell::ShellAction::Reconnect {
+                output,
+                target,
+                env,
+            } => {
+                if !output.is_empty() {
+                    self.terminal_emulator.process(&output);
+                }
+                match crate::remote::list_sessions(&target) {
+                    Ok(sessions) if !sessions.is_empty() => {
+                        self.session_picker = Some(SessionPicker {
+                            target,
+                            env,
+                            sessions,
+                            selected: 0,
+                        });
+                        self.render_session_picker();
+                    }
+                    Ok(_) => {
+                        let msg = format!("no sessions on {}\r\n", target);
+                        self.terminal_emulator.process(msg.as_bytes());
+                        let prompt = self.shell.subprocess_exited(0);
+                        self.terminal_emulator.process(&prompt);
+                    }
+                    Err(e) => {
+                        let msg = format!("reconnect: {}\r\n", e);
+                        self.terminal_emulator.process(msg.as_bytes());
+                        let prompt = self.shell.subprocess_exited(1);
+                        self.terminal_emulator.process(&prompt);
+                    }
+                }
+                PaneInputResult::Rerender
+            }
             libshell::ShellAction::Exit => {
                 // Shell wants to exit - could close the pane
                 // For now, just show a message
@@ -449,6 +500,124 @@ impl Pane {
                 PaneInputResult::Rerender
             }
         }
+    }
+
+    /// Handle keystrokes while the `reconnect` session picker is open.
+    /// Navigation stays entirely local; only resume/kill/cancel act on the
+    /// chosen session. Cancel uses Esc (the compositor intercepts Ctrl+C).
+    fn handle_session_picker_input(&mut self, input: &[u8]) -> PaneInputResult {
+        enum Key {
+            Up,
+            Down,
+            Resume,
+            Kill,
+            Cancel,
+            Ignore,
+        }
+        let key = match input {
+            b"\x1b[A" | b"\x1b[OA" | b"k" => Key::Up,
+            b"\x1b[B" | b"\x1b[OB" | b"j" => Key::Down,
+            b"\r" | b"\n" => Key::Resume,
+            b"d" => Key::Kill,
+            b"\x1b" | b"q" => Key::Cancel,
+            _ => Key::Ignore,
+        };
+
+        let picker = match self.session_picker.as_mut() {
+            Some(p) => p,
+            None => return PaneInputResult::None,
+        };
+
+        match key {
+            Key::Up => {
+                picker.selected = picker.selected.saturating_sub(1);
+                self.render_session_picker();
+                PaneInputResult::Rerender
+            }
+            Key::Down => {
+                if picker.selected + 1 < picker.sessions.len() {
+                    picker.selected += 1;
+                }
+                self.render_session_picker();
+                PaneInputResult::Rerender
+            }
+            Key::Resume => {
+                let target = picker.target.clone();
+                let env = picker.env.clone();
+                let name = picker.sessions[picker.selected].0.clone();
+                self.session_picker = None;
+                // Wipe the picker; the remote repaints authoritatively via
+                // GridResync once the link is up.
+                self.terminal_emulator.process(b"\x1b[2J\x1b[H\x1b[?25h");
+                match self.connect_remote_session(&target, Some(&name), &env) {
+                    Ok(()) => PaneInputResult::ConnectedRemote(target),
+                    Err(e) => {
+                        let msg = format!("connect error: {}\r\n", e);
+                        self.terminal_emulator.process(msg.as_bytes());
+                        let prompt = self.shell.subprocess_exited(1);
+                        self.terminal_emulator.process(&prompt);
+                        PaneInputResult::Rerender
+                    }
+                }
+            }
+            Key::Kill => {
+                let target = picker.target.clone();
+                let name = picker.sessions[picker.selected].0.clone();
+                let _ = crate::remote::kill_session(&target, &name);
+                picker.sessions.remove(picker.selected);
+                if picker.selected >= picker.sessions.len() {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+                if picker.sessions.is_empty() {
+                    self.close_session_picker();
+                } else {
+                    self.render_session_picker();
+                }
+                PaneInputResult::Rerender
+            }
+            Key::Cancel => {
+                self.close_session_picker();
+                PaneInputResult::Rerender
+            }
+            Key::Ignore => PaneInputResult::None,
+        }
+    }
+
+    /// Dismiss the picker and return the pane to its local shell prompt by
+    /// completing the tracked `reconnect` command.
+    fn close_session_picker(&mut self) {
+        self.session_picker = None;
+        self.terminal_emulator.process(b"\x1b[2J\x1b[H\x1b[?25h");
+        let prompt = self.shell.subprocess_exited(0);
+        self.terminal_emulator.process(&prompt);
+    }
+
+    /// Draw the session picker over the pane's screen: a title, the list of
+    /// resumable sessions (selected one in inverse video), and key hints.
+    fn render_session_picker(&mut self) {
+        let Some(picker) = self.session_picker.as_ref() else {
+            return;
+        };
+        let mut out = String::new();
+        // Clear, home, and hide the cursor while the picker owns the screen.
+        out.push_str("\x1b[2J\x1b[H\x1b[?25l");
+        out.push_str(&format!("\x1b[1mSessions on {}\x1b[0m\r\n\r\n", picker.target));
+        for (i, (name, age)) in picker.sessions.iter().enumerate() {
+            let age = if age.is_empty() {
+                String::new()
+            } else {
+                format!("  ({})", age)
+            };
+            if i == picker.selected {
+                out.push_str(&format!("\x1b[7m  {}{}  \x1b[0m\r\n", name, age));
+            } else {
+                out.push_str(&format!("  {}{}\r\n", name, age));
+            }
+        }
+        out.push_str(
+            "\r\n\x1b[2m\u{2191}/\u{2193} or j/k: select   \u{23ce}: resume   d: kill   Esc: cancel\x1b[0m",
+        );
+        self.terminal_emulator.process(out.as_bytes());
     }
 
     /// Read available data from the subprocess and process it through the emulator.

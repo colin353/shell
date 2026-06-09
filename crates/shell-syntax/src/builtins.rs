@@ -80,6 +80,7 @@ pub const BUILTINS: &[&str] = &[
     "rename-window",
     "reload-env",
     "connect",
+    "reconnect",
 ];
 
 /// Check if a command name is a shell builtin.
@@ -100,6 +101,7 @@ mod tests {
         assert!(is_builtin("reload-env"));
         assert!(is_builtin("rename-window"));
         assert!(is_builtin("connect"));
+        assert!(is_builtin("reconnect"));
     }
 
     #[test]
