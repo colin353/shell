@@ -64,7 +64,7 @@ fn named_session_reattaches_and_can_be_killed() {
 
     // Lose the pane (drop the transport; the detached daemon survives), then
     // reattach by name — the session, including its history, must come back.
-    comp.get_focused_pane_mut().unwrap().remote = None;
+    comp.get_focused_pane_mut().unwrap().take_remote();
     std::thread::sleep(Duration::from_millis(300));
     comp.get_focused_pane_mut()
         .unwrap()
@@ -92,7 +92,7 @@ fn named_session_reattaches_and_can_be_killed() {
     );
 
     // Kill it and confirm it's gone.
-    comp.get_focused_pane_mut().unwrap().remote = None;
+    comp.get_focused_pane_mut().unwrap().take_remote();
     std::thread::sleep(Duration::from_millis(200));
     let path = shell::common::session_socket_path(&name);
     if let Ok(mut s) = UnixStream::connect(&path) {

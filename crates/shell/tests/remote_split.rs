@@ -23,7 +23,7 @@ fn split_in_remote_tab_auto_connects() {
     // A fresh tab is local: a split stays local.
     comp.split_focused_pane(SplitDirection::Vertical).unwrap();
     assert!(
-        comp.get_focused_pane_mut().unwrap().remote.is_none(),
+        comp.get_focused_pane_mut().unwrap().remote().is_none(),
         "split in a local tab must not connect anywhere"
     );
 
@@ -31,7 +31,7 @@ fn split_in_remote_tab_auto_connects() {
     comp.active_tab_mut().remote_host = Some("local".to_string());
     comp.split_focused_pane(SplitDirection::Horizontal).unwrap();
     assert!(
-        comp.get_focused_pane_mut().unwrap().remote.is_some(),
+        comp.get_focused_pane_mut().unwrap().remote().is_some(),
         "split in a remote-owned tab should auto-connect the new pane"
     );
 }

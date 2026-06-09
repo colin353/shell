@@ -181,15 +181,28 @@ enum SearchDirection {
     Down,
 }
 
+/// The foreground process that has taken over a pane, if any.
+///
+/// A pane's local `shell` is always present but lies dormant while this is
+/// `Subprocess` or `Remote`. Modeling the two takeovers as one enum makes their
+/// mutual exclusion a type-level invariant instead of a "exactly one of these
+/// two `Option`s is `Some`" convention that every call site has to respect.
+pub enum PaneProcess {
+    /// No takeover — the local shell drives the pane.
+    None,
+    /// A local child process (a command or editor) owns the PTY.
+    Subprocess(pty::PtyProcess),
+    /// A remote session owns the pane.
+    Remote(crate::remote::RemoteProcess),
+}
+
 pub struct Pane {
     pub terminal_emulator: emulator::TerminalEmulator,
     /// The embedded shell instance
     pub shell: libshell::Shell,
-    /// Currently running subprocess (if any) - takes over PTY when active
-    pub subprocess: Option<pty::PtyProcess>,
-    /// Active remote session (if any) - takes over the pane when connected.
-    /// Mutually exclusive with `subprocess`.
-    pub remote: Option<crate::remote::RemoteProcess>,
+    /// Foreground process that has taken over the pane (a local subprocess or a
+    /// remote session), or `None` when the local shell is in control.
+    pub process: PaneProcess,
     /// Active `reconnect` session picker (if any) - intercepts input while open.
     pub session_picker: Option<SessionPicker>,
     /// Whether we sent SIGINT to the subprocess (to display CTRL+C instead of exit code)
@@ -254,8 +267,7 @@ impl Pane {
         Pane {
             terminal_emulator,
             shell,
-            subprocess: None,
-            remote: None,
+            process: PaneProcess::None,
             session_picker: None,
             sent_sigint: false,
             edit_temp_file: None,
@@ -290,8 +302,7 @@ impl Pane {
         Pane {
             terminal_emulator,
             shell,
-            subprocess: None,
-            remote: None,
+            process: PaneProcess::None,
             session_picker: None,
             sent_sigint: false,
             edit_temp_file: None,
@@ -321,18 +332,17 @@ impl Pane {
         if self.session_picker.is_some() {
             return self.handle_session_picker_input(input);
         }
-        if let Some(remote) = self.remote.as_mut() {
+        if let PaneProcess::Remote(remote) = &mut self.process {
             // Connected to a remote session: forward keystrokes verbatim.
             let _ = remote.write(input);
             return PaneInputResult::None;
         }
-        if self.subprocess.is_some() {
+        if matches!(self.process, PaneProcess::Subprocess(_)) {
             self.record_subprocess_typeahead(input);
-            let Some(ref mut proc) = self.subprocess else {
-                return PaneInputResult::None;
-            };
             // Subprocess is active - send input directly to it
-            let _ = proc.write(input);
+            if let PaneProcess::Subprocess(proc) = &mut self.process {
+                let _ = proc.write(input);
+            }
             // Subprocess output will trigger rerender via poll
             PaneInputResult::None
         } else {
@@ -347,8 +357,7 @@ impl Pane {
         }
 
         let should_buffer = self
-            .subprocess
-            .as_ref()
+            .subprocess()
             .map(|proc| proc.is_canonical_echo_mode())
             .unwrap_or(false)
             && is_replayable_typeahead(input);
@@ -397,7 +406,7 @@ impl Pane {
                 self.subprocess_typeahead.clear();
                 match pty::PtyProcess::spawn_with_env(&full_command, width, height, &env) {
                     Ok(proc) => {
-                        self.subprocess = Some(proc);
+                        self.process = PaneProcess::Subprocess(proc);
                     }
                     Err(e) => {
                         // Failed to spawn - show error and prompt
@@ -438,7 +447,7 @@ impl Pane {
                 let env = libshell::shell_env_snapshot();
                 match pty::PtyProcess::spawn_with_env(&full_command, width, height, &env) {
                     Ok(proc) => {
-                        self.subprocess = Some(proc);
+                        self.process = PaneProcess::Subprocess(proc);
                         // Store the temp file path so we can read it when editor exits
                         self.edit_temp_file = Some(temp_file);
                     }
@@ -653,11 +662,11 @@ impl Pane {
     }
 
     fn read_and_process_internal(&mut self, debug: bool) {
-        if self.remote.is_some() {
+        if matches!(self.process, PaneProcess::Remote(_)) {
             self.read_and_process_remote();
             return;
         }
-        if let Some(ref proc) = self.subprocess {
+        if let PaneProcess::Subprocess(proc) = &self.process {
             // Read all available data from subprocess
             loop {
                 match proc.read(&mut self.read_buffer) {
@@ -677,7 +686,7 @@ impl Pane {
                         // Handle any responses from the terminal (e.g., cursor position queries)
                         let responses = self.terminal_emulator.drain_responses();
                         for response in responses {
-                            if let Some(ref proc) = self.subprocess {
+                            if let PaneProcess::Subprocess(proc) = &self.process {
                                 let _ = proc.write(&response);
                             }
                         }
@@ -689,7 +698,7 @@ impl Pane {
         }
 
         // Check if subprocess has exited
-        if let Some(ref proc) = self.subprocess {
+        if let PaneProcess::Subprocess(proc) = &self.process {
             if let Some(exit_code) = proc.try_wait() {
                 let should_replay_typeahead =
                     self.edit_temp_file.is_none() && !(self.sent_sigint && exit_code == 130);
@@ -715,7 +724,7 @@ impl Pane {
                 }
 
                 // Subprocess exited - clean up
-                drop(self.subprocess.take());
+                self.process = PaneProcess::None;
 
                 // Reset cursor visibility - subprocess may have hidden it
                 self.terminal_emulator.grid_mut().cursor_visible = true;
@@ -737,7 +746,7 @@ impl Pane {
                     self.terminal_emulator.process(&output);
                 }
 
-                if !typeahead.is_empty() && self.subprocess.is_none() {
+                if !typeahead.is_empty() && self.subprocess().is_none() {
                     let _ = self.handle_shell_input(&typeahead);
                 }
             }
@@ -763,30 +772,30 @@ impl Pane {
         let height = self.terminal_emulator.grid().rows as u16;
         self.subprocess_typeahead.clear();
         let remote = crate::remote::RemoteProcess::connect(target, session, width, height, env)?;
-        self.remote = Some(remote);
+        self.process = PaneProcess::Remote(remote);
         Ok(())
     }
 
     /// If this pane is remote, ask it to repaint from the authoritative remote
     /// screen (used by `Ctrl-b r`).
     pub fn request_remote_resync(&mut self) {
-        if let Some(remote) = self.remote.as_mut() {
+        if let Some(remote) = self.remote_mut() {
             let _ = remote.request_resync();
         }
     }
 
     /// Take a window-rename pushed up by the remote session, if any.
     pub fn take_remote_title(&mut self) -> Option<String> {
-        self.remote.as_mut().and_then(|r| r.take_title())
+        self.remote_mut().and_then(|r| r.take_title())
     }
 
     /// Drain output from the active remote session into the emulator, and on
     /// transport exit return the pane to its local shell.
     fn read_and_process_remote(&mut self) {
         loop {
-            let result = match self.remote.as_mut() {
-                Some(remote) => remote.read(&mut self.read_buffer),
-                None => break,
+            let result = match &mut self.process {
+                PaneProcess::Remote(remote) => remote.read(&mut self.read_buffer),
+                _ => break,
             };
             match result {
                 Ok(Some(0)) => break, // EOF
@@ -794,7 +803,7 @@ impl Pane {
                     self.terminal_emulator.process(&self.read_buffer[..n]);
                     let responses = self.terminal_emulator.drain_responses();
                     if !responses.is_empty() {
-                        if let Some(remote) = self.remote.as_mut() {
+                        if let PaneProcess::Remote(remote) = &mut self.process {
                             for response in responses {
                                 let _ = remote.write(&response);
                             }
@@ -810,12 +819,10 @@ impl Pane {
         // tagged with the remote host. Done before any teardown so the final
         // command (whose exit may arrive with SessionEnded) isn't lost.
         let host = self
-            .remote
-            .as_ref()
+            .remote()
             .map(|r| protocol::HostId(r.target().to_string()));
         let records = self
-            .remote
-            .as_mut()
+            .remote_mut()
             .map(|r| r.take_history_records())
             .unwrap_or_default();
         if let Some(host) = host {
@@ -825,8 +832,8 @@ impl Pane {
         }
 
         // If the transport ended, tear down and return to the local shell.
-        if let Some(exit_code) = self.remote.as_mut().and_then(|r| r.try_wait()) {
-            self.remote = None;
+        if let Some(exit_code) = self.remote_mut().and_then(|r| r.try_wait()) {
+            self.process = PaneProcess::None;
             self.terminal_emulator.grid_mut().cursor_visible = true;
             let output = self.shell.subprocess_exited(exit_code);
             self.terminal_emulator.process(&output);
@@ -839,13 +846,63 @@ impl Pane {
         !self.shell.should_exit()
     }
 
+    /// The active local subprocess, if one currently owns the pane.
+    pub fn subprocess(&self) -> Option<&pty::PtyProcess> {
+        match &self.process {
+            PaneProcess::Subprocess(proc) => Some(proc),
+            _ => None,
+        }
+    }
+
+    /// The active remote session, if one currently owns the pane.
+    pub fn remote(&self) -> Option<&crate::remote::RemoteProcess> {
+        match &self.process {
+            PaneProcess::Remote(remote) => Some(remote),
+            _ => None,
+        }
+    }
+
+    fn remote_mut(&mut self) -> Option<&mut crate::remote::RemoteProcess> {
+        match &mut self.process {
+            PaneProcess::Remote(remote) => Some(remote),
+            _ => None,
+        }
+    }
+
+    /// Drop the active remote session (if any), returning the pane to its local
+    /// shell. Returns the session that was detached, mainly so tests can simulate
+    /// a dropped transport.
+    pub fn take_remote(&mut self) -> Option<crate::remote::RemoteProcess> {
+        match std::mem::replace(&mut self.process, PaneProcess::None) {
+            PaneProcess::Remote(remote) => Some(remote),
+            other => {
+                self.process = other;
+                None
+            }
+        }
+    }
+
+    /// Resize the foreground process (subprocess or remote) to match the pane's
+    /// new dimensions. No-op when the local shell is in control.
+    pub fn resize_backend(&mut self, cols: u16, rows: u16) {
+        match &mut self.process {
+            PaneProcess::Subprocess(proc) => {
+                let _ = proc.resize(cols, rows);
+            }
+            PaneProcess::Remote(remote) => {
+                let _ = remote.resize(cols, rows);
+            }
+            PaneProcess::None => {}
+        }
+    }
+
     /// Check if a subprocess is currently running.
     pub fn has_subprocess(&self) -> bool {
-        self.subprocess.is_some()
+        matches!(self.process, PaneProcess::Subprocess(_))
     }
 
     pub fn mouse_mode(&self) -> emulator::MouseMode {
-        if self.subprocess.is_some() {
+        if self.has_subprocess() {
             self.terminal_emulator.mouse_mode()
         } else {
             emulator::MouseMode::default()
@@ -858,32 +915,35 @@ impl Pane {
     /// - `KilledSubprocess`: Forwarded CTRL+C to the running subprocess
     /// - `ClearedInput`: Cleared the shell input buffer (or showed ^C on empty line)
     pub fn handle_ctrl_c(&mut self) -> CtrlCResult {
-        if let Some(remote) = self.remote.as_mut() {
-            // Remote session owns the screen (it may be in a history picker, an
-            // app, or at a prompt). Forward the interrupt and let the remote
-            // decide; never run the local shell handler, which would paint a
-            // local prompt over the remote content.
-            let _ = remote.write(&[0x03]);
-            return CtrlCResult::ClearedInput;
-        }
-        if let Some(ref mut proc) = self.subprocess {
-            // CTRL+C - forward to subprocess via PTY
-            // The TTY driver will handle SIGINT generation based on terminal settings
-            // This allows programs that intercept CTRL+C to handle it themselves
-            let _ = proc.write(&[0x03]);
-            self.sent_sigint = true;
-            CtrlCResult::KilledSubprocess
-        } else {
-            // Shell is active - clear input or show ^C
-            if let Some(output) = self.shell.handle_ctrl_c() {
-                self.terminal_emulator.process(&output);
-            } else {
-                // Input was already empty - just show ^C and new prompt
-                let prompt = self.shell.get_prompt();
-                let output = format!("^C\r\n{}", prompt);
-                self.terminal_emulator.process(output.as_bytes());
+        match &mut self.process {
+            PaneProcess::Remote(remote) => {
+                // Remote session owns the screen (it may be in a history picker,
+                // an app, or at a prompt). Forward the interrupt and let the
+                // remote decide; never run the local shell handler, which would
+                // paint a local prompt over the remote content.
+                let _ = remote.write(&[0x03]);
+                CtrlCResult::ClearedInput
             }
-            CtrlCResult::ClearedInput
+            PaneProcess::Subprocess(proc) => {
+                // CTRL+C - forward to subprocess via PTY
+                // The TTY driver will handle SIGINT generation based on terminal settings
+                // This allows programs that intercept CTRL+C to handle it themselves
+                let _ = proc.write(&[0x03]);
+                self.sent_sigint = true;
+                CtrlCResult::KilledSubprocess
+            }
+            PaneProcess::None => {
+                // Shell is active - clear input or show ^C
+                if let Some(output) = self.shell.handle_ctrl_c() {
+                    self.terminal_emulator.process(&output);
+                } else {
+                    // Input was already empty - just show ^C and new prompt
+                    let prompt = self.shell.get_prompt();
+                    let output = format!("^C\r\n{}", prompt);
+                    self.terminal_emulator.process(output.as_bytes());
+                }
+                CtrlCResult::ClearedInput
+            }
         }
     }
 
@@ -893,23 +953,27 @@ impl Pane {
     /// - `KilledSubprocess`: Sent EOF to the running subprocess
     /// - `ClosePane`: Input was empty, caller should close this pane
     pub fn handle_ctrl_d(&mut self) -> CtrlCResult {
-        if let Some(remote) = self.remote.as_mut() {
-            // Forward EOF to the remote (e.g. exits the remote shell, which then
-            // returns this pane to the local shell). Don't close the pane here.
-            let _ = remote.write(&[0x04]);
-            return CtrlCResult::ClearedInput;
-        }
-        if let Some(ref proc) = self.subprocess {
-            // CTRL+D - send EOF to subprocess
-            let _ = proc.write(&[0x04]);
-            CtrlCResult::KilledSubprocess
-        } else {
-            // Shell is active - close pane if input is empty
-            if self.shell.input_is_empty() {
-                CtrlCResult::ClosePane
-            } else {
-                // Input is not empty - do nothing (or could delete char under cursor)
+        match &mut self.process {
+            PaneProcess::Remote(remote) => {
+                // Forward EOF to the remote (e.g. exits the remote shell, which
+                // then returns this pane to the local shell). Don't close the
+                // pane here.
+                let _ = remote.write(&[0x04]);
                 CtrlCResult::ClearedInput
+            }
+            PaneProcess::Subprocess(proc) => {
+                // CTRL+D - send EOF to subprocess
+                let _ = proc.write(&[0x04]);
+                CtrlCResult::KilledSubprocess
+            }
+            PaneProcess::None => {
+                // Shell is active - close pane if input is empty
+                if self.shell.input_is_empty() {
+                    CtrlCResult::ClosePane
+                } else {
+                    // Input is not empty - do nothing (or could delete char under cursor)
+                    CtrlCResult::ClearedInput
+                }
             }
         }
     }
@@ -918,10 +982,11 @@ impl Pane {
     /// session or local subprocess), if any.
     pub fn subprocess_fd(&self) -> Option<std::os::fd::RawFd> {
         use std::os::fd::AsRawFd;
-        if let Some(remote) = self.remote.as_ref() {
-            return Some(remote.as_raw_fd());
+        match &self.process {
+            PaneProcess::Remote(remote) => Some(remote.as_raw_fd()),
+            PaneProcess::Subprocess(proc) => Some(proc.as_raw_fd()),
+            PaneProcess::None => None,
         }
-        self.subprocess.as_ref().map(|p| p.as_raw_fd())
     }
 
     /// Enter scrollback mode

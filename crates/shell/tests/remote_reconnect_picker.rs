@@ -61,7 +61,7 @@ fn reconnect_picker_lists_and_resumes() {
     );
 
     // Lose the pane, then drive the `reconnect` builtin to open the picker.
-    comp.get_focused_pane_mut().unwrap().remote = None;
+    comp.get_focused_pane_mut().unwrap().take_remote();
     std::thread::sleep(Duration::from_millis(300));
     comp.get_focused_pane_mut()
         .unwrap()
@@ -98,7 +98,7 @@ fn reconnect_picker_lists_and_resumes() {
     );
 
     // Clean up the detached daemon.
-    comp.get_focused_pane_mut().unwrap().remote = None;
+    comp.get_focused_pane_mut().unwrap().take_remote();
     std::thread::sleep(Duration::from_millis(200));
     let path = shell::common::session_socket_path(&name);
     if let Ok(mut s) = UnixStream::connect(&path) {

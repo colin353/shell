@@ -70,8 +70,7 @@ fn remote_pane_auto_reconnects_with_preserved_state() {
     let pid = comp
         .get_focused_pane_mut()
         .unwrap()
-        .remote
-        .as_ref()
+        .remote()
         .unwrap()
         .transport_pid();
     unsafe {
@@ -107,5 +106,5 @@ fn remote_pane_auto_reconnects_with_preserved_state() {
         final_screen.contains("RECONNECT_MARKER"),
         "session state should survive the reconnect; got:\n{final_screen}"
     );
-    assert!(comp.get_focused_pane_mut().unwrap().remote.is_some());
+    assert!(comp.get_focused_pane_mut().unwrap().remote().is_some());
 }

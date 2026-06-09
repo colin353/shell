@@ -340,12 +340,7 @@ impl PaneCell {
                 // Resize the terminal emulator to match the cell dimensions
                 pane.terminal_emulator.resize(self.width, self.height);
                 pane.shell.resize(self.width as u16, self.height as u16);
-                if let Some(ref proc) = pane.subprocess {
-                    let _ = proc.resize(self.width as u16, self.height as u16);
-                }
-                if let Some(remote) = pane.remote.as_mut() {
-                    let _ = remote.resize(self.width as u16, self.height as u16);
-                }
+                pane.resize_backend(self.width as u16, self.height as u16);
             }
             PaneCellInner::VSplit(cells) => {
                 // Vertical split - divide width evenly, accounting for borders
@@ -1021,12 +1016,7 @@ impl PaneCell {
 
                 // Create the existing pane cell with updated dimensions
                 pane.terminal_emulator.resize(old_width, old_height);
-                if let Some(ref proc) = pane.subprocess {
-                    let _ = proc.resize(old_width as u16, old_height as u16);
-                }
-                if let Some(remote) = pane.remote.as_mut() {
-                    let _ = remote.resize(old_width as u16, old_height as u16);
-                }
+                pane.resize_backend(old_width as u16, old_height as u16);
                 pane.shell.resize(old_width as u16, old_height as u16);
 
                 // Create a new pane with a new shell, starting in the same
@@ -1551,13 +1541,8 @@ impl PaneCell {
                 pane.terminal_emulator.resize(width, height);
                 // Resize the shell
                 pane.shell.resize(width as u16, height as u16);
-                // Resize the subprocess PTY if present
-                if let Some(ref proc) = pane.subprocess {
-                    let _ = proc.resize(width as u16, height as u16);
-                }
-                if let Some(remote) = pane.remote.as_mut() {
-                    let _ = remote.resize(width as u16, height as u16);
-                }
+                // Resize the foreground process (subprocess or remote) if present
+                pane.resize_backend(width as u16, height as u16);
             }
             PaneCellInner::VSplit(cells) => {
                 // Distribute width evenly among children, reserving 1 column for each border
@@ -1621,12 +1606,7 @@ impl PaneCell {
                 if self.focus {
                     pane.terminal_emulator.resize(width, height);
                     pane.shell.resize(width as u16, height as u16);
-                    if let Some(ref proc) = pane.subprocess {
-                        let _ = proc.resize(width as u16, height as u16);
-                    }
-                    if let Some(remote) = pane.remote.as_mut() {
-                        let _ = remote.resize(width as u16, height as u16);
-                    }
+                    pane.resize_backend(width as u16, height as u16);
                 }
             }
             PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {

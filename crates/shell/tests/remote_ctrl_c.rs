@@ -48,5 +48,5 @@ fn ctrl_c_in_remote_pane_is_not_handled_by_local_shell() {
         "Ctrl+C in a remote pane must be forwarded, not painted by the local shell"
     );
     // And the pane is still remote-connected (Ctrl+C didn't tear it down locally).
-    assert!(comp.get_focused_pane_mut().unwrap().remote.is_some());
+    assert!(comp.get_focused_pane_mut().unwrap().remote().is_some());
 }
