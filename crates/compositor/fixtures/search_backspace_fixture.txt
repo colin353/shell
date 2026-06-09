@@ -1,24 +1,24 @@
-Line 50: Donec enim diam vulputate ut pharetra sit amet aliquam id diam maecenas
- ultricies mi eget.                                                             
-Line 51: Mauris pellentesque pulvinar pellentesque habitant morbi tristique sene
-ctus et netus et malesuada.                                                     
-Line 52: Fames ac turpis egestas maecenas pharetra convallis posuere morbi leo u
-rna molestie at elementum.                                                      
-Line 53: Eu facilisis sed odio morbi quis commodo odio aenean sed adipiscing dia
-m donec adipiscing.                                                             
-Line 54: Tristique risus nec feugiat in fermentum posuere urna nec tincidunt pra
-esent semper feugiat nibh.                                                      
-Line 55: Sed risus pretium quam vulputate dignissim suspendisse in est ante in n
-ibh mauris cursus mattis.                                                       
-Line 56: Molestie a iaculis at erat pellentesque adipiscing commodo elit at impe
-rdiet dui accumsan sit amet.                                                    
-Line 57: Nulla facilisi nullam vehicula ipsum a arcu cursus vitae congue mauris 
-rhoncus aenean vel elit.                                                        
-Line 58: Scelerisque mauris pellentesque pulvinar pellentesque habitant morbi tr
-istique senectus et netus.                                                      
-Line 59: Et malesuada fames ac turpis egestas integer eget aliquet nibh praesent
- tristique magna sit amet.                                                      
-Line 60: BOTTOM_MARKER - This is the final line of the fixture and should be vis
-ible without scrolling.                                                         
-compositor ➜                                                                    
- 0 bash  / SEARCHABLE_MARKER_ALPHA                                   No matches 
+ius, turpis et commodo pharetra.                                                
+Line 6: Est eros bibendum elit, nec luctus magna felis sollicitudin mauris. Inte
+ger in mauris eu nibh euismod gravida.                                          
+Line 7: Duis ac tellus et risus vulputate vehicula. Donec lobortis risus a elit.
+ Etiam tempor ultrices.                                                         
+Line 8: Ut ullamcorper, ligula eu tempor congue, eros est euismod turpis, id tin
+cidunt sapien risus a quam.                                                     
+Line 9: Maecenas fermentum consequat mi. Donec fermentum. Pellentesque malesuada
+ nulla a mi.                                                                    
+Line 10: Duis sapien sem, aliquet sed, vulputate eget, feugiat sit amet, eros. D
+uis sapien sem.                                                                 
+Line 11: SEARCHABLE_MARKER_ALPHA - This line contains a unique marker for search
+ testing.                                                                       
+Line 12: Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuer
+e cubilia Curae.                                                                
+Line 13: Morbi lacinia molestie dui. Praesent blandit dolor. Sed non quam.      
+Line 14: In vel mi sit amet augue congue elementum. Morbi in ipsum sit amet pede
+ facilisis laoreet.                                                             
+Line 15: Donec lacus nunc, viverra nec, blandit vel, egestas et, augue. Vestibul
+um tincidunt malesuada tellus.                                                  
+Line 16: Ut ultrices ultrices enim. Curabitur sit amet mauris. Morbi in dui quis
+ est pulvinar ullamcorper.                                                      
+Line 17: Nulla facilisi. Integer lacinia sollicitudin massa. Cras metus.        
+ 0 shell  / SEARCHABLE_MARKER_ALPHA                                         1/1 

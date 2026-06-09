@@ -113,6 +113,30 @@ impl AlacrittyEmulator {
         text
     }
 
+    /// Number of lines currently held in alacritty's scrollback history (the
+    /// lines that have scrolled off the top of the visible screen).
+    pub fn history_size(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
+    /// Cells of scrollback history row `index`, where `index == 0` is the
+    /// *oldest* line in history and `history_size() - 1` is the line just above
+    /// the visible screen. Returns an empty row for out-of-range indices.
+    ///
+    /// History occupies negative line indices in alacritty's grid: `Line(-N)` is
+    /// the oldest line (`N == history_size`) and `Line(-1)` is the newest.
+    pub fn scrollback_row(&self, index: usize) -> Vec<Cell> {
+        let grid = self.term.grid();
+        let history = grid.history_size();
+        if index >= history {
+            return Vec::new();
+        }
+        let line = AlacLine(index as i32 - history as i32);
+        (0..self.cols)
+            .map(|col| convert_cell(&grid[Point::new(line, Column(col))]))
+            .collect()
+    }
+
     /// Whether the given visible row soft-wraps into the next row.
     ///
     /// alacritty marks the last cell of a wrapped row with `WRAPLINE`; a logical

@@ -80,6 +80,25 @@ fn wait_for_output(compositor: &mut Compositor, timeout_ms: u64) {
     }
 }
 
+/// Poll until the composited screen contains `needle`, or `timeout_ms` elapses;
+/// returns whether it was found. Unlike a fixed-duration `wait_for_output`, this
+/// returns as soon as the expected output arrives and tolerates the slow output
+/// delivery seen when many real-PTY tests run in parallel and contend for CPU.
+fn wait_for_text(compositor: &mut Compositor, needle: &str, timeout_ms: u64) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        let _ = compositor.poll_once(10);
+        compositor.render_to_vec();
+        if compositor.get_text_lines().join("\n").contains(needle) {
+            return true;
+        }
+        if start.elapsed() >= Duration::from_millis(timeout_ms) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Get the path to the lorem ipsum fixture file
 fn lorem_fixture_path() -> String {
     format!("{}/fixtures/lorem_ipsum.txt", env!("CARGO_MANIFEST_DIR"))
@@ -229,8 +248,11 @@ fn test_scrollback_basic() -> Result<(), CompositorError> {
     let cat_cmd = format!("cat {}\n", lorem_fixture_path());
     compositor.handle_input(cat_cmd.as_bytes());
 
-    // Wait for the command to execute and output to appear
-    wait_for_output(&mut compositor, 1000);
+    // Wait for the command's output to actually appear (robust under load).
+    assert!(
+        wait_for_text(&mut compositor, "BOTTOM_MARKER", 8000),
+        "cat output (BOTTOM_MARKER) should render before continuing"
+    );
 
     // Render to capture the state before scrollback
     compositor.render_to_vec();
@@ -301,7 +323,10 @@ fn test_scrollback_jump_to_top() -> Result<(), CompositorError> {
     // Cat the lorem ipsum file
     let cat_cmd = format!("cat {}\n", lorem_fixture_path());
     compositor.handle_input(cat_cmd.as_bytes());
-    wait_for_output(&mut compositor, 1000);
+    assert!(
+        wait_for_text(&mut compositor, "BOTTOM_MARKER", 8000),
+        "cat output (BOTTOM_MARKER) should render before continuing"
+    );
 
     // Enter scrollback mode with Ctrl+b [
     compositor.handle_input(&[0x02]); // Ctrl+b
@@ -347,7 +372,10 @@ fn test_scrollback_exit() -> Result<(), CompositorError> {
     // Cat the lorem ipsum file
     let cat_cmd = format!("cat {}\n", lorem_fixture_path());
     compositor.handle_input(cat_cmd.as_bytes());
-    wait_for_output(&mut compositor, 1000);
+    assert!(
+        wait_for_text(&mut compositor, "BOTTOM_MARKER", 8000),
+        "cat output (BOTTOM_MARKER) should render before continuing"
+    );
 
     // Enter scrollback mode
     compositor.handle_input(&[0x02]); // Ctrl+b
@@ -390,7 +418,10 @@ fn test_search_basic() -> Result<(), CompositorError> {
     // Cat the lorem ipsum file
     let cat_cmd = format!("cat {}\n", lorem_fixture_path());
     compositor.handle_input(cat_cmd.as_bytes());
-    wait_for_output(&mut compositor, 1000);
+    assert!(
+        wait_for_text(&mut compositor, "BOTTOM_MARKER", 8000),
+        "cat output (BOTTOM_MARKER) should render before continuing"
+    );
 
     // Enter scrollback mode with Ctrl+b [
     compositor.handle_input(&[0x02]); // Ctrl+b
@@ -438,7 +469,10 @@ fn test_search_navigate_matches() -> Result<(), CompositorError> {
     // Cat the lorem ipsum file
     let cat_cmd = format!("cat {}\n", lorem_fixture_path());
     compositor.handle_input(cat_cmd.as_bytes());
-    wait_for_output(&mut compositor, 1000);
+    assert!(
+        wait_for_text(&mut compositor, "BOTTOM_MARKER", 8000),
+        "cat output (BOTTOM_MARKER) should render before continuing"
+    );
 
     // Enter scrollback mode with Ctrl+b [
     compositor.handle_input(&[0x02]); // Ctrl+b
@@ -490,7 +524,10 @@ fn test_search_exit_to_scrollback() -> Result<(), CompositorError> {
     // Cat the lorem ipsum file
     let cat_cmd = format!("cat {}\n", lorem_fixture_path());
     compositor.handle_input(cat_cmd.as_bytes());
-    wait_for_output(&mut compositor, 1000);
+    assert!(
+        wait_for_text(&mut compositor, "BOTTOM_MARKER", 8000),
+        "cat output (BOTTOM_MARKER) should render before continuing"
+    );
 
     // Enter scrollback mode
     compositor.handle_input(&[0x02]); // Ctrl+b
@@ -540,7 +577,10 @@ fn test_search_clear_query() -> Result<(), CompositorError> {
     // Cat the lorem ipsum file
     let cat_cmd = format!("cat {}\n", lorem_fixture_path());
     compositor.handle_input(cat_cmd.as_bytes());
-    wait_for_output(&mut compositor, 1000);
+    assert!(
+        wait_for_text(&mut compositor, "BOTTOM_MARKER", 8000),
+        "cat output (BOTTOM_MARKER) should render before continuing"
+    );
 
     // Enter scrollback mode
     compositor.handle_input(&[0x02]); // Ctrl+b
@@ -591,7 +631,10 @@ fn test_search_backspace() -> Result<(), CompositorError> {
     // Cat the lorem ipsum file
     let cat_cmd = format!("cat {}\n", lorem_fixture_path());
     compositor.handle_input(cat_cmd.as_bytes());
-    wait_for_output(&mut compositor, 1000);
+    assert!(
+        wait_for_text(&mut compositor, "BOTTOM_MARKER", 8000),
+        "cat output (BOTTOM_MARKER) should render before continuing"
+    );
 
     // Enter scrollback mode
     compositor.handle_input(&[0x02]); // Ctrl+b

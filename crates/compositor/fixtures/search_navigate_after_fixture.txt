@@ -1,24 +1,24 @@
+Line 40: Et ultrices posuere cubilia Curae. Phasellus ornare. Fusce mollis. Duis
+ sit amet diam.                                                                 
+Line 41: Eu dolor egestas rhoncus. Proin nisl sem, consequat nec, mollis vitae, 
+posuere at, velit.                                                              
+Line 42: Cras lorem lorem, luctus ut, pellentesque eget, dictum placerat, augue.
+Line 43: Sed molestie. Sed id risus quis diam luctus lobortis. Class aptent taci
+ti sociosqu.                                                                    
+Line 44: Ad litora torquent per conubia nostra, per inceptos hymenaeos. Mauris u
+t quam vel sapien imperdiet.                                                    
+Line 45: Nulla facilisi etiam dignissim diam quis enim lobortis scelerisque ferm
+entum dui faucibus in ornare quam.                                              
+Line 46: SEARCHABLE_MARKER_GAMMA - Third marker near the end of the file for sea
+rch testing.                                                                    
+Line 47: Viverra accumsan in nisl nisi scelerisque eu ultrices vitae auctor eu a
+ugue ut lectus.                                                                 
+Line 48: Arcu non sodales neque sodales ut etiam sit amet nisl purus in mollis n
+unc sed id.                                                                     
+Line 49: Semper viverra nam libero justo laoreet sit amet cursus sit amet dictum
+ sit amet justo.                                                                
 Line 50: Donec enim diam vulputate ut pharetra sit amet aliquam id diam maecenas
  ultricies mi eget.                                                             
 Line 51: Mauris pellentesque pulvinar pellentesque habitant morbi tristique sene
 ctus et netus et malesuada.                                                     
-Line 52: Fames ac turpis egestas maecenas pharetra convallis posuere morbi leo u
-rna molestie at elementum.                                                      
-Line 53: Eu facilisis sed odio morbi quis commodo odio aenean sed adipiscing dia
-m donec adipiscing.                                                             
-Line 54: Tristique risus nec feugiat in fermentum posuere urna nec tincidunt pra
-esent semper feugiat nibh.                                                      
-Line 55: Sed risus pretium quam vulputate dignissim suspendisse in est ante in n
-ibh mauris cursus mattis.                                                       
-Line 56: Molestie a iaculis at erat pellentesque adipiscing commodo elit at impe
-rdiet dui accumsan sit amet.                                                    
-Line 57: Nulla facilisi nullam vehicula ipsum a arcu cursus vitae congue mauris 
-rhoncus aenean vel elit.                                                        
-Line 58: Scelerisque mauris pellentesque pulvinar pellentesque habitant morbi tr
-istique senectus et netus.                                                      
-Line 59: Et malesuada fames ac turpis egestas integer eget aliquet nibh praesent
- tristique magna sit amet.                                                      
-Line 60: BOTTOM_MARKER - This is the final line of the fixture and should be vis
-ible without scrolling.                                                         
-compositor ➜                                                                    
- 0 bash  / SEARCHABLE_MARKER                                         No matches 
+ 0 shell  / SEARCHABLE_MARKER                                               1/3 

@@ -70,6 +70,12 @@ impl Default for CharSet {
 pub struct TerminalGrid {
     /// Cached cells for direct access
     cells: Vec<Vec<Cell>>,
+    /// Cached scrollback history (lines that have scrolled off the top), oldest
+    /// first. Refreshed from alacritty in [`update_from`](Self::update_from).
+    /// Not serialized: remote grid snapshots carry only the visible screen, so a
+    /// reattached client starts with empty scrollback (matching prior behavior).
+    #[serde(skip)]
+    scrollback: Vec<Vec<Cell>>,
     /// Per-row flag: whether the row soft-wraps into the next one (alacritty's
     /// `WRAPLINE`). Used to reassemble logical lines that span multiple rows.
     line_wrapped: Vec<bool>,
@@ -98,6 +104,7 @@ impl TerminalGrid {
 
         Self {
             cells,
+            scrollback: Vec::new(),
             line_wrapped: vec![false; rows],
             cols,
             rows,
@@ -180,6 +187,8 @@ impl TerminalGrid {
         }
 
         self.line_wrapped.resize(rows, false);
+        // History reflows on resize; force a rebuild on the next update_from.
+        self.scrollback.clear();
 
         self.cols = cols;
         self.rows = rows;
@@ -229,20 +238,37 @@ impl TerminalGrid {
         let (top, bottom) = emu.scroll_region();
         self.scroll_top = top;
         self.scroll_bottom = bottom;
+
+        self.refresh_scrollback(emu);
     }
 
-    // Scrollback methods - alacritty handles this internally, stub implementations for now
+    /// Refresh the cached scrollback history from alacritty.
+    ///
+    /// `update_from` runs on every processed PTY chunk, so this avoids copying
+    /// the whole (up to ~10k line) ring buffer each time: it only rebuilds when
+    /// the history actually changed. The dirty check compares the history length
+    /// and the newest history row — the latter catches the steady-state case
+    /// where the buffer is at capacity, so its length stays fixed while content
+    /// scrolls through it.
+    fn refresh_scrollback(&mut self, emu: &AlacrittyEmulator) {
+        let history = emu.history_size();
+        let newest = (history > 0).then(|| emu.scrollback_row(history - 1));
+        if history == self.scrollback.len() && self.scrollback.last() == newest.as_ref() {
+            return;
+        }
+        self.scrollback = (0..history).map(|i| emu.scrollback_row(i)).collect();
+    }
 
-    /// Get the number of lines in the scrollback buffer
+    // Scrollback history, cached from alacritty by `update_from`.
+
+    /// Number of lines in the scrollback buffer (lines scrolled off the top).
     pub fn scrollback_len(&self) -> usize {
-        // TODO: Extract from alacritty's history
-        0
+        self.scrollback.len()
     }
 
-    /// Get a row from the scrollback buffer (index 0 is most recent)
-    pub fn get_scrollback_row(&self, _index: usize) -> Option<&Vec<Cell>> {
-        // TODO: Extract from alacritty's history
-        None
+    /// Get a row from the scrollback buffer (index 0 is the oldest line).
+    pub fn get_scrollback_row(&self, index: usize) -> Option<&Vec<Cell>> {
+        self.scrollback.get(index)
     }
 
     /// Get a row from the visible grid

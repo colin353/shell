@@ -2,7 +2,7 @@
 
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::pty::{openpty, OpenptyResult, Winsize};
-use nix::unistd::{execvp, fork, read, write, ForkResult, Pid};
+use nix::unistd::{fork, read, write, ForkResult, Pid};
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
@@ -65,8 +65,52 @@ impl PtyProcess {
             ws_ypixel: 0,
         };
 
+        if command.trim().is_empty() {
+            return Err(PtyError::InvalidCommand);
+        }
+
         // Open a PTY pair
         let OpenptyResult { master, slave } = openpty(&winsize, None).map_err(PtyError::OpenPty)?;
+
+        // Assemble everything the child needs to exec — argv, the full child
+        // environment, and the raw NULL-terminated pointer arrays — HERE in the
+        // parent, before fork().
+        //
+        // This is a fork-safety requirement, not just tidiness: fork() in a
+        // multithreaded process (the daemon runs accept/reader threads; the test
+        // harness runs one thread per core) clones only the calling thread. If
+        // any other thread holds a global lock at that instant, it stays locked
+        // forever in the child. `std::env::set_var`/`vars` take such a lock, and
+        // so does the allocator — so between fork() and exec the child must touch
+        // neither. Previously the child called `set_var` for every variable,
+        // which could (and under load did) deadlock it before exec, leaving the
+        // subprocess's output to never arrive.
+        let bash = CString::new("/bin/bash").map_err(|_| PtyError::InvalidCommand)?;
+        let c_flag = CString::new("-c").map_err(|_| PtyError::InvalidCommand)?;
+        let c_command = CString::new(command).map_err(|_| PtyError::InvalidCommand)?;
+        let argv_owned = [&bash, &c_flag, &c_command];
+
+        // Merge the parent environment with the per-pane overrides, then TERM /
+        // COLORTERM so programs know the terminal supports color. Reading env in
+        // the parent is fine; only the child is constrained.
+        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        for (key, value) in env {
+            env_map.insert(key.clone(), value.clone());
+        }
+        env_map.insert("TERM".to_string(), "xterm-256color".to_string());
+        env_map.insert("COLORTERM".to_string(), "truecolor".to_string());
+        let env_owned: Vec<CString> = env_map
+            .into_iter()
+            .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
+            .collect();
+
+        // NULL-terminated pointer arrays for execvpe, built in the parent so the
+        // child allocates nothing. The backing CStrings outlive the call: the
+        // child execs (or _exits) immediately, before this frame returns.
+        let mut argv: Vec<*const libc::c_char> = argv_owned.iter().map(|c| c.as_ptr()).collect();
+        argv.push(std::ptr::null());
+        let mut envp: Vec<*const libc::c_char> = env_owned.iter().map(|c| c.as_ptr()).collect();
+        envp.push(std::ptr::null());
 
         // Fork the process
         match unsafe { fork() }.map_err(PtyError::Fork)? {
@@ -86,55 +130,28 @@ impl PtyProcess {
                 })
             }
             ForkResult::Child => {
-                // Child process - set up the slave as stdin/stdout/stderr
+                // Child process - set up the slave as stdin/stdout/stderr.
+                //
+                // Everything from here to exec is async-signal-safe: login_tty,
+                // execvpe, and _exit. No allocation, no env mutation, no panic
+                // (a panic would unwind through allocator/stdio locks).
                 drop(master);
 
-                // Use login_tty which properly:
-                // 1. Creates a new session (setsid)
-                // 2. Sets the controlling terminal (TIOCSCTTY)
-                // 3. Dups the slave to stdin/stdout/stderr
-                // 4. Closes the original slave fd
-                // This is the standard way terminal emulators set up PTYs
+                // login_tty: new session (setsid), set controlling terminal,
+                // dup the slave onto stdin/stdout/stderr, close the original.
                 let slave_fd = slave.as_raw_fd();
-                std::mem::forget(slave); // Don't let OwnedFd close it, login_tty will handle it
+                std::mem::forget(slave); // login_tty takes ownership of the fd
 
                 unsafe {
                     if libc::login_tty(slave_fd) < 0 {
-                        panic!("login_tty failed: {}", std::io::Error::last_os_error());
+                        libc::_exit(127);
                     }
+                    libc::execvpe(bash.as_ptr(), argv.as_ptr(), envp.as_ptr());
+                    // execvpe only returns on failure.
+                    libc::_exit(127);
                 }
-
-                // Parse command and execute
-                Self::exec_command(command, env);
             }
         }
-    }
-
-    /// Execute the command in the child process (never returns on success)
-    fn exec_command(command: &str, env: &[(String, String)]) -> ! {
-        for (key, value) in env {
-            std::env::set_var(key, value);
-        }
-
-        // Set TERM so programs know they can use colors and escape sequences
-        std::env::set_var("TERM", "xterm-256color");
-        // Some programs also check COLORTERM for true color support detection
-        std::env::set_var("COLORTERM", "truecolor");
-
-        if command.trim().is_empty() {
-            eprintln!("Empty command");
-            std::process::exit(1);
-        }
-
-        // Execute via bash to get shell features (variable expansion, pipes, etc.)
-        let bash = CString::new("/bin/bash").unwrap();
-        let c_flag = CString::new("-c").unwrap();
-        let c_command = CString::new(command).unwrap();
-        let args: Vec<&std::ffi::CStr> =
-            vec![bash.as_c_str(), c_flag.as_c_str(), c_command.as_c_str()];
-
-        execvp(&bash, &args).expect("execvp failed");
-        unreachable!()
     }
 
     /// Read available output from the PTY (non-blocking)
