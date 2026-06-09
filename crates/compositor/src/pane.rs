@@ -788,6 +788,24 @@ impl Pane {
             }
         }
 
+        // Dual-write: mirror any commands the remote executed into local history,
+        // tagged with the remote host. Done before any teardown so the final
+        // command (whose exit may arrive with SessionEnded) isn't lost.
+        let host = self
+            .remote
+            .as_ref()
+            .map(|r| protocol::HostId(r.target().to_string()));
+        let records = self
+            .remote
+            .as_mut()
+            .map(|r| r.take_history_records())
+            .unwrap_or_default();
+        if let Some(host) = host {
+            for rec in &records {
+                self.shell.mirror_remote_record(rec, &host);
+            }
+        }
+
         // If the transport ended, tear down and return to the local shell.
         if let Some(exit_code) = self.remote.as_mut().and_then(|r| r.try_wait()) {
             self.remote = None;

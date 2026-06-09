@@ -8,6 +8,7 @@ raw_tty = "0.1.0"
 nix = { version = "0.29", features = ["term", "process", "signal", "fs"] }
 libc = "0.2"
 compositor = { path = "../compositor" }
+libshell = { path = "../libshell" }
 protocol = { path = "../protocol" }
 emulator = { path = "../emulator" }
 

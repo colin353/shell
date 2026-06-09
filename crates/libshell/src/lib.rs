@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use unicode_width::UnicodeWidthChar;
 
 pub mod backend;
@@ -35,8 +35,8 @@ pub use diagnostics::{
 };
 pub use environment::{reload_shell_env, shell_env_file_path, shell_env_snapshot, ShellEnvError};
 pub use history::{
-    BackupConfig, CommandSource, EntryId, HistoryEntry, HistorySearchResult, SearchResult,
-    ShellHistory,
+    BackupConfig, CommandSource, EntryId, HistoryEntry, HistoryMirror, HistorySearchResult,
+    SearchResult, ShellHistory,
 };
 pub use picker::{
     FileItem, PickerConfig, PickerItem, PickerMode, PickerState, TabCompletionContext,
@@ -267,6 +267,9 @@ pub struct ShellCore {
     #[allow(dead_code)]
     env: RwLock<HashMap<String, String>>,
     history: ShellHistory,
+    /// When set (on a daemon), every command recorded here is also captured for
+    /// dual-write up to the client. `None` for an ordinary local shell.
+    history_mirror: Mutex<Option<Arc<HistoryMirror>>>,
 }
 
 impl ShellCore {
@@ -317,12 +320,19 @@ impl ShellCore {
         Ok(ShellCore {
             env: RwLock::new(HashMap::new()),
             history,
+            history_mirror: Mutex::new(None),
         })
     }
 
     /// Get a reference to the shell history
     pub fn history(&self) -> &ShellHistory {
         &self.history
+    }
+
+    /// Install a [`HistoryMirror`] so commands recorded here are also captured
+    /// for dual-write to a client (used by the daemon).
+    pub fn set_history_mirror(&self, mirror: Arc<HistoryMirror>) {
+        *self.history_mirror.lock().unwrap() = Some(mirror);
     }
 
     /// Record a command execution
@@ -332,7 +342,13 @@ impl ShellCore {
         source: CommandSource,
         cwd: Option<String>,
     ) -> Result<EntryId, std::io::Error> {
-        self.history.record_command_with_cwd(command, source, cwd)
+        let id = self
+            .history
+            .record_command_with_cwd(command.clone(), source, cwd.clone())?;
+        if let Some(m) = self.history_mirror.lock().unwrap().as_ref() {
+            m.on_record(id.as_str(), &command, cwd);
+        }
+        Ok(id)
     }
 
     /// Record the exit status of a command
@@ -342,12 +358,20 @@ impl ShellCore {
         exit_code: i32,
         duration_ms: u64,
     ) -> Result<(), std::io::Error> {
-        self.history.record_exit(id, exit_code, duration_ms)
+        self.history.record_exit(id, exit_code, duration_ms)?;
+        if let Some(m) = self.history_mirror.lock().unwrap().as_ref() {
+            m.on_exit(id.as_str(), Some(exit_code));
+        }
+        Ok(())
     }
 
     /// Mark a command as killed (Ctrl+C)
     pub fn mark_killed(&self, id: &EntryId) -> Result<(), std::io::Error> {
-        self.history.mark_killed(id)
+        self.history.mark_killed(id)?;
+        if let Some(m) = self.history_mirror.lock().unwrap().as_ref() {
+            m.on_exit(id.as_str(), None);
+        }
+        Ok(())
     }
 }
 
@@ -662,6 +686,13 @@ impl Shell {
         output.extend(b"\x1b[41m\x1b[97m CTRL+C \x1b[0m\r\n");
         output.extend(self.get_prompt().as_bytes());
         output
+    }
+
+    /// Mirror a command that ran in a remote pane into this (local) shell's
+    /// history, tagged `Remote(host)`. Used for history dual-write so a remote
+    /// session's commands persist locally after the pane closes.
+    pub fn mirror_remote_record(&mut self, record: &protocol::HistoryRecord, host: &protocol::HostId) {
+        self.backend.mirror_remote_record(record, host);
     }
 
     /// Notify the shell that an external editor session has exited.

@@ -16,7 +16,7 @@
 use crate::history::{CommandSource, EntryId, HistorySearchResult};
 use crate::syntax::{CompletionKind, SyntaxHandler};
 use crate::ShellCore;
-use protocol::HistoryScope;
+use protocol::{HistoryRecord, HistoryScope, HostId};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -74,6 +74,12 @@ pub trait ShellBackend {
 
     /// Mark a command as killed (e.g. Ctrl+C).
     fn mark_killed(&self, id: &EntryId);
+
+    /// Mirror a command that ran on a remote host into this backend's history,
+    /// tagged `Remote(host)` (history dual-write). No-op by default.
+    fn mirror_remote_record(&self, record: &HistoryRecord, host: &HostId) {
+        let _ = (record, host);
+    }
 }
 
 /// In-process backend: today's behavior, wrapping the existing
@@ -160,6 +166,12 @@ impl ShellBackend for LocalBackend {
     fn mark_killed(&self, id: &EntryId) {
         if let Err(e) = self.core.mark_killed(id) {
             eprintln!("Warning: failed to mark command killed in history: {}", e);
+        }
+    }
+
+    fn mirror_remote_record(&self, record: &HistoryRecord, host: &HostId) {
+        if let Err(e) = self.core.history().record_mirrored(record, host) {
+            eprintln!("Warning: failed to mirror remote history: {}", e);
         }
     }
 }

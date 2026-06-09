@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use protocol::codec::{self, FrameReader};
-use protocol::{ClientMode, ClientMsg, Hello, ServerMsg, PROTOCOL_VERSION};
+use protocol::{ClientMode, ClientMsg, Hello, HistoryRecord, ServerMsg, PROTOCOL_VERSION};
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -32,6 +32,8 @@ pub struct RemoteProcess {
     pending: Vec<u8>,
     /// A window-rename pushed by the remote, awaiting the local compositor.
     pending_title: Option<String>,
+    /// Commands the remote executed, awaiting dual-write into local history.
+    pending_history: Vec<HistoryRecord>,
 
     // --- Reconnect parameters (the session is identified by `session_id`). ---
     target: String,
@@ -73,6 +75,7 @@ impl RemoteProcess {
             frames: FrameReader::new(),
             pending: Vec::new(),
             pending_title: None,
+            pending_history: Vec::new(),
             target: target.to_string(),
             session_id,
             cols,
@@ -125,6 +128,7 @@ impl RemoteProcess {
                             .pending
                             .extend_from_slice(&emulator::render_snapshot_to_ansi(&grid)),
                         ServerMsg::RenameWindow { name } => self.pending_title = Some(name),
+                        ServerMsg::HistoryRecorded { entry } => self.pending_history.push(entry),
                         ServerMsg::SessionEnded => self.ended = true,
                         _ => {}
                     }
@@ -213,6 +217,17 @@ impl RemoteProcess {
     /// Take a pending window-rename pushed by the remote, if any.
     pub fn take_title(&mut self) -> Option<String> {
         self.pending_title.take()
+    }
+
+    /// Take the commands the remote has executed since the last drain, for
+    /// dual-write into local history.
+    pub fn take_history_records(&mut self) -> Vec<HistoryRecord> {
+        std::mem::take(&mut self.pending_history)
+    }
+
+    /// The host this session is connected to (the history-origin label).
+    pub fn target(&self) -> &str {
+        &self.target
     }
 
     /// Exit code if the session ended deliberately. Returns `None` while a

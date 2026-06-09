@@ -29,7 +29,7 @@
 use fs2::FileExt;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use protocol::{HistoryScope, Origin};
+use protocol::{HistoryRecord, HistoryScope, HostId, Origin};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -164,6 +164,82 @@ enum LogEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         original_format: Option<String>,
     },
+}
+
+/// Cap on records buffered while no client is attached, so a long-detached
+/// daemon doesn't grow without bound. Older records past the cap are dropped
+/// (they remain in the remote's own on-disk history regardless).
+const MIRROR_OUTBOX_CAP: usize = 2048;
+
+/// Captures completed commands for dual-write up a hop. Installed on the
+/// daemon's [`ShellCore`]; the daemon drains it each loop and ships each record
+/// to the client as `ServerMsg::HistoryRecorded`, which mirrors it into the
+/// local log tagged `Remote(host)`.
+///
+/// A command is buffered only once it *completes* (so the record carries its
+/// exit code), keyed from the metadata captured when it started.
+#[derive(Default)]
+pub struct HistoryMirror {
+    /// In-flight commands by id — command text/cwd/start-time, known at record
+    /// time but not at exit time (where only the id is in hand).
+    pending: Mutex<HashMap<String, PendingMirror>>,
+    /// Completed records awaiting the next drain.
+    outbox: Mutex<Vec<HistoryRecord>>,
+}
+
+struct PendingMirror {
+    command: String,
+    cwd: Option<String>,
+    executed_at: u64,
+}
+
+impl HistoryMirror {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// A command started: remember what we'll need to mirror it on completion.
+    pub fn on_record(&self, id: &str, command: &str, cwd: Option<String>) {
+        self.pending.lock().unwrap().insert(
+            id.to_string(),
+            PendingMirror {
+                command: command.to_string(),
+                cwd,
+                executed_at: Self::now_secs(),
+            },
+        );
+    }
+
+    /// A command finished (`exit_code = None` means it was killed). Emits the
+    /// completed record. The origin is `Local` from the daemon's perspective;
+    /// the receiving client rewrites it to `Remote(host)`.
+    pub fn on_exit(&self, id: &str, exit_code: Option<i32>) {
+        if let Some(p) = self.pending.lock().unwrap().remove(id) {
+            let mut out = self.outbox.lock().unwrap();
+            if out.len() < MIRROR_OUTBOX_CAP {
+                out.push(HistoryRecord {
+                    id: id.to_string(),
+                    command: p.command,
+                    executed_at: p.executed_at,
+                    exit_code,
+                    cwd: p.cwd,
+                    origin: Origin::Local,
+                });
+            }
+        }
+    }
+
+    /// Take everything buffered so far (for sending to the client).
+    pub fn drain(&self) -> Vec<HistoryRecord> {
+        std::mem::take(&mut *self.outbox.lock().unwrap())
+    }
 }
 
 /// Search result from fuzzy matching
@@ -556,6 +632,55 @@ impl ShellHistory {
         self.maybe_backup()?;
 
         Ok(entry_id)
+    }
+
+    /// Mirror a command that ran on another host into this log, tagged
+    /// `Remote(host)`. Idempotent: a resync/replay that resends the same entry
+    /// (keyed by the remote's id) is ignored, so the local log never doubles up.
+    pub fn record_mirrored(&self, record: &HistoryRecord, host: &HostId) -> io::Result<()> {
+        let id = EntryId::from_string(record.id.clone());
+        if self.entries.read().unwrap().contains_key(&id) {
+            return Ok(());
+        }
+
+        let origin = Origin::Remote(host.clone());
+        let entry = HistoryEntry {
+            id: id.clone(),
+            command: record.command.clone(),
+            executed_at: UNIX_EPOCH + Duration::from_secs(record.executed_at),
+            exit_code: record.exit_code,
+            source: CommandSource::Human,
+            killed: false,
+            duration_ms: None,
+            cwd: record.cwd.clone(),
+            origin: origin.clone(),
+        };
+
+        // Persist (crash-safe) the original execution, then its completion.
+        self.write_event(&LogEvent::Exec {
+            id: record.id.clone(),
+            cmd: record.command.clone(),
+            timestamp: record.executed_at,
+            source: CommandSource::Human,
+            cwd: record.cwd.clone(),
+            origin,
+        })?;
+        if let Some(code) = record.exit_code {
+            self.write_event(&LogEvent::Amend {
+                id: record.id.clone(),
+                exit_code: Some(code),
+                duration_ms: None,
+                killed: Some(false),
+            })?;
+        }
+
+        {
+            let mut entries = self.entries.write().unwrap();
+            let mut order = self.entry_order.write().unwrap();
+            entries.insert(id.clone(), entry);
+            order.push(id);
+        }
+        Ok(())
     }
 
     /// Amend an existing history entry with completion information

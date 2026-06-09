@@ -851,6 +851,7 @@ dependencies = [
  "compositor",
  "emulator",
  "libc",
+ "libshell",
  "nix",
  "protocol",
  "raw_tty",

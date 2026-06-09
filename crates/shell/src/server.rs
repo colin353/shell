@@ -95,6 +95,16 @@ struct IncomingClient {
     size: (u16, u16),
 }
 
+/// Build a `ShellCore` wired to a fresh [`HistoryMirror`], so every command the
+/// daemon's shell records is also captured for dual-write back to the client.
+/// Panics on core init failure, matching `Compositor::with_output`'s behavior.
+fn mirrored_core() -> (Arc<libshell::ShellCore>, Arc<libshell::HistoryMirror>) {
+    let core = Arc::new(libshell::ShellCore::new().expect("Failed to create ShellCore"));
+    let mirror = Arc::new(libshell::HistoryMirror::new());
+    core.set_history_mirror(mirror.clone());
+    (core, mirror)
+}
+
 pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
     // Replace any stale socket from a previous (dead) daemon.
     let _ = std::fs::remove_file(socket_path);
@@ -104,12 +114,14 @@ pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
     let host = HostId(hostname());
 
     let sink = Arc::new(Mutex::new(ClientSink::new()));
-    let mut compositor = compositor::Compositor::with_output(80, 24, sink.clone()).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("failed to create compositor: {e:?}"),
-        )
-    })?;
+    let (core, history_mirror) = mirrored_core();
+    let mut compositor =
+        compositor::Compositor::with_core(80, 24, sink.clone(), core).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("failed to create compositor: {e:?}"),
+            )
+        })?;
     compositor.set_synchronized_output(true);
     if bare {
         // Persistent remote-session daemon embedded in a remote pane: no chrome.
@@ -222,6 +234,15 @@ pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
             }
         }
 
+        // Dual-write: ship commands the shell executed up to the client so they
+        // mirror into its local history. Only while attached; otherwise they
+        // buffer in the mirror (capped) until a client reattaches.
+        if let Some(c) = control.as_mut() {
+            for entry in history_mirror.drain() {
+                let _ = codec::write_frame(&mut *c, &ServerMsg::HistoryRecorded { entry });
+            }
+        }
+
         // Forward a window rename (e.g. rename-window) to the client's tab.
         let name = compositor.active_tab().name.clone();
         if name != last_name {
@@ -293,10 +314,12 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     )?;
 
     let sink = Arc::new(Mutex::new(ClientSink::new()));
-    let mut compositor = compositor::Compositor::with_output(
+    let (core, history_mirror) = mirrored_core();
+    let mut compositor = compositor::Compositor::with_core(
         (cols.max(1)) as usize,
         (rows.max(1)) as usize,
         sink.clone(),
+        core,
     )
     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compositor: {e:?}")))?;
     // Do NOT enable synchronized output here: this daemon's render bytes are fed
@@ -361,6 +384,11 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
                     break;
                 }
             }
+        }
+
+        // Dual-write: ship executed commands up for local history mirroring.
+        for entry in history_mirror.drain() {
+            let _ = codec::write_frame(&mut handshake_out, &ServerMsg::HistoryRecorded { entry });
         }
 
         // Propagate window renames (e.g. the `rename-window` builtin run inside
