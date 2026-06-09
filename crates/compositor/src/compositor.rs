@@ -1579,12 +1579,9 @@ impl Compositor {
         for (i, tab) in self.tabs.iter().enumerate() {
             // Add 'Z' suffix if tab is zoomed
             let zoom_indicator = if tab.zoomed { "Z" } else { "" };
-            // Remote-owned tabs show the host (after `user@`).
-            let remote_indicator = match &tab.remote_host {
-                Some(host) => format!(" @{}", host.rsplit('@').next().unwrap_or(host)),
-                None => String::new(),
-            };
-            let tab_text = format!(" {} {}{}{} ", i, tab.name, zoom_indicator, remote_indicator);
+            // Remote-owned tabs are distinguished by color alone (see attrs
+            // below); the host name is omitted to keep the tab label compact.
+            let tab_text = format!(" {} {}{} ", i, tab.name, zoom_indicator);
             let attrs = match (tab.remote_host.is_some(), i == self.active_tab) {
                 (true, true) => active_remote_tab_attrs.clone(),
                 (true, false) => remote_tab_attrs.clone(),
