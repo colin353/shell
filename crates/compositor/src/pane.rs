@@ -228,6 +228,24 @@ impl Pane {
     /// Create a new pane with the given dimensions.
     pub fn new(width: usize, height: usize) -> Self {
         let (shell, initial_output) = libshell::Shell::new(width as u16, height as u16);
+        Self::assemble(shell, initial_output, width, height)
+    }
+
+    /// Create a new pane starting in `cwd` (used when splitting so the new pane
+    /// inherits the originating pane's working directory).
+    pub fn new_in(width: usize, height: usize, cwd: std::path::PathBuf) -> Self {
+        let (shell, initial_output) = libshell::Shell::new_in(width as u16, height as u16, cwd);
+        Self::assemble(shell, initial_output, width, height)
+    }
+
+    /// Build a pane around an already-constructed shell, rendering its initial
+    /// prompt. Shared by the public constructors.
+    fn assemble(
+        shell: libshell::Shell,
+        initial_output: Vec<u8>,
+        width: usize,
+        height: usize,
+    ) -> Self {
         let mut terminal_emulator = emulator::TerminalEmulator::new(width, height);
 
         // Process the initial prompt output

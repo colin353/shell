@@ -1029,8 +1029,10 @@ impl PaneCell {
                 }
                 pane.shell.resize(old_width as u16, old_height as u16);
 
-                // Create a new pane with a new shell
-                let new_pane = Pane::new(new_width, new_height);
+                // Create a new pane with a new shell, starting in the same
+                // working directory as the pane being split.
+                let split_cwd = pane.shell.cwd().to_path_buf();
+                let new_pane = Pane::new_in(new_width, new_height, split_cwd);
 
                 // Take ownership of the old pane - use a temporary placeholder
                 let placeholder_pane = Pane::new(1, 1);

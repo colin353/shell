@@ -142,6 +142,7 @@ dependencies = [
  "protocol",
  "pty",
  "regex",
+ "tempfile",
  "unicode-width",
 ]
 

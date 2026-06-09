@@ -480,6 +480,14 @@ impl Shell {
         Self::with_core(core, cols, rows)
     }
 
+    /// Like [`new`](Self::new), but starting in `cwd` rather than the process's
+    /// current directory. Used when splitting a pane so the new shell inherits
+    /// the originating pane's working directory.
+    pub fn new_in(cols: u16, rows: u16, cwd: std::path::PathBuf) -> (Self, Vec<u8>) {
+        let core = Arc::new(ShellCore::new().expect("Failed to create ShellCore"));
+        Self::with_backend_cwd(Box::new(LocalBackend::new(core)), cols, rows, cwd)
+    }
+
     /// Create a new shell instance with a shared ShellCore.
     /// Use this to share history and environment across multiple shell panes.
     ///
@@ -499,7 +507,17 @@ impl Shell {
         rows: u16,
     ) -> (Self, Vec<u8>) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        Self::with_backend_cwd(backend, cols, rows, cwd)
+    }
 
+    /// Like [`with_backend`](Self::with_backend), but with an explicit starting
+    /// working directory (so the initial prompt reflects `cwd`).
+    pub fn with_backend_cwd(
+        backend: Box<dyn ShellBackend>,
+        cols: u16,
+        rows: u16,
+        cwd: std::path::PathBuf,
+    ) -> (Self, Vec<u8>) {
         // Build initial history cache
         let history_cache: Vec<String> = backend.recent_commands(1000);
 
