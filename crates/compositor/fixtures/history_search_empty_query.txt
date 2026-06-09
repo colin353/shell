@@ -1,24 +1,24 @@
-    mkdir code                                                                  
-    cd code                                                                     
-    git clone https://github.com/colin353/shell                                 
-    ls                                                                          
-    cd shell                                                                    
-    git checkout alacritty-core                                                 
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh              
-    vim ~/.bashrc                                                               
-    vim ~/.zshrc                                                                
-    cargo run --release                                                         
-    mv target/release/shell ~/bin/shell                                         
-    mkdir ~/bin                                                                 
-    shel                                                                        
-    shell                                                                       
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
   ✓ git status                                                                  
   ✓ git commit -m 'Initial commit'                                              
   ✗ git push origin main                                                        
   ✓ cargo build --release                                                       
   ✓ cargo test                                                                  
 > ✓ git log --oneline                                                           
-(reverse-i-search)`' [1/20]                                                     
+(reverse-i-search)`' [1/6]                                                      
 compositor ➜                                                                    
                                                                                 
  0 shell                                                       2025-01-01 12:00 

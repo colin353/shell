@@ -272,52 +272,66 @@ pub struct ShellCore {
 impl ShellCore {
     /// Create a new ShellCore with default history path (~/.myshell_history.log)
     pub fn new() -> Result<Self, std::io::Error> {
+        // An explicit override (used by tests) is fully isolated: it points at a
+        // throwaway file and never imports the user's real zsh/bash history.
+        if let Ok(path) = std::env::var("SHELL_HISTORY_PATH") {
+            return Self::with_history_path(PathBuf::from(path));
+        }
+
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let history_path = PathBuf::from(&home).join(".myshell_history.log");
-        Self::with_history_path(history_path)
+        let home_path = PathBuf::from(&home);
+        let history_path = home_path.join(".myshell_history.log");
+        let is_new_history = !history_path.exists();
+
+        let core = Self::with_history_path(history_path)?;
+
+        // On first run only, seed the new history from the user's existing
+        // login-shell history. This reads the real home directory, so it lives
+        // here in `new()` and deliberately NOT in `with_history_path`, which
+        // tests rely on staying isolated from the developer's real history.
+        if is_new_history {
+            core.import_login_shell_history(&home_path);
+        }
+
+        Ok(core)
     }
 
-    /// Create a new ShellCore with a custom history path
+    /// Create a new ShellCore backed by an explicit history file.
+    ///
+    /// Unlike [`new`](Self::new), this touches *only* `history_path`: it never
+    /// reads or imports the user's real `~/.zsh_history` / `~/.bash_history`, so
+    /// tests can point it at a throwaway path and stay fully isolated from the
+    /// developer's real shell history.
     pub fn with_history_path(history_path: PathBuf) -> Result<Self, std::io::Error> {
-        let is_new_history = !history_path.exists();
-        let history = ShellHistory::new(&history_path)?;
+        Ok(ShellCore {
+            history: ShellHistory::new(&history_path)?,
+            history_mirror: Mutex::new(None),
+        })
+    }
 
-        // If this is a brand new history, try to import from zsh/bash
-        if is_new_history {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let home_path = PathBuf::from(&home);
-
-            // Try to import zsh history
-            let zsh_history = home_path.join(".zsh_history");
-            if zsh_history.exists() {
-                match history.import_zsh_history(&zsh_history) {
-                    Ok(count) => {
-                        if count > 0 {
-                            eprintln!("Imported {} entries from .zsh_history", count);
-                        }
-                    }
-                    Err(e) => eprintln!("Warning: failed to import .zsh_history: {}", e),
-                }
-            }
-
-            // Try to import bash history
-            let bash_history = home_path.join(".bash_history");
-            if bash_history.exists() {
-                match history.import_bash_history(&bash_history) {
-                    Ok(count) => {
-                        if count > 0 {
-                            eprintln!("Imported {} entries from .bash_history", count);
-                        }
-                    }
-                    Err(e) => eprintln!("Warning: failed to import .bash_history: {}", e),
-                }
+    /// Best-effort import of the user's existing zsh/bash history under `home`
+    /// into this (freshly created) history. Missing files are skipped; import
+    /// errors are logged rather than fatal.
+    fn import_login_shell_history(&self, home: &std::path::Path) {
+        let zsh_history = home.join(".zsh_history");
+        if zsh_history.exists() {
+            match self.history.import_zsh_history(&zsh_history) {
+                Ok(count) if count > 0 => eprintln!("Imported {} entries from .zsh_history", count),
+                Ok(_) => {}
+                Err(e) => eprintln!("Warning: failed to import .zsh_history: {}", e),
             }
         }
 
-        Ok(ShellCore {
-            history,
-            history_mirror: Mutex::new(None),
-        })
+        let bash_history = home.join(".bash_history");
+        if bash_history.exists() {
+            match self.history.import_bash_history(&bash_history) {
+                Ok(count) if count > 0 => {
+                    eprintln!("Imported {} entries from .bash_history", count)
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("Warning: failed to import .bash_history: {}", e),
+            }
+        }
     }
 
     /// Get a reference to the shell history

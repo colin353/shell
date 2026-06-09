@@ -9,6 +9,18 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Build a ShellCore backed by a throwaway history file so tests never read or
+/// write the developer's real `~/.myshell_history.log`.
+///
+/// This points `SHELL_HISTORY_PATH` at a per-process temp file, which also
+/// isolates panes created by *splits* — those build their own ShellCore via the
+/// default constructor, so an explicit `with_core` on the root pane isn't enough.
+fn isolated_core() -> Arc<libshell::ShellCore> {
+    let path = std::env::temp_dir().join(format!("shell_test_hist_{}.log", std::process::id()));
+    std::env::set_var("SHELL_HISTORY_PATH", &path);
+    Arc::new(libshell::ShellCore::new().expect("isolated test history"))
+}
+
 /// Fixed time used for all tests to avoid fixture churn
 fn fixed_test_time() -> chrono::DateTime<chrono::Local> {
     use chrono::TimeZone;
@@ -76,7 +88,7 @@ fn lorem_fixture_path() -> String {
 #[test]
 fn test_combined_prefix_enters_scrollback() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.handle_input(&[0x02, b'[']);
 
@@ -91,7 +103,7 @@ fn test_combined_prefix_enters_scrollback() -> Result<(), CompositorError> {
 #[test]
 fn test_encoded_prefix_enters_scrollback() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.handle_input(b"\x1b[98;5u[");
 
@@ -106,7 +118,7 @@ fn test_encoded_prefix_enters_scrollback() -> Result<(), CompositorError> {
 #[test]
 fn test_encoded_prefix_and_command_enters_scrollback() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.handle_input(b"\x1b[98;5u\x1b[91u");
 
@@ -121,7 +133,7 @@ fn test_encoded_prefix_and_command_enters_scrollback() -> Result<(), CompositorE
 #[test]
 fn test_xterm_encoded_prefix_enters_scrollback() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.handle_input(b"\x1b[27;5;98~[");
 
@@ -136,7 +148,7 @@ fn test_xterm_encoded_prefix_enters_scrollback() -> Result<(), CompositorError> 
 #[test]
 fn test_prefix_enters_scrollback_in_alternate_screen() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     let pane = compositor.get_focused_pane_mut().unwrap();
     pane.terminal_emulator.process(b"\x1b[?1049h");
@@ -171,7 +183,7 @@ fn test_copilot_subprocess_allows_scrollback_prefix() -> Result<(), CompositorEr
     }
 
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     wait_for_output(&mut compositor, 500);
     compositor.handle_input(b"copilot\n");
@@ -205,7 +217,7 @@ fn test_copilot_subprocess_allows_scrollback_prefix() -> Result<(), CompositorEr
 fn test_scrollback_basic() -> Result<(), CompositorError> {
     // Create a compositor with a small terminal to ensure scrollback is used
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -278,7 +290,7 @@ fn test_scrollback_basic() -> Result<(), CompositorError> {
 fn test_scrollback_jump_to_top() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -327,7 +339,7 @@ fn test_scrollback_jump_to_top() -> Result<(), CompositorError> {
 fn test_scrollback_exit() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -367,7 +379,7 @@ fn test_scrollback_exit() -> Result<(), CompositorError> {
 fn test_search_basic() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -415,7 +427,7 @@ fn test_search_basic() -> Result<(), CompositorError> {
 fn test_search_navigate_matches() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -467,7 +479,7 @@ fn test_search_navigate_matches() -> Result<(), CompositorError> {
 fn test_search_exit_to_scrollback() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -517,7 +529,7 @@ fn test_search_exit_to_scrollback() -> Result<(), CompositorError> {
 fn test_search_clear_query() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -568,7 +580,7 @@ fn test_search_clear_query() -> Result<(), CompositorError> {
 fn test_search_backspace() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());

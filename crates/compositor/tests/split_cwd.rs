@@ -18,8 +18,10 @@ fn split_inherits_originating_pane_cwd() {
     std::fs::create_dir(&sub).unwrap();
     let sub_canon = sub.canonicalize().unwrap();
 
+    // Isolated history file so the test never touches the real one.
+    let core = Arc::new(libshell::ShellCore::with_history_path(dir.path().join("history.log")).unwrap());
     let sink: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(std::io::sink()));
-    let mut comp = Compositor::with_output(80, 24, sink).unwrap();
+    let mut comp = Compositor::with_core(80, 24, sink, core).unwrap();
 
     // cd the focused pane into the subdir (a synchronous builtin).
     let cd = format!("cd {}\r", sub_canon.display());

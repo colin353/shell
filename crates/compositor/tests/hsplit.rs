@@ -9,6 +9,18 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Build a ShellCore backed by a throwaway history file so tests never read or
+/// write the developer's real `~/.myshell_history.log`.
+///
+/// This points `SHELL_HISTORY_PATH` at a per-process temp file, which also
+/// isolates panes created by *splits* — those build their own ShellCore via the
+/// default constructor, so an explicit `with_core` on the root pane isn't enough.
+fn isolated_core() -> Arc<libshell::ShellCore> {
+    let path = std::env::temp_dir().join(format!("shell_test_hist_{}.log", std::process::id()));
+    std::env::set_var("SHELL_HISTORY_PATH", &path);
+    Arc::new(libshell::ShellCore::new().expect("isolated test history"))
+}
+
 /// Fixed time used for all tests to avoid fixture churn
 fn fixed_test_time() -> chrono::DateTime<chrono::Local> {
     use chrono::TimeZone;
@@ -93,7 +105,7 @@ fn test_typeahead_newline_replays_after_subprocess_exit() -> Result<(), Composit
     let _ = std::fs::remove_file(&path);
 
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     wait_for_output(&mut compositor, 300);
     compositor.handle_input(b"sleep 1\n");
@@ -119,7 +131,7 @@ fn test_partial_typeahead_replays_after_subprocess_exit() -> Result<(), Composit
     let _ = std::fs::remove_file(&path);
 
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     wait_for_output(&mut compositor, 300);
     compositor.handle_input(b"sleep 1\n");
@@ -149,7 +161,7 @@ fn test_partial_typeahead_replays_after_subprocess_exit() -> Result<(), Composit
 #[test]
 fn test_combined_prefix_creates_split() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.handle_input(&[0x02, b'"']);
 
@@ -165,7 +177,7 @@ fn test_combined_prefix_creates_split() -> Result<(), CompositorError> {
 #[test]
 fn test_encoded_prefix_creates_split() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.handle_input(b"\x1b[98;5u\x1b[34u");
 
@@ -181,7 +193,7 @@ fn test_encoded_prefix_creates_split() -> Result<(), CompositorError> {
 #[test]
 fn test_split_exits_zoom_mode() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.handle_input(&[0x02, b'"']);
     compositor.handle_input(&[0x02, b'z']);
@@ -210,7 +222,7 @@ fn test_split_exits_zoom_mode() -> Result<(), CompositorError> {
 fn test_hsplit_basic() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Wait for bash to start up
     wait_for_output(&mut compositor, 500);
@@ -243,7 +255,7 @@ fn test_hsplit_basic() -> Result<(), CompositorError> {
 fn test_hsplit_echo_command() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -283,7 +295,7 @@ fn test_hsplit_echo_command() -> Result<(), CompositorError> {
 fn test_hsplit_separate_panes() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -348,7 +360,7 @@ fn test_hsplit_separate_panes() -> Result<(), CompositorError> {
 fn test_render_output_format() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -382,7 +394,7 @@ fn test_render_output_format() -> Result<(), CompositorError> {
 fn test_render_and_replay() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -450,7 +462,7 @@ fn test_render_and_replay() -> Result<(), CompositorError> {
 fn test_vsplit_render_and_replay() -> Result<(), CompositorError> {
     // Create a compositor and split it vertically using Ctrl+b %
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -541,7 +553,7 @@ fn compare_with_fixture(compositor: &Compositor, fixture_name: &str) {
 fn test_render_and_replay_hvsplit() -> Result<(), CompositorError> {
     // Create a compositor and split it horizontally using Ctrl+b "
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -830,7 +842,7 @@ fn test_history_search_escape() -> Result<(), CompositorError> {
 fn test_nonzero_exit_code_display() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Wait for shell to initialize
     wait_for_output(&mut compositor, 500);
@@ -861,7 +873,7 @@ fn test_nonzero_exit_code_display() -> Result<(), CompositorError> {
 fn test_ctrl_c_display() -> Result<(), CompositorError> {
     // Create a compositor
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Wait for shell to initialize
     wait_for_output(&mut compositor, 500);
@@ -1283,7 +1295,7 @@ fn test_hsplit_history_ctrl_a() -> Result<(), CompositorError> {
     // original command. The display should show "asdfecho hello world".
 
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Wait for bash to initialize
     wait_for_output(&mut compositor, 500);
@@ -1822,7 +1834,7 @@ fn test_emoji_rendering_in_split() -> Result<(), CompositorError> {
 fn test_hsplit_unicode_via_bash() -> Result<(), CompositorError> {
     // Use bash subprocess instead of embedded shell
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -1899,7 +1911,7 @@ fn test_hsplit_unicode_via_bash() -> Result<(), CompositorError> {
 #[test]
 fn test_vsplit_dense_unicode_via_bash() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.set_fixed_time(fixed_test_time());
     wait_for_output(&mut compositor, 500);
@@ -1976,7 +1988,7 @@ fn test_vsplit_dense_unicode_via_bash() -> Result<(), CompositorError> {
 #[test]
 fn test_vim_ctrl_d_scroll() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.set_fixed_time(fixed_test_time());
     wait_for_output(&mut compositor, 500);
@@ -2063,7 +2075,7 @@ fn test_vim_ctrl_d_scroll() -> Result<(), CompositorError> {
 #[test]
 fn test_unicode_clear_bug() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.set_fixed_time(fixed_test_time());
     wait_for_output(&mut compositor, 500);
@@ -2140,7 +2152,7 @@ fn test_unicode_clear_bug() -> Result<(), CompositorError> {
 #[test]
 fn test_unicode_delta_clear() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
     compositor.set_fixed_time(fixed_test_time());
 
     // Wait for bash to start
@@ -2477,7 +2489,7 @@ fn test_wide_char_clear_delta() {
 #[test]
 fn test_cjk_echo_corruption() -> Result<(), CompositorError> {
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     // Set fixed time to avoid fixture churn
     compositor.set_fixed_time(fixed_test_time());
@@ -2554,7 +2566,7 @@ fn test_cjk_echo_corruption() -> Result<(), CompositorError> {
 fn test_cjk_with_cat() -> Result<(), CompositorError> {
     // This test uses cat to see simple echo behavior
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.set_fixed_time(fixed_test_time());
     wait_for_output(&mut compositor, 500);
@@ -2590,7 +2602,7 @@ fn test_cjk_with_cat() -> Result<(), CompositorError> {
 fn test_cjk_ctrl_w_corruption() -> Result<(), CompositorError> {
     // Test that Ctrl+W (delete word) with CJK characters doesn't corrupt display
     let writer = MemoryWriter::new();
-    let mut compositor = Compositor::with_output(80, 24, Arc::new(Mutex::new(writer.clone())))?;
+    let mut compositor = Compositor::with_core(80, 24, Arc::new(Mutex::new(writer.clone())), isolated_core())?;
 
     compositor.set_fixed_time(fixed_test_time());
     wait_for_output(&mut compositor, 500);

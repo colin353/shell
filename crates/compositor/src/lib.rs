@@ -70,15 +70,33 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// Build a ShellCore backed by a throwaway history file so tests never read
+    /// or write the developer's real `~/.myshell_history.log`.
+    ///
+    /// This points `SHELL_HISTORY_PATH` at a per-process temp file, which also
+    /// isolates panes created by *splits* — those build their own ShellCore via
+    /// the default constructor, so `with_core` on the root pane isn't enough.
+    fn isolated_core() -> Arc<libshell::ShellCore> {
+        let path = std::env::temp_dir().join(format!("shell_test_hist_{}.log", std::process::id()));
+        std::env::set_var("SHELL_HISTORY_PATH", &path);
+        Arc::new(libshell::ShellCore::new().expect("isolated test history"))
+    }
+
+    /// Construct a compositor over a throwaway history and a discardable sink.
+    fn isolated_compositor() -> Compositor {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        Compositor::with_core(80, 24, output, isolated_core()).unwrap()
+    }
+
     #[test]
     fn test_compositor_new() {
-        let compositor = Compositor::new(80, 24);
-        assert!(compositor.is_ok());
+        // Smoke test: construction succeeds.
+        let _compositor = isolated_compositor();
     }
 
     #[test]
     fn test_queue_input() {
-        let compositor = Compositor::new(80, 24).unwrap();
+        let compositor = isolated_compositor();
         compositor.queue_input(b"hello");
 
         let queue = compositor.input_queue.lock().unwrap();
@@ -90,7 +108,7 @@ mod tests {
     fn test_hsplit_focus_movement() {
         // Create an HSplit compositor (top/bottom panes) using Ctrl+b "
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Create horizontal split with Ctrl+b "
         compositor.handle_input(&[0x02]); // Ctrl+b
@@ -125,7 +143,7 @@ mod tests {
     fn test_vsplit_focus_movement() {
         // Create a VSplit compositor (left/right panes) using Ctrl+b %
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Create vertical split with Ctrl+b %
         compositor.handle_input(&[0x02]); // Ctrl+b
@@ -160,7 +178,7 @@ mod tests {
     fn test_focus_movement_at_boundary() {
         // Test that focus doesn't move past boundaries
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Create horizontal split with Ctrl+b "
         compositor.handle_input(&[0x02]); // Ctrl+b
@@ -191,7 +209,7 @@ mod tests {
     fn test_prefix_mode_horizontal_split() {
         // Test that Ctrl+b " creates a horizontal split
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Initially should be a single pane
         assert!(matches!(compositor.root().inner(), PaneCellInner::Pane(_)));
@@ -221,7 +239,7 @@ mod tests {
     fn test_prefix_mode_vertical_split() {
         // Test that Ctrl+b % creates a vertical split
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Initially should be a single pane
         assert!(matches!(compositor.root().inner(), PaneCellInner::Pane(_)));
@@ -252,7 +270,7 @@ mod tests {
     fn test_prefix_mode_escape() {
         // Test that unknown keys in prefix mode are ignored
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Send Ctrl+b to enter prefix mode
         compositor.handle_input(&[0x02]);
@@ -268,7 +286,7 @@ mod tests {
     fn test_prefix_mode_send_ctrl_b() {
         // Test that Ctrl+b Ctrl+b sends Ctrl+b to the terminal
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Send Ctrl+b to enter prefix mode
         compositor.handle_input(&[0x02]);
@@ -284,7 +302,7 @@ mod tests {
     fn test_resize_single_pane() {
         // Test that resize works correctly for a single pane
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Verify initial dimensions (pane height is total - 1 for status bar)
         assert_eq!(compositor.root().dimensions(), (80, 23));
@@ -309,7 +327,7 @@ mod tests {
     fn test_resize_with_splits() {
         // Test that resize correctly distributes space among split panes
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Create a vertical split (left/right)
         compositor.handle_input(&[0x02]); // Ctrl+b
@@ -353,7 +371,7 @@ mod tests {
     fn test_force_render_after_resize() {
         // Test that force_render produces output after resize
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output.clone()).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output.clone(), isolated_core()).unwrap();
 
         // Resize
         compositor.resize(100, 30);
@@ -370,7 +388,7 @@ mod tests {
     #[test]
     fn test_synchronized_output_setting() {
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
 
         // Default should be disabled
         assert!(!compositor.synchronized_output_enabled());
@@ -396,7 +414,7 @@ mod tests {
         );
 
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output, isolated_core()).unwrap();
         compositor.set_fixed_time(
             chrono::Local
                 .with_ymd_and_hms(2025, 1, 1, 12, 0, 0)
@@ -442,7 +460,7 @@ mod tests {
     #[test]
     fn test_synchronized_output_in_render() {
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output.clone()).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output.clone(), isolated_core()).unwrap();
 
         // Enable synchronized output
         compositor.set_synchronized_output(true);
@@ -471,7 +489,7 @@ mod tests {
     #[test]
     fn test_search_mode() {
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output.clone()).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output.clone(), isolated_core()).unwrap();
 
         // Initially not in scrollback or search mode
         assert!(!compositor.root().is_in_scrollback_mode());
@@ -525,7 +543,7 @@ mod tests {
     #[test]
     fn test_prefix_mode_force_redraw() {
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut compositor = Compositor::with_output(80, 24, output.clone()).unwrap();
+        let mut compositor = Compositor::with_core(80, 24, output.clone(), isolated_core()).unwrap();
 
         // Send Ctrl+b r to trigger force full redraw
         compositor.handle_input(&[0x02]); // Ctrl+b

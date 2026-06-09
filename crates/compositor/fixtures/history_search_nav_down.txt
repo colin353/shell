@@ -12,13 +12,13 @@
                                                                                 
                                                                                 
                                                                                 
-    git clone https://github.com/colin353/shell                                 
-    git checkout alacritty-core                                                 
+                                                                                
+                                                                                
   ✗ git push origin main                                                        
   ✓ git commit -m 'Initial commit'                                              
-  ✓ git log --oneline                                                           
->   git status                                                                  
-(reverse-i-search)`git' [1/6]                                                   
+  ✓ git status                                                                  
+> ✓ git log --oneline                                                           
+(reverse-i-search)`git' [1/4]                                                   
 compositor ➜ git                                                                
                                                                                 
  0 shell                                                       2025-01-01 12:00 

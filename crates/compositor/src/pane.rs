@@ -1964,6 +1964,16 @@ impl Pane {
 mod tests {
     use super::*;
 
+    /// Build a pane over a throwaway history file so tests never read or write
+    /// the developer's real `~/.myshell_history.log`. Sets `SHELL_HISTORY_PATH`
+    /// so any pane built via the default constructor is isolated too.
+    fn isolated_pane(width: usize, height: usize) -> Pane {
+        let path =
+            std::env::temp_dir().join(format!("shell_test_hist_{}.log", std::process::id()));
+        std::env::set_var("SHELL_HISTORY_PATH", &path);
+        Pane::new(width, height)
+    }
+
     // ------------------------------------------------------------------
     // Bug B: wrap-aware line editing (regression coverage).
     // ------------------------------------------------------------------
@@ -2003,7 +2013,7 @@ mod tests {
     #[test]
     fn test_wrapped_input_renders_once_and_cursor_at_end() {
         let cols = 20;
-        let mut pane = Pane::new(cols, 10);
+        let mut pane = isolated_pane(cols, 10);
         let p = prompt_cols(&pane);
         let input = "abcdefghijklmnopqrstuvwxyz0123"; // 30 chars -> wraps over 3 rows
         type_str(&mut pane, input);
@@ -2030,7 +2040,7 @@ mod tests {
     #[test]
     fn test_navigation_across_wrap_boundary() {
         let cols = 20;
-        let mut pane = Pane::new(cols, 10);
+        let mut pane = isolated_pane(cols, 10);
         let p = prompt_cols(&pane);
         let input = "abcdefghijklmnopqrstuvwxyz0123";
         type_str(&mut pane, input);
@@ -2074,7 +2084,7 @@ mod tests {
     #[test]
     fn test_backspace_unwraps_without_filling_screen() {
         let cols = 20;
-        let mut pane = Pane::new(cols, 10);
+        let mut pane = isolated_pane(cols, 10);
         let p = prompt_cols(&pane);
         let input = "abcdefghijklmnopqrstuvwxyz0123"; // 3 rows
         type_str(&mut pane, input);
@@ -2109,7 +2119,7 @@ mod tests {
     #[test]
     fn test_midline_insert_reflows_wrapped_line() {
         let cols = 20;
-        let mut pane = Pane::new(cols, 10);
+        let mut pane = isolated_pane(cols, 10);
         let p = prompt_cols(&pane);
         type_str(&mut pane, "abcdefghijklmnopqrstuvwxyz0123");
 
@@ -2145,7 +2155,7 @@ mod tests {
     /// reconstruct the whole URL, but only the first row is returned.
     #[test]
     fn test_url_spanning_wrapped_lines_is_captured_in_full() {
-        let mut pane = Pane::new(20, 10);
+        let mut pane = isolated_pane(20, 10);
         pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
         pane.terminal_emulator
             .process(b"https://example.com/abcdefghij");
@@ -2165,7 +2175,7 @@ mod tests {
     /// across, so the highlight is not limited to the first row.
     #[test]
     fn test_wrapped_url_highlight_spans_both_rows() {
-        let mut pane = Pane::new(20, 10);
+        let mut pane = isolated_pane(20, 10);
         pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
         pane.terminal_emulator
             .process(b"https://example.com/abcdefghij"); // 30 chars -> rows 0 and 1
@@ -2199,7 +2209,7 @@ mod tests {
     /// only a handful of rows. With the bug, all 10 rows fill up.
     #[test]
     fn test_typing_past_wrap_point_does_not_fill_screen() {
-        let mut pane = Pane::new(20, 10);
+        let mut pane = isolated_pane(20, 10);
         for _ in 0..40 {
             pane.handle_input(&[b'a']);
         }
@@ -2226,7 +2236,7 @@ mod tests {
     /// `start_col` is 6 instead of 5.
     #[test]
     fn test_url_match_column_accounts_for_multibyte_prefix() {
-        let mut pane = Pane::new(40, 5);
+        let mut pane = isolated_pane(40, 5);
         pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
         pane.terminal_emulator
             .process("café https://example.com".as_bytes());
