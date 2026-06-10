@@ -1648,13 +1648,13 @@ impl Pane {
     }
 
     /// Whether `abs_line` soft-wraps into `abs_line + 1` (so the two rows are
-    /// part of a single logical line). Scrollback wrap data is not tracked, so
-    /// scrollback rows are treated as un-wrapped.
+    /// part of a single logical line). Works across the scrollback/grid
+    /// boundary: the newest scrollback row may wrap into the top grid row.
     fn line_is_wrapped(&self, abs_line: usize) -> bool {
         let grid = self.terminal_emulator.grid();
         let scrollback_len = grid.scrollback_len();
         if abs_line < scrollback_len {
-            false
+            grid.scrollback_line_is_wrapped(abs_line)
         } else {
             grid.line_is_wrapped(abs_line - scrollback_len)
         }
@@ -2201,6 +2201,75 @@ mod tests {
         );
     }
 
+    /// A wrapped URL whose rows have scrolled off into history must still be
+    /// reassembled in full. Scrollback wrap flags were once untracked, so any
+    /// wrapped URL in scrollback was truncated at its first row.
+    #[test]
+    fn test_wrapped_url_in_scrollback_is_captured_in_full() {
+        let mut pane = isolated_pane(20, 5);
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator
+            .process(b"https://example.com/abcdefghij"); // 30 chars -> rows 0 and 1
+        // Scroll both URL rows off the top into scrollback history.
+        pane.terminal_emulator.process(&b"\r\n".repeat(5));
+        let scrollback_len = pane.terminal_emulator.grid().scrollback_len();
+        assert!(
+            scrollback_len >= 2,
+            "both URL rows should be in scrollback (len = {scrollback_len})"
+        );
+
+        pane.enter_scrollback_mode();
+        pane.enter_url_mode();
+
+        let m = pane
+            .get_url_matches()
+            .first()
+            .expect("the URL in scrollback should be found");
+        assert_eq!(
+            m.url, "https://example.com/abcdefghij",
+            "a wrapped URL in scrollback should be captured in full"
+        );
+        assert!(m.line_index < 0, "URL should start in scrollback");
+        assert_eq!(
+            m.end_line_index,
+            m.line_index + 1,
+            "URL should span two consecutive scrollback rows"
+        );
+    }
+
+    /// A URL that starts on the newest scrollback row and wraps onto the top
+    /// visible grid row must be reassembled across the scrollback/grid boundary.
+    #[test]
+    fn test_wrapped_url_across_scrollback_grid_boundary() {
+        let mut pane = isolated_pane(20, 5);
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator
+            .process(b"https://example.com/abcdefghij"); // 30 chars -> rows 0 and 1
+        // Scroll exactly one line: the URL's first row enters scrollback while
+        // its continuation remains as the top visible grid row.
+        pane.terminal_emulator.process(&b"\r\n".repeat(4));
+        let grid = pane.terminal_emulator.grid();
+        assert!(
+            grid.get_line_text(0).starts_with("abcdefghij"),
+            "URL continuation should be the top grid row, got {:?}",
+            grid.get_line_text(0)
+        );
+
+        pane.enter_scrollback_mode();
+        pane.enter_url_mode();
+
+        let m = pane
+            .get_url_matches()
+            .first()
+            .expect("the boundary-spanning URL should be found");
+        assert_eq!(
+            m.url, "https://example.com/abcdefghij",
+            "a URL wrapping from scrollback into the grid should be captured in full"
+        );
+        assert_eq!(m.line_index, -1, "URL starts on the newest scrollback row");
+        assert_eq!(m.end_line_index, 0, "URL ends on the top grid row");
+    }
+
     /// BUG B (reported): Typing past the wrap point re-emits the entire input
     /// line on every keystroke without accounting for line wrapping, so the
     /// screen fills up with copies of the input instead of wrapping once.
@@ -2241,8 +2310,11 @@ mod tests {
         pane.terminal_emulator
             .process("café https://example.com".as_bytes());
 
+        // `\x1b[2J` pushes the displaced screen (the initial prompt) into
+        // scrollback, so the printed line is the first *grid* row, not abs 0.
+        let top_grid_abs = pane.terminal_emulator.grid().scrollback_len();
         let m = pane
-            .find_first_url_in_line(0)
+            .find_first_url_in_line(top_grid_abs)
             .expect("URL should be found on the line");
 
         assert_eq!(

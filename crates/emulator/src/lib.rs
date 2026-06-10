@@ -76,6 +76,11 @@ pub struct TerminalGrid {
     /// reattached client starts with empty scrollback (matching prior behavior).
     #[serde(skip)]
     scrollback: Vec<Vec<Cell>>,
+    /// Per-scrollback-row soft-wrap flags, parallel to `scrollback` (index 0 is
+    /// the oldest line). The newest entry indicates a wrap into the top visible
+    /// row. Skipped for the same reason as `scrollback`.
+    #[serde(skip)]
+    scrollback_wrapped: Vec<bool>,
     /// Per-row flag: whether the row soft-wraps into the next one (alacritty's
     /// `WRAPLINE`). Used to reassemble logical lines that span multiple rows.
     line_wrapped: Vec<bool>,
@@ -105,6 +110,7 @@ impl TerminalGrid {
         Self {
             cells,
             scrollback: Vec::new(),
+            scrollback_wrapped: Vec::new(),
             line_wrapped: vec![false; rows],
             cols,
             rows,
@@ -189,6 +195,7 @@ impl TerminalGrid {
         self.line_wrapped.resize(rows, false);
         // History reflows on resize; force a rebuild on the next update_from.
         self.scrollback.clear();
+        self.scrollback_wrapped.clear();
 
         self.cols = cols;
         self.rows = rows;
@@ -257,6 +264,7 @@ impl TerminalGrid {
             return;
         }
         self.scrollback = (0..history).map(|i| emu.scrollback_row(i)).collect();
+        self.scrollback_wrapped = (0..history).map(|i| emu.scrollback_line_wrapped(i)).collect();
     }
 
     // Scrollback history, cached from alacritty by `update_from`.
@@ -269,6 +277,12 @@ impl TerminalGrid {
     /// Get a row from the scrollback buffer (index 0 is the oldest line).
     pub fn get_scrollback_row(&self, index: usize) -> Option<&Vec<Cell>> {
         self.scrollback.get(index)
+    }
+
+    /// Whether scrollback row `index` soft-wraps into the following row (the
+    /// next scrollback row, or the top visible row for the newest entry).
+    pub fn scrollback_line_is_wrapped(&self, index: usize) -> bool {
+        self.scrollback_wrapped.get(index).copied().unwrap_or(false)
     }
 
     /// Get a row from the visible grid

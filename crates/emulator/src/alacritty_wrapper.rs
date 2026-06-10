@@ -137,6 +137,21 @@ impl AlacrittyEmulator {
             .collect()
     }
 
+    /// Whether scrollback history row `index` soft-wraps into the following row
+    /// (the next history row, or the top visible row for the newest history
+    /// line). Same `WRAPLINE` convention as [`line_wrapped`](Self::line_wrapped).
+    pub fn scrollback_line_wrapped(&self, index: usize) -> bool {
+        let grid = self.term.grid();
+        let history = grid.history_size();
+        if index >= history || self.cols == 0 {
+            return false;
+        }
+        let line = AlacLine(index as i32 - history as i32);
+        grid[Point::new(line, Column(self.cols - 1))]
+            .flags
+            .contains(CellFlags::WRAPLINE)
+    }
+
     /// Whether the given visible row soft-wraps into the next row.
     ///
     /// alacritty marks the last cell of a wrapped row with `WRAPLINE`; a logical
