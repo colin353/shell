@@ -12,7 +12,7 @@
 
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,11 @@ pub struct RemoteProcess {
     stdin: ChildStdin,
     stdout: ChildStdout,
     stdout_fd: RawFd,
+    /// The transport's stderr, captured (not inherited) so ssh diagnostics —
+    /// host-key warnings, connection errors, etc. — never leak onto the
+    /// compositor's real terminal and corrupt its rendering. Drained into
+    /// `pending` so they surface as text *inside the pane* instead.
+    stderr: Option<ChildStderr>,
     frames: FrameReader,
     /// Decoded ANSI awaiting the pane's emulator.
     pending: Vec<u8>,
@@ -65,13 +70,14 @@ impl RemoteProcess {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .unwrap_or_else(new_session_id);
-        let (child, stdin, stdout, stdout_fd) =
+        let (child, stdin, stdout, stdout_fd, stderr) =
             spawn_transport(target, &session_id, cols, rows, env)?;
         Ok(RemoteProcess {
             child,
             stdin,
             stdout,
             stdout_fd,
+            stderr,
             frames: FrameReader::new(),
             pending: Vec::new(),
             pending_title: None,
@@ -102,6 +108,8 @@ impl RemoteProcess {
     /// `Ok(Some(0))` = the session ended (return to local), `Ok(None)` = nothing
     /// available right now (including while reconnecting).
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        // Surface any transport diagnostics (ssh warnings/errors) as pane text.
+        self.drain_stderr();
         if !self.pending.is_empty() {
             return Ok(Some(self.drain_pending(buf)));
         }
@@ -112,7 +120,13 @@ impl RemoteProcess {
         let mut scratch = [0u8; 8192];
         match self.stdout.read(&mut scratch) {
             Ok(0) => {
-                // Transport closed without a SessionEnded: a dropped link.
+                // Transport closed without a SessionEnded: a dropped link (or a
+                // connect that failed outright). Flush ssh's dying words to the
+                // pane before re-dialing so the user sees *why* it dropped.
+                self.drain_stderr();
+                if !self.pending.is_empty() {
+                    return Ok(Some(self.drain_pending(buf)));
+                }
                 self.try_reconnect();
                 Ok(None)
             }
@@ -166,13 +180,14 @@ impl RemoteProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
 
-        if let Ok((child, stdin, stdout, fd)) =
+        if let Ok((child, stdin, stdout, fd, stderr)) =
             spawn_transport(&self.target, &self.session_id, self.cols, self.rows, &self.env)
         {
             self.child = child;
             self.stdin = stdin;
             self.stdout = stdout;
             self.stdout_fd = fd;
+            self.stderr = stderr;
             self.frames = FrameReader::new();
             self.pending.clear();
         }
@@ -185,6 +200,24 @@ impl RemoteProcess {
         buf[..n].copy_from_slice(&self.pending[..n]);
         self.pending.drain(..n);
         n
+    }
+
+    /// Non-blocking read of the transport's captured stderr, appending whatever
+    /// is there into `pending` so it renders inside the pane. Bare `\n` from ssh
+    /// is rewritten to `\r\n` so lines don't stairstep in the raw-mode emulator.
+    fn drain_stderr(&mut self) {
+        let Some(stderr) = self.stderr.as_mut() else {
+            return;
+        };
+        let mut scratch = [0u8; 4096];
+        loop {
+            match stderr.read(&mut scratch) {
+                Ok(0) => break, // pipe closed (transport gone)
+                Ok(n) => append_crlf(&mut self.pending, &scratch[..n]),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
     }
 
     /// Forward keystrokes to the remote. Best-effort: a write during a dropped
@@ -256,15 +289,19 @@ fn spawn_transport(
     cols: u16,
     rows: u16,
     env: &[(String, String)],
-) -> io::Result<(Child, ChildStdin, ChildStdout, RawFd)> {
+) -> io::Result<(Child, ChildStdin, ChildStdout, RawFd, Option<ChildStderr>)> {
     let mut command = build_remote_command(target, &["bridge", "--session", session_id])?;
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        // Capture stderr rather than inheriting it: inherited stderr writes
+        // straight to the compositor's real terminal and scribble over the
+        // rendered grid. We drain it into the pane instead.
+        .stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take();
 
     codec::write_frame(
         &mut stdin,
@@ -283,7 +320,11 @@ fn spawn_transport(
 
     let stdout_fd = stdout.as_raw_fd();
     set_nonblocking(stdout_fd)?;
-    Ok((child, stdin, stdout, stdout_fd))
+    // stderr must be non-blocking too: drain_stderr() reads it from the
+    // compositor's event loop, which must never block. If we can't, drop the
+    // handle (its pipe stays open on the child but goes unread — harmless).
+    let stderr = stderr.filter(|s| set_nonblocking(s.as_raw_fd()).is_ok());
+    Ok((child, stdin, stdout, stdout_fd, stderr))
 }
 
 /// Build a command that runs the `shell` binary on `target` with `args`.
@@ -325,7 +366,17 @@ fn build_remote_command(target: &str, args: &[&str]) -> io::Result<Command> {
             remote_cmd.push_str(&shell_single_quote(a));
         }
         let mut c = Command::new("ssh");
-        c.arg("-T").arg(target).arg(remote_cmd);
+        // `-T`: no remote pty (we speak the bridge protocol, not a terminal).
+        // `-o BatchMode=yes`: never prompt for a password/passphrase or host-key
+        // confirmation. ssh reads those from `/dev/tty` *directly*, bypassing our
+        // captured stderr and writing onto the compositor's real terminal — and a
+        // prompt on every reconnect would be unworkable anyway. The auto-reconnect
+        // design already assumes non-interactive (key/agent) auth.
+        c.arg("-T")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg(target)
+            .arg(remote_cmd);
         Ok(c)
     }
 }
@@ -386,6 +437,22 @@ fn new_session_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{:x}-{:x}-{:x}", std::process::id(), nanos, n)
+}
+
+/// Append `data` to `out`, rewriting any bare `\n` (not already preceded by a
+/// `\r`) into `\r\n`. ssh prints diagnostics with Unix line endings, but the
+/// pane's emulator runs in raw mode, so without the `\r` each new line would
+/// start at the previous line's column and stairstep down the screen.
+fn append_crlf(out: &mut Vec<u8>, data: &[u8]) {
+    out.reserve(data.len());
+    let mut prev = out.last().copied();
+    for &b in data {
+        if b == b'\n' && prev != Some(b'\r') {
+            out.push(b'\r');
+        }
+        out.push(b);
+        prev = Some(b);
+    }
 }
 
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {

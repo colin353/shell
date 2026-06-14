@@ -558,6 +558,7 @@ impl Compositor {
     /// - Ctrl+b 1-9 : Switch to tab 1-9
     /// - Ctrl+b [ : Enter scrollback mode
     /// - Ctrl+b r : Force full screen redraw
+    /// - Ctrl+b x : Force-kill the focused pane (escape hatch for a hung pane)
     ///
     /// Returns `true` if the compositor should exit, `false` otherwise.
     pub fn handle_input(&mut self, input: &[u8]) -> bool {
@@ -583,7 +584,9 @@ impl Compositor {
         if self.prefix_mode {
             self.prefix_mode = false;
             let (command, command_len) = decode_input_key(input).unwrap_or((input[0], 1));
-            self.handle_prefix_command(command);
+            if self.handle_prefix_command(command) {
+                return true;
+            }
             if command_len < input.len() {
                 return self.handle_input(&input[command_len..]);
             }
@@ -606,7 +609,9 @@ impl Compositor {
         self.handle_non_prefix_input(input)
     }
 
-    fn handle_prefix_command(&mut self, command: u8) {
+    /// Handle a tmux-style `Ctrl+b <command>` keypress. Returns `true` if the
+    /// command tore down the last pane and the whole compositor should exit.
+    fn handle_prefix_command(&mut self, command: u8) -> bool {
         match command {
             b'"' => {
                 // Ctrl+b " - horizontal split (top/bottom)
@@ -650,6 +655,13 @@ impl Compositor {
                 // Ctrl+b z - toggle zoom (temporary fullscreen) for focused pane
                 self.toggle_zoom();
             }
+            b'x' => {
+                // Ctrl+b x - force-kill the focused pane. Unlike Ctrl+C/Ctrl+D
+                // (which the pane may swallow when a subprocess is wedged), this
+                // unconditionally tears the pane down, killing any subprocess or
+                // remote transport it owns. The escape hatch for a hung pane.
+                return self.close_focused_pane_or_exit();
+            }
             b'r' => {
                 // Ctrl+b r - force full screen redraw. For a remote pane, also
                 // pull a fresh authoritative repaint from the remote, since the
@@ -669,6 +681,7 @@ impl Compositor {
                 // Unknown command, ignore
             }
         }
+        false
     }
 
     fn handle_non_prefix_input(&mut self, input: &[u8]) -> bool {
@@ -1204,39 +1217,44 @@ impl Compositor {
                 self.render();
                 false
             }
-            CtrlCResult::ClosePane => {
-                // Try to close the focused pane
-                let pane_count = self.active_tab().root.pane_count();
+            CtrlCResult::ClosePane => self.close_focused_pane_or_exit(),
+        }
+    }
 
-                if pane_count <= 1 {
-                    // This is the last pane in this tab
-                    if self.tabs.len() <= 1 {
-                        // This is the last tab - exit the entire compositor
-                        return true;
-                    } else {
-                        // Close this tab and switch to another
-                        self.tabs.remove(self.active_tab);
-                        if self.active_tab >= self.tabs.len() {
-                            self.active_tab = self.tabs.len() - 1;
-                        }
-                        self.render();
-                        false
-                    }
-                } else {
-                    // Close just the focused pane and exit zoom mode
-                    let was_zoomed = self.active_tab().zoomed;
-                    let width = self.width;
-                    let pane_height = self.height.saturating_sub(self.status_bar_height());
-                    self.active_tab_mut().exit_zoom();
-                    self.active_tab_mut().root.close_focused_pane();
-                    // If we were zoomed, restore the pane layout
-                    if was_zoomed {
-                        self.active_tab_mut().resize(width, pane_height);
-                    }
-                    self.render();
-                    false
-                }
+    /// Tear down the focused pane and re-lay-out what remains. Dropping the pane
+    /// terminates any subprocess or remote transport it owns (see `PtyProcess` /
+    /// `RemoteProcess` Drop), so this works even when the pane is wedged and
+    /// won't respond to Ctrl+C/Ctrl+D. If it was the last pane in the tab, the
+    /// tab is removed; if it was the last tab, returns `true` to exit the app.
+    fn close_focused_pane_or_exit(&mut self) -> bool {
+        let pane_count = self.active_tab().root.pane_count();
+
+        if pane_count <= 1 {
+            // This is the last pane in this tab
+            if self.tabs.len() <= 1 {
+                // This is the last tab - exit the entire compositor
+                return true;
             }
+            // Close this tab and switch to another
+            self.tabs.remove(self.active_tab);
+            if self.active_tab >= self.tabs.len() {
+                self.active_tab = self.tabs.len() - 1;
+            }
+            self.render();
+            false
+        } else {
+            // Close just the focused pane and exit zoom mode
+            let was_zoomed = self.active_tab().zoomed;
+            let width = self.width;
+            let pane_height = self.height.saturating_sub(self.status_bar_height());
+            self.active_tab_mut().exit_zoom();
+            self.active_tab_mut().root.close_focused_pane();
+            // If we were zoomed, restore the pane layout
+            if was_zoomed {
+                self.active_tab_mut().resize(width, pane_height);
+            }
+            self.render();
+            false
         }
     }
 

@@ -157,6 +157,27 @@ mod tests {
     }
 
     #[test]
+    fn test_ctrl_b_x_kills_focused_pane() {
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut compositor = Compositor::with_output(80, 24, output).unwrap();
+
+        // Split into two panes (Ctrl+b "), then force-kill the focused one.
+        compositor.handle_input(&[0x02]);
+        compositor.handle_input(&[b'"']);
+        assert_eq!(compositor.root().pane_count(), 2);
+
+        // Ctrl+b x collapses back to a single pane and does not request exit.
+        assert!(!compositor.handle_input(&[0x02]));
+        let exit = compositor.handle_input(&[b'x']);
+        assert!(!exit);
+        assert_eq!(compositor.root().pane_count(), 1);
+
+        // Ctrl+b x on the last pane of the last tab requests a full exit.
+        assert!(!compositor.handle_input(&[0x02]));
+        assert!(compositor.handle_input(&[b'x']));
+    }
+
+    #[test]
     fn test_focus_movement_at_boundary() {
         // Test that focus doesn't move past boundaries
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
