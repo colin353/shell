@@ -175,6 +175,115 @@ mod tests {
     }
 
     #[test]
+    fn test_three_pane_middle_reachable() {
+        // Repro: with three vertical splits, the middle pane should be reachable.
+        // Splitting nests the focused leaf into a fresh 2-element split, so two
+        // vsplits yield VSplit[A, VSplit[B, C]] with focus on C.
+        let mut compositor = isolated_compositor();
+
+        // Two vertical splits (Ctrl+b %), creating panes A | B | C, focus on C.
+        compositor.handle_input(&[0x02]);
+        compositor.handle_input(&[b'%']);
+        compositor.handle_input(&[0x02]);
+        compositor.handle_input(&[b'%']);
+
+        // Recursively find the pos_x of the currently focused leaf pane.
+        fn focused_pos_x(cell: &PaneCell) -> Option<usize> {
+            match &cell.inner {
+                PaneCellInner::Pane(_) if cell.focus => Some(cell.pos_x),
+                PaneCellInner::Pane(_) => None,
+                PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                    cells.iter().find_map(focused_pos_x)
+                }
+            }
+        }
+
+        // Collect the x positions of the three leaves (left to right): A=0, B, C.
+        fn leaf_xs(cell: &PaneCell, out: &mut Vec<usize>) {
+            match &cell.inner {
+                PaneCellInner::Pane(_) => out.push(cell.pos_x),
+                PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                    for c in cells {
+                        leaf_xs(c, out);
+                    }
+                }
+            }
+        }
+        let mut xs = Vec::new();
+        leaf_xs(compositor.root(), &mut xs);
+        xs.sort();
+        assert_eq!(xs.len(), 3, "expected three panes");
+        let (left_x, middle_x, right_x) = (xs[0], xs[1], xs[2]);
+
+        // Focus starts on the rightmost pane C.
+        assert_eq!(focused_pos_x(compositor.root()), Some(right_x));
+
+        // Move focus left once (Ctrl+h). Should land on the MIDDLE pane B.
+        compositor.handle_input(&[0x08]);
+        assert_eq!(
+            focused_pos_x(compositor.root()),
+            Some(middle_x),
+            "moving left from the rightmost pane should reach the middle pane, not skip it"
+        );
+
+        // Move focus left again. Should land on the LEFT pane A.
+        compositor.handle_input(&[0x08]);
+        assert_eq!(focused_pos_x(compositor.root()), Some(left_x));
+    }
+
+    #[test]
+    fn test_three_pane_middle_reachable_hsplit() {
+        // Same as above but for horizontal splits: panes stacked top/middle/bottom.
+        let mut compositor = isolated_compositor();
+
+        // Two horizontal splits (Ctrl+b "), focus ends on the bottom pane.
+        compositor.handle_input(&[0x02]);
+        compositor.handle_input(&[b'"']);
+        compositor.handle_input(&[0x02]);
+        compositor.handle_input(&[b'"']);
+
+        fn focused_pos_y(cell: &PaneCell) -> Option<usize> {
+            match &cell.inner {
+                PaneCellInner::Pane(_) if cell.focus => Some(cell.pos_y),
+                PaneCellInner::Pane(_) => None,
+                PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                    cells.iter().find_map(focused_pos_y)
+                }
+            }
+        }
+        fn leaf_ys(cell: &PaneCell, out: &mut Vec<usize>) {
+            match &cell.inner {
+                PaneCellInner::Pane(_) => out.push(cell.pos_y),
+                PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                    for c in cells {
+                        leaf_ys(c, out);
+                    }
+                }
+            }
+        }
+        let mut ys = Vec::new();
+        leaf_ys(compositor.root(), &mut ys);
+        ys.sort();
+        assert_eq!(ys.len(), 3, "expected three panes");
+        let (top_y, middle_y, bottom_y) = (ys[0], ys[1], ys[2]);
+
+        // Focus starts on the bottom pane.
+        assert_eq!(focused_pos_y(compositor.root()), Some(bottom_y));
+
+        // Move focus up once (Ctrl+k). Should land on the MIDDLE pane.
+        compositor.handle_input(&[0x0b]);
+        assert_eq!(
+            focused_pos_y(compositor.root()),
+            Some(middle_y),
+            "moving up from the bottom pane should reach the middle pane, not skip it"
+        );
+
+        // Move focus up again. Should land on the TOP pane.
+        compositor.handle_input(&[0x0b]);
+        assert_eq!(focused_pos_y(compositor.root()), Some(top_y));
+    }
+
+    #[test]
     fn test_focus_movement_at_boundary() {
         // Test that focus doesn't move past boundaries
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));

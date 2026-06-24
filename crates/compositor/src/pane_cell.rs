@@ -890,51 +890,60 @@ impl PaneCell {
                 false
             }
             PaneCellInner::VSplit(cells) => {
-                // VSplit arranges panes horizontally (left to right)
-                // Left/Right moves between siblings, Up/Down goes into children
-                let focused_idx = cells.iter().position(|c| c.focus);
+                // VSplit arranges panes horizontally (left to right).
+                // Left/Right moves between siblings, Up/Down goes into children.
+                let Some(idx) = cells.iter().position(|c| c.focus) else {
+                    return false;
+                };
 
-                match (direction, focused_idx) {
-                    (Direction::Left, Some(idx)) if idx > 0 => {
-                        // Move focus to the left sibling
+                // Always give the focused child a chance to move focus within
+                // itself first. Otherwise a nested split (e.g. the right child of
+                // VSplit[A, VSplit[B, C]]) is treated as a single jump target and
+                // the inner panes get skipped over.
+                if cells[idx].move_focus(direction) {
+                    return true;
+                }
+
+                // The child couldn't absorb the move, so step to a sibling along
+                // this split's horizontal axis.
+                match direction {
+                    Direction::Left if idx > 0 => {
                         cells[idx].clear_focus();
-                        cells[idx - 1].set_focus_first();
+                        cells[idx - 1].set_focus_toward(direction);
                         true
                     }
-                    (Direction::Right, Some(idx)) if idx < cells.len() - 1 => {
-                        // Move focus to the right sibling
+                    Direction::Right if idx + 1 < cells.len() => {
                         cells[idx].clear_focus();
-                        cells[idx + 1].set_focus_first();
+                        cells[idx + 1].set_focus_toward(direction);
                         true
-                    }
-                    (_, Some(idx)) => {
-                        // Try to move focus within the focused child
-                        cells[idx].move_focus(direction)
                     }
                     _ => false,
                 }
             }
             PaneCellInner::HSplit(cells) => {
-                // HSplit arranges panes vertically (top to bottom)
-                // Up/Down moves between siblings, Left/Right goes into children
-                let focused_idx = cells.iter().position(|c| c.focus);
+                // HSplit arranges panes vertically (top to bottom).
+                // Up/Down moves between siblings, Left/Right goes into children.
+                let Some(idx) = cells.iter().position(|c| c.focus) else {
+                    return false;
+                };
 
-                match (direction, focused_idx) {
-                    (Direction::Up, Some(idx)) if idx > 0 => {
-                        // Move focus to the upper sibling
+                // Let the focused child handle the move internally first (see the
+                // VSplit arm above for why this matters with nested splits).
+                if cells[idx].move_focus(direction) {
+                    return true;
+                }
+
+                // Otherwise step to a sibling along this split's vertical axis.
+                match direction {
+                    Direction::Up if idx > 0 => {
                         cells[idx].clear_focus();
-                        cells[idx - 1].set_focus_first();
+                        cells[idx - 1].set_focus_toward(direction);
                         true
                     }
-                    (Direction::Down, Some(idx)) if idx < cells.len() - 1 => {
-                        // Move focus to the lower sibling
+                    Direction::Down if idx + 1 < cells.len() => {
                         cells[idx].clear_focus();
-                        cells[idx + 1].set_focus_first();
+                        cells[idx + 1].set_focus_toward(direction);
                         true
-                    }
-                    (_, Some(idx)) => {
-                        // Try to move focus within the focused child
-                        cells[idx].move_focus(direction)
                     }
                     _ => false,
                 }
@@ -963,6 +972,39 @@ impl PaneCell {
             PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
                 if let Some(first) = cells.first_mut() {
                     first.set_focus_first();
+                }
+            }
+        }
+    }
+
+    /// Set focus on the leaf adjacent to a neighbor we are moving in from.
+    ///
+    /// `moving` is the direction of travel. When focus crosses into this cell we
+    /// descend to the edge the cursor would arrive at: moving Left enters a split
+    /// from its right edge (so we pick the rightmost child), moving Up enters from
+    /// the bottom, and so on. Movement along a split's cross-axis just keeps the
+    /// conventional first child. This keeps the immediately adjacent pane focused
+    /// instead of jumping to the far side of a nested split.
+    pub fn set_focus_toward(&mut self, moving: Direction) {
+        self.focus = true;
+        match &mut self.inner {
+            PaneCellInner::Pane(_) => {}
+            PaneCellInner::VSplit(cells) => {
+                let target = match moving {
+                    Direction::Left => cells.last_mut(),
+                    _ => cells.first_mut(),
+                };
+                if let Some(child) = target {
+                    child.set_focus_toward(moving);
+                }
+            }
+            PaneCellInner::HSplit(cells) => {
+                let target = match moving {
+                    Direction::Up => cells.last_mut(),
+                    _ => cells.first_mut(),
+                };
+                if let Some(child) = target {
+                    child.set_focus_toward(moving);
                 }
             }
         }
