@@ -209,6 +209,18 @@ mod tests {
                 }
             }
         }
+        // The tree should be flattened: a single VSplit with three leaf children,
+        // not a nested VSplit[A, VSplit[B, C]].
+        if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
+            assert_eq!(cells.len(), 3, "three vsplits should flatten into one split");
+            assert!(
+                cells.iter().all(|c| matches!(c.inner, PaneCellInner::Pane(_))),
+                "all children should be leaf panes (flat tree)"
+            );
+        } else {
+            panic!("root should be a VSplit");
+        }
+
         let mut xs = Vec::new();
         leaf_xs(compositor.root(), &mut xs);
         xs.sort();
@@ -261,6 +273,17 @@ mod tests {
                 }
             }
         }
+        // The tree should be flattened: a single HSplit with three leaf children.
+        if let PaneCellInner::HSplit(cells) = &compositor.root().inner {
+            assert_eq!(cells.len(), 3, "three hsplits should flatten into one split");
+            assert!(
+                cells.iter().all(|c| matches!(c.inner, PaneCellInner::Pane(_))),
+                "all children should be leaf panes (flat tree)"
+            );
+        } else {
+            panic!("root should be an HSplit");
+        }
+
         let mut ys = Vec::new();
         leaf_ys(compositor.root(), &mut ys);
         ys.sort();
@@ -281,6 +304,29 @@ mod tests {
         // Move focus up again. Should land on the TOP pane.
         compositor.handle_input(&[0x0b]);
         assert_eq!(focused_pos_y(compositor.root()), Some(top_y));
+    }
+
+    #[test]
+    fn test_cross_axis_split_still_nests() {
+        // Flattening must only apply along the same axis. A vertical split
+        // followed by a horizontal split must nest: VSplit[A, HSplit[B, C]].
+        let mut compositor = isolated_compositor();
+
+        compositor.handle_input(&[0x02]);
+        compositor.handle_input(&[b'%']); // vertical split -> VSplit[A, B]
+        compositor.handle_input(&[0x02]);
+        compositor.handle_input(&[b'"']); // horizontal split of B -> HSplit[B, C]
+
+        if let PaneCellInner::VSplit(cells) = &compositor.root().inner {
+            assert_eq!(cells.len(), 2, "outer split stays binary across axes");
+            assert!(matches!(cells[0].inner, PaneCellInner::Pane(_)));
+            assert!(
+                matches!(&cells[1].inner, PaneCellInner::HSplit(inner) if inner.len() == 2),
+                "the cross-axis split should nest as an HSplit of two panes"
+            );
+        } else {
+            panic!("root should be a VSplit");
+        }
     }
 
     #[test]

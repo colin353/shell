@@ -1107,15 +1107,67 @@ impl PaneCell {
 
                 Ok(())
             }
-            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
-                // Find the focused child and split it
-                for cell in cells {
-                    if cell.focus {
-                        return cell.split_focused(direction);
-                    }
+            PaneCellInner::VSplit(cells) => {
+                let Some(idx) = cells.iter().position(|c| c.focus) else {
+                    return Ok(());
+                };
+                // If the focused child is a leaf and the requested split runs
+                // along this split's axis (vertical / left-right), add the new
+                // pane as a sibling here instead of nesting a fresh split inside
+                // the leaf. This keeps N side-by-side panes flat as
+                // VSplit[A, B, C, ...] rather than VSplit[A, VSplit[B, C]].
+                if direction == SplitDirection::Vertical && cells[idx].is_leaf() {
+                    let sibling = cells[idx].split_into_sibling();
+                    cells.insert(idx + 1, sibling);
+                } else {
+                    return cells[idx].split_focused(direction);
                 }
+                // Redistribute this split's area across its (now larger) child set.
+                self.recalculate_layout();
                 Ok(())
             }
+            PaneCellInner::HSplit(cells) => {
+                let Some(idx) = cells.iter().position(|c| c.focus) else {
+                    return Ok(());
+                };
+                // Same flattening as the VSplit arm, along the horizontal
+                // (top/bottom) axis.
+                if direction == SplitDirection::Horizontal && cells[idx].is_leaf() {
+                    let sibling = cells[idx].split_into_sibling();
+                    cells.insert(idx + 1, sibling);
+                } else {
+                    return cells[idx].split_focused(direction);
+                }
+                self.recalculate_layout();
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether this cell is a single pane (leaf), as opposed to a split.
+    fn is_leaf(&self) -> bool {
+        matches!(self.inner, PaneCellInner::Pane(_))
+    }
+
+    /// Build a new sibling pane next to `self`, which must be a focused leaf.
+    ///
+    /// Focus moves from `self` to the returned cell. Geometry is copied from
+    /// `self` as a placeholder; the parent split corrects it via
+    /// [`recalculate_layout`](Self::recalculate_layout) once the cell is inserted.
+    fn split_into_sibling(&mut self) -> PaneCell {
+        let PaneCellInner::Pane(pane) = &self.inner else {
+            unreachable!("split_into_sibling called on a non-leaf cell");
+        };
+        // New shell starts in the same working directory as the pane it joins.
+        let new_pane = Pane::new_in(self.width, self.height, pane.shell.cwd().to_path_buf());
+        self.focus = false;
+        PaneCell {
+            inner: PaneCellInner::Pane(new_pane),
+            width: self.width,
+            height: self.height,
+            pos_x: self.pos_x,
+            pos_y: self.pos_y,
+            focus: true,
         }
     }
 
