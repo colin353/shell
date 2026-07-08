@@ -2,6 +2,7 @@ use pty;
 use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
+use unicode_width::UnicodeWidthChar;
 
 /// Result of handling CTRL+C on a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +48,18 @@ fn is_replayable_typeahead(input: &[u8]) -> bool {
         && input.iter().all(
             |&byte| matches!(byte, b'\t' | b'\r' | b'\n' | 0x08 | 0x7f | 0x20..=0x7e | 0x80..=0xff),
         )
+}
+
+fn predictable_remote_text(input: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(input).ok()?;
+    if text
+        .chars()
+        .all(|ch| !ch.is_control() && ch.width().unwrap_or(0) > 0)
+    {
+        Some(text)
+    } else {
+        None
+    }
 }
 
 /// Regex pattern for matching URLs (based on Alacritty's approach)
@@ -218,6 +231,8 @@ pub struct Pane {
     /// Set when the remote session ends deliberately; the compositor should
     /// remove this pane instead of returning it to the dormant local shell.
     close_requested: bool,
+    /// Speculative text drawn locally while waiting for remote echo.
+    predicted_remote_input: String,
     pub read_buffer: [u8; 4096],
     /// Whether the pane is in scrollback mode
     pub scrollback_mode: bool,
@@ -280,6 +295,7 @@ impl Pane {
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
             close_requested: false,
+            predicted_remote_input: String::new(),
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -316,6 +332,7 @@ impl Pane {
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
             close_requested: false,
+            predicted_remote_input: String::new(),
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -342,9 +359,22 @@ impl Pane {
             return self.handle_session_picker_input(input);
         }
         if let PaneProcess::Remote(remote) = &mut self.process {
+            let predicted = remote.input_echo_mode()
+                && self.predicted_remote_input.len() < 256
+                && predictable_remote_text(input).is_some();
+            if predicted {
+                self.predicted_remote_input
+                    .push_str(predictable_remote_text(input).unwrap());
+            } else {
+                self.predicted_remote_input.clear();
+            }
             // Connected to a remote session: forward keystrokes verbatim.
             let _ = remote.write(input);
-            return PaneInputResult::None;
+            return if predicted {
+                PaneInputResult::Rerender
+            } else {
+                PaneInputResult::None
+            };
         }
         if matches!(self.process, PaneProcess::Subprocess(_)) {
             self.record_subprocess_typeahead(input);
@@ -844,6 +874,7 @@ impl Pane {
             match result {
                 Ok(Some(0)) => break, // EOF
                 Ok(Some(n)) => {
+                    self.predicted_remote_input.clear();
                     self.terminal_emulator.process(&self.read_buffer[..n]);
                     let responses = self.terminal_emulator.drain_responses();
                     if !responses.is_empty() {
@@ -890,6 +921,30 @@ impl Pane {
         self.close_requested
     }
 
+    pub fn predicted_remote_input(&self) -> &str {
+        &self.predicted_remote_input
+    }
+
+    pub fn predicted_cursor_position(&self, max_width: usize, max_height: usize) -> (usize, usize) {
+        let (mut x, mut y) = self.terminal_emulator.cursor_position();
+        for ch in self.predicted_remote_input.chars() {
+            let width = ch.width().unwrap_or(0).max(1);
+            if x + width > max_width {
+                x = 0;
+                y = y.saturating_add(1);
+            }
+            if y >= max_height {
+                return (max_width.saturating_sub(1), max_height.saturating_sub(1));
+            }
+            x += width;
+            if x >= max_width {
+                x = 0;
+                y = y.saturating_add(1);
+            }
+        }
+        (x.min(max_width.saturating_sub(1)), y.min(max_height.saturating_sub(1)))
+    }
+
     /// Check if the pane is still active (shell hasn't exited).
     pub fn is_running(&self) -> bool {
         // Pane is running if shell hasn't exited
@@ -909,6 +964,14 @@ impl Pane {
         match &self.process {
             PaneProcess::Remote(remote) => Some(remote),
             _ => None,
+        }
+    }
+
+    pub fn input_echo_mode(&self) -> bool {
+        match &self.process {
+            PaneProcess::None => true,
+            PaneProcess::Subprocess(proc) => proc.is_canonical_echo_mode(),
+            PaneProcess::Remote(remote) => remote.input_echo_mode(),
         }
     }
 

@@ -29,7 +29,7 @@ pub mod codec;
 /// Bumped whenever [`ClientMsg`]/[`ServerMsg`] change incompatibly. The
 /// handshake compares versions and reports [`RemoteStatus::VersionMismatch`]
 /// when a remote daemon binary is stale.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -214,6 +214,12 @@ pub enum ServerMsg {
     Context {
         pane: PaneId,
         ctx: ContextSnapshot,
+    },
+    /// Whether the focused pane is in a mode where printable input is expected
+    /// to echo at the cursor. Used for conservative local prediction.
+    InputMode {
+        pane: PaneId,
+        echo: bool,
     },
     Completions {
         req: RequestId,

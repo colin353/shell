@@ -188,6 +188,7 @@ fn forward_pending(
     history_mirror: &libshell::HistoryMirror,
     last_name: &mut String,
     last_cwd: &mut Option<PathBuf>,
+    last_input_echo: &mut Option<bool>,
 ) {
     let name = compositor.active_tab().name.clone();
     let rename = if name != *last_name {
@@ -205,6 +206,14 @@ fn forward_pending(
         None
     };
 
+    let input_echo = compositor.focused_input_echo_mode();
+    let input_mode = if input_echo != *last_input_echo {
+        *last_input_echo = input_echo;
+        input_echo.map(input_mode_msg)
+    } else {
+        None
+    };
+
     let Some(out) = out else { return };
     for entry in history_mirror.drain() {
         let _ = codec::write_frame(&mut *out, &ServerMsg::HistoryRecorded { entry });
@@ -213,7 +222,10 @@ fn forward_pending(
         let _ = codec::write_frame(&mut *out, &ServerMsg::RenameWindow { name });
     }
     if let Some(context) = context {
-        let _ = codec::write_frame(out, &context);
+        let _ = codec::write_frame(&mut *out, &context);
+    }
+    if let Some(input_mode) = input_mode {
+        let _ = codec::write_frame(out, &input_mode);
     }
 }
 
@@ -226,6 +238,13 @@ fn context_msg(cwd: PathBuf) -> ServerMsg {
             path_executables: Vec::new(),
             origin: Origin::Local,
         },
+    }
+}
+
+fn input_mode_msg(echo: bool) -> ServerMsg {
+    ServerMsg::InputMode {
+        pane: PaneId(0),
+        echo,
     }
 }
 
@@ -284,6 +303,7 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
     let mut control: Option<UnixStream> = None;
     let mut last_name = compositor.active_tab().name.clone();
     let mut last_cwd = compositor.focused_cwd();
+    let mut last_input_echo = compositor.focused_input_echo_mode();
 
     // Persist indefinitely while detached by default (the point of a remote
     // session). `SHELL_SESSION_IDLE_EXIT_SECS` bounds that — tests set it so the
@@ -330,6 +350,10 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
                     if let Some(cwd) = compositor.focused_cwd() {
                         let _ = codec::write_frame(&mut stream, &context_msg(cwd.clone()));
                         last_cwd = Some(cwd);
+                    }
+                    if let Some(echo) = compositor.focused_input_echo_mode() {
+                        let _ = codec::write_frame(&mut stream, &input_mode_msg(echo));
+                        last_input_echo = Some(echo);
                     }
                     if let Ok(clone) = stream.try_clone() {
                         control = stream.try_clone().ok();
@@ -384,6 +408,7 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
             &history_mirror,
             &mut last_name,
             &mut last_cwd,
+            &mut last_input_echo,
         );
 
         if should_exit {
@@ -480,6 +505,9 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     if let Some(cwd) = compositor.focused_cwd() {
         codec::write_frame(&mut handshake_out, &context_msg(cwd))?;
     }
+    if let Some(echo) = compositor.focused_input_echo_mode() {
+        codec::write_frame(&mut handshake_out, &input_mode_msg(echo))?;
+    }
     sink.lock().unwrap().attach(Box::new(dup_file(1)?));
 
     // Reader thread: stdin -> ClientMsg.
@@ -487,6 +515,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
 
     let mut last_name = compositor.active_tab().name.clone();
     let mut last_cwd = compositor.focused_cwd();
+    let mut last_input_echo = compositor.focused_input_echo_mode();
 
     loop {
         let mut exit = false;
@@ -519,6 +548,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
             &history_mirror,
             &mut last_name,
             &mut last_cwd,
+            &mut last_input_echo,
         );
 
         if exit {

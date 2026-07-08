@@ -28,6 +28,58 @@ pub enum PaneCellInner {
 }
 
 impl PaneCell {
+    fn draw_prediction_overlay(
+        pane: &Pane,
+        dest: &mut emulator::TerminalEmulator,
+        dest_x: usize,
+        dest_y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        if pane.predicted_remote_input().is_empty() || pane.scrollback_mode {
+            return;
+        }
+
+        let (mut x, mut y) = pane.terminal_emulator.cursor_position();
+        let (dest_cols, dest_rows) = dest.dimensions();
+        let mut attrs = pane.terminal_emulator.grid().current_attrs.clone();
+        attrs.dim = true;
+        attrs.underline = true;
+
+        for ch in pane.predicted_remote_input().chars() {
+            let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if char_width == 0 {
+                continue;
+            }
+            if x + char_width > width {
+                x = 0;
+                y = y.saturating_add(1);
+            }
+            if y >= height {
+                break;
+            }
+
+            let cell_x = dest_x + x;
+            let cell_y = dest_y + y;
+            if cell_x < dest_cols && cell_y < dest_rows {
+                let mut cell = emulator::Cell::new(ch, attrs.clone());
+                cell.is_wide_char_spacer = false;
+                dest.grid_mut().set_cell(cell_x, cell_y, cell);
+                if char_width == 2 && x + 1 < width && cell_x + 1 < dest_cols {
+                    let mut spacer = emulator::Cell::new(' ', attrs.clone());
+                    spacer.is_wide_char_spacer = true;
+                    dest.grid_mut().set_cell(cell_x + 1, cell_y, spacer);
+                }
+            }
+
+            x += char_width;
+            if x >= width {
+                x = 0;
+                y = y.saturating_add(1);
+            }
+        }
+    }
+
     fn contains_position(&self, x: usize, y: usize) -> bool {
         x >= self.pos_x
             && x < self.pos_x.saturating_add(self.width)
@@ -121,6 +173,20 @@ impl PaneCell {
                 for cell in cells {
                     if cell.focus {
                         return cell.get_focused_pane();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    pub fn focused_input_echo_mode(&self) -> Option<bool> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => Some(pane.input_echo_mode()),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.focused_input_echo_mode();
                     }
                 }
                 None
@@ -1437,6 +1503,14 @@ impl PaneCell {
                         self.width,  // width to copy
                         self.height, // height to copy
                     );
+                    Self::draw_prediction_overlay(
+                        pane,
+                        dest,
+                        self.pos_x,
+                        self.pos_y,
+                        self.width,
+                        self.height,
+                    );
                 }
             }
             PaneCellInner::VSplit(cells) => {
@@ -1672,7 +1746,11 @@ impl PaneCell {
                 if pane.scrollback_mode {
                     return Some((0, 0, false));
                 }
-                let (cursor_x, cursor_y) = pane.terminal_emulator.cursor_position();
+                let (cursor_x, cursor_y) = if pane.predicted_remote_input().is_empty() {
+                    pane.terminal_emulator.cursor_position()
+                } else {
+                    pane.predicted_cursor_position(self.width, self.height)
+                };
                 let cursor_visible = pane.terminal_emulator.grid().cursor_visible;
                 // Transform cursor position to global coordinates
                 let global_x = self.pos_x + cursor_x;
@@ -1972,6 +2050,14 @@ impl PaneCell {
                             }
                         }
                     }
+                    Self::draw_prediction_overlay(
+                        pane,
+                        dest,
+                        dest_x,
+                        dest_y,
+                        render_width,
+                        render_height,
+                    );
                 }
             }
             PaneCellInner::VSplit(_) | PaneCellInner::HSplit(_) => {

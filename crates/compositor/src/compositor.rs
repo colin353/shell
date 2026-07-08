@@ -1897,6 +1897,10 @@ impl Compositor {
             .map(|pane| pane.shell.cwd().to_path_buf())
     }
 
+    pub fn focused_input_echo_mode(&self) -> Option<bool> {
+        self.tabs[self.active_tab].root.focused_input_echo_mode()
+    }
+
     /// Set the focused pane's authoritative cwd.
     pub fn set_focused_cwd(&mut self, cwd: PathBuf) -> bool {
         self.tabs[self.active_tab].root.set_focused_cwd(cwd)

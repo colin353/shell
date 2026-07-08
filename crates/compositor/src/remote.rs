@@ -36,6 +36,8 @@ pub struct RemoteProcess {
     pending_history: Vec<HistoryRecord>,
     /// Latest authoritative cwd reported by the remote daemon.
     cwd: Option<PathBuf>,
+    /// Whether the remote focused pane expects printable input to echo.
+    input_echo: bool,
 
     // --- Reconnect parameters (the session is identified by `session_id`). ---
     target: String,
@@ -82,6 +84,7 @@ impl RemoteProcess {
             pending_title: None,
             pending_history: Vec::new(),
             cwd: None,
+            input_echo: false,
             target: target.to_string(),
             session_id,
             cols,
@@ -135,6 +138,7 @@ impl RemoteProcess {
                             .pending
                             .extend_from_slice(&emulator::render_snapshot_to_ansi(&grid)),
                         ServerMsg::Context { ctx, .. } => self.cwd = Some(ctx.cwd),
+                        ServerMsg::InputMode { echo, .. } => self.input_echo = echo,
                         ServerMsg::RenameWindow { name } => self.pending_title = Some(name),
                         ServerMsg::HistoryRecorded { entry } => self.pending_history.push(entry),
                         ServerMsg::SessionEnded => self.ended = true,
@@ -259,6 +263,10 @@ impl RemoteProcess {
     /// Latest authoritative cwd reported by the remote daemon.
     pub fn cwd(&self) -> Option<&Path> {
         self.cwd.as_deref()
+    }
+
+    pub fn input_echo_mode(&self) -> bool {
+        self.input_echo
     }
 
     /// Exit code if the session ended deliberately. Returns `None` while a
