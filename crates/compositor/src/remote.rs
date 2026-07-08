@@ -222,6 +222,17 @@ impl RemoteProcess {
         Ok(())
     }
 
+    /// Tell the remote daemon to update its authoritative window title.
+    pub fn set_title(&mut self, name: &str) -> io::Result<()> {
+        let _ = codec::write_frame(
+            &mut self.stdin,
+            &ClientMsg::SetTitle {
+                name: name.to_string(),
+            },
+        );
+        Ok(())
+    }
+
     /// Ask the remote to repaint its authoritative screen.
     pub fn request_resync(&mut self) -> io::Result<()> {
         let _ = codec::write_frame(&mut self.stdin, &ClientMsg::RequestResync);

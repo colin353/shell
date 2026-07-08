@@ -25,7 +25,10 @@ pub enum PaneInputResult {
     RenameWindow(String),
     /// The pane connected to a remote host; the compositor should mark the
     /// containing tab as remote-owned so new splits auto-connect.
-    ConnectedRemote(String),
+    ConnectedRemote {
+        target: String,
+        title: Option<String>,
+    },
 }
 
 /// State for the `reconnect` session picker: choose a persistent session on a
@@ -476,7 +479,10 @@ impl Pane {
                 }
 
                 match self.connect_remote_session(&target, session.as_deref(), &env) {
-                    Ok(()) => PaneInputResult::ConnectedRemote(target),
+                    Ok(()) => PaneInputResult::ConnectedRemote {
+                        target,
+                        title: None,
+                    },
                     Err(e) => {
                         let error_msg = format!("connect error: {}\r\n", e);
                         self.terminal_emulator.process(error_msg.as_bytes());
@@ -578,7 +584,15 @@ impl Pane {
                 // GridResync once the link is up.
                 self.terminal_emulator.process(b"\x1b[2J\x1b[H\x1b[?25h");
                 match self.connect_remote_session(&target, Some(&name), &env) {
-                    Ok(()) => PaneInputResult::ConnectedRemote(target),
+                    Ok(()) => {
+                        if let Some(remote) = self.remote_mut() {
+                            let _ = remote.set_title(&name);
+                        }
+                        PaneInputResult::ConnectedRemote {
+                            target,
+                            title: Some(name),
+                        }
+                    }
                     Err(e) => {
                         let msg = format!("connect error: {}\r\n", e);
                         self.terminal_emulator.process(msg.as_bytes());

@@ -162,6 +162,10 @@ fn apply_client_msg(compositor: &mut compositor::Compositor, msg: ClientMsg) -> 
                 compositor.force_full_redraw();
             }
         }
+        ClientMsg::SetTitle { name } => {
+            compositor.active_tab_mut().name = name;
+            compositor.force_full_redraw();
+        }
         ClientMsg::RequestResync => compositor.force_full_redraw(),
         ClientMsg::UpdateLocalEnv { vars } => apply_env_defaults(&vars),
         ClientMsg::Detach => return MsgOutcome::Detach,

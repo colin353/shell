@@ -785,9 +785,12 @@ impl Compositor {
                 self.tabs[self.active_tab].name = name;
                 self.render();
             }
-            PaneInputResult::ConnectedRemote(target) => {
+            PaneInputResult::ConnectedRemote { target, title } => {
                 // The tab is now remote-owned: future splits auto-connect there.
                 self.tabs[self.active_tab].remote_host = Some(target);
+                if let Some(title) = title {
+                    self.tabs[self.active_tab].name = title;
+                }
                 self.render();
             }
         }
@@ -1450,8 +1453,11 @@ impl Compositor {
                     self.tabs[self.active_tab].name = name;
                     needs_render = true;
                 }
-                PaneInputResult::ConnectedRemote(target) => {
+                PaneInputResult::ConnectedRemote { target, title } => {
                     self.tabs[self.active_tab].remote_host = Some(target);
+                    if let Some(title) = title {
+                        self.tabs[self.active_tab].name = title;
+                    }
                     needs_render = true;
                 }
             }

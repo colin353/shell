@@ -96,6 +96,11 @@ fn reconnect_picker_lists_and_resumes() {
         s.contains("PICK_MARKER"),
         "resume preserves original session state; got:\n{s}"
     );
+    assert_eq!(
+        comp.active_tab().name,
+        name,
+        "reconnecting a named session should title the tab with the session name"
+    );
 
     // Clean up the detached daemon.
     comp.get_focused_pane_mut().unwrap().take_remote();
