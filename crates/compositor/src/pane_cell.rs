@@ -356,6 +356,45 @@ impl PaneCell {
         }
     }
 
+    /// Remove any panes that have requested closure after an async event such as
+    /// a remote session ending. Returns false if this whole cell should be
+    /// removed by its parent.
+    pub fn close_requested_panes(&mut self) -> bool {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => !pane.close_requested(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                let mut idx = 0;
+                while idx < cells.len() {
+                    if cells[idx].close_requested_panes() {
+                        idx += 1;
+                    } else {
+                        cells.remove(idx);
+                    }
+                }
+
+                if cells.is_empty() {
+                    return false;
+                }
+
+                if cells.len() == 1 {
+                    let remaining = cells.remove(0);
+                    self.inner = remaining.inner;
+                    self.focus = true;
+                    self.set_focus_first();
+                    self.recalculate_layout();
+                } else {
+                    if !cells.iter().any(|cell| cell.focus) {
+                        cells[0].focus = true;
+                        cells[0].set_focus_first();
+                    }
+                    self.recalculate_layout();
+                }
+
+                true
+            }
+        }
+    }
+
     /// Count the total number of panes in this cell tree.
     pub fn pane_count(&self) -> usize {
         match &self.inner {

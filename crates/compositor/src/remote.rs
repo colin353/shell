@@ -7,8 +7,7 @@
 //! pumps the protocol to it. Because the daemon outlives the ssh link, a dropped
 //! connection is recoverable: on transport EOF the `RemoteProcess` re-dials the
 //! same session (with backoff) and the daemon repaints via `GridResync`. Only a
-//! deliberate `SessionEnded` (the remote shell exited) tears the pane down and
-//! returns it to the local shell.
+//! deliberate `SessionEnded` (the remote shell exited) tears the pane down.
 
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
@@ -47,7 +46,7 @@ pub struct RemoteProcess {
     initial_cwd: Option<PathBuf>,
 
     // --- State ---
-    /// The session ended deliberately (SessionEnded) — stop and return to local.
+    /// The session ended deliberately (SessionEnded) — stop reconnecting.
     ended: bool,
     backoff: Duration,
     /// Earliest time we may attempt the next reconnect.
@@ -107,8 +106,8 @@ impl RemoteProcess {
     }
 
     /// Read decoded ANSI for the pane's emulator. Mirrors `PtyProcess::read`:
-    /// `Ok(Some(0))` = the session ended (return to local), `Ok(None)` = nothing
-    /// available right now (including while reconnecting).
+    /// `Ok(Some(0))` = the session ended, `Ok(None)` = nothing available right
+    /// now (including while reconnecting).
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
         if !self.pending.is_empty() {
             return Ok(Some(self.drain_pending(buf)));
@@ -142,7 +141,9 @@ impl RemoteProcess {
                         _ => {}
                     }
                 }
-                if self.pending.is_empty() {
+                if self.pending.is_empty() && self.ended {
+                    Ok(Some(0))
+                } else if self.pending.is_empty() {
                     Ok(None)
                 } else {
                     Ok(Some(self.drain_pending(buf)))

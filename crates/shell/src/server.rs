@@ -413,6 +413,12 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
             eprintln!("shell-daemon: compositor error: {e:?}");
             break false;
         }
+        if compositor.should_exit() {
+            if let Some(c) = control.as_mut() {
+                let _ = codec::write_frame(c, &ServerMsg::SessionEnded);
+            }
+            break true;
+        }
     };
 
     let _ = std::fs::remove_file(socket_path);
@@ -484,6 +490,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
 
     loop {
         let mut exit = false;
+        let mut deliberate_exit = false;
         loop {
             match rx.try_recv() {
                 // Detach is meaningless over stdio (the connection is the
@@ -492,6 +499,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
                     MsgOutcome::Continue | MsgOutcome::Detach => {}
                     MsgOutcome::Exit => {
                         exit = true;
+                        deliberate_exit = true;
                         break;
                     }
                 },
@@ -514,11 +522,18 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
         );
 
         if exit {
+            if deliberate_exit {
+                let _ = codec::write_frame(&mut handshake_out, &ServerMsg::SessionEnded);
+            }
             break;
         }
         compositor
             .poll_once(10)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compositor: {e:?}")))?;
+        if compositor.should_exit() {
+            let _ = codec::write_frame(&mut handshake_out, &ServerMsg::SessionEnded);
+            break;
+        }
     }
     Ok(())
 }

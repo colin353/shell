@@ -215,6 +215,9 @@ pub struct Pane {
     pub edit_temp_file: Option<std::path::PathBuf>,
     /// Line-oriented input typed while a subprocess is running.
     subprocess_typeahead: Vec<u8>,
+    /// Set when the remote session ends deliberately; the compositor should
+    /// remove this pane instead of returning it to the dormant local shell.
+    close_requested: bool,
     pub read_buffer: [u8; 4096],
     /// Whether the pane is in scrollback mode
     pub scrollback_mode: bool,
@@ -276,6 +279,7 @@ impl Pane {
             sent_sigint: false,
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
+            close_requested: false,
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -311,6 +315,7 @@ impl Pane {
             sent_sigint: false,
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
+            close_requested: false,
             read_buffer: [0u8; 4096],
             scrollback_mode: false,
             scroll_offset: 0,
@@ -378,6 +383,9 @@ impl Pane {
             libshell::ShellAction::None => PaneInputResult::None,
             libshell::ShellAction::Output(data) => {
                 self.terminal_emulator.process(&data);
+                if self.shell.should_exit() {
+                    self.close_requested = true;
+                }
                 PaneInputResult::Rerender
             }
             libshell::ShellAction::SpawnSubprocess {
@@ -528,9 +536,7 @@ impl Pane {
                 PaneInputResult::Rerender
             }
             libshell::ShellAction::Exit => {
-                // Shell wants to exit - could close the pane
-                // For now, just show a message
-                self.terminal_emulator.process(b"[shell exited]\r\n");
+                self.close_requested = true;
                 PaneInputResult::Rerender
             }
         }
@@ -826,8 +832,9 @@ impl Pane {
         self.remote_mut().and_then(|r| r.take_title())
     }
 
-    /// Drain output from the active remote session into the emulator, and on
-    /// transport exit return the pane to its local shell.
+    /// Drain output from the active remote session into the emulator. A clean
+    /// remote session exit requests pane closure; a dropped transport keeps the
+    /// pane alive so it can reconnect.
     fn read_and_process_remote(&mut self) {
         loop {
             let result = match &mut self.process {
@@ -868,13 +875,19 @@ impl Pane {
             }
         }
 
-        // If the transport ended, tear down and return to the local shell.
+        // If the remote session ended deliberately, tear down and ask the
+        // compositor to remove this pane. Still notify the dormant local shell
+        // so the original `connect` command gets its exit status recorded.
         if let Some(exit_code) = self.remote_mut().and_then(|r| r.try_wait()) {
             self.process = PaneProcess::None;
             self.terminal_emulator.grid_mut().cursor_visible = true;
-            let output = self.shell.subprocess_exited(exit_code);
-            self.terminal_emulator.process(&output);
+            let _ = self.shell.subprocess_exited(exit_code);
+            self.close_requested = true;
         }
+    }
+
+    pub fn close_requested(&self) -> bool {
+        self.close_requested
     }
 
     /// Check if the pane is still active (shell hasn't exited).
@@ -997,9 +1010,8 @@ impl Pane {
     pub fn handle_ctrl_d(&mut self) -> CtrlCResult {
         match &mut self.process {
             PaneProcess::Remote(remote) => {
-                // Forward EOF to the remote (e.g. exits the remote shell, which
-                // then returns this pane to the local shell). Don't close the
-                // pane here.
+                // Forward EOF to the remote. If it exits the remote shell, the
+                // remote daemon sends SessionEnded and this pane is closed.
                 let _ = remote.write(&[0x04]);
                 CtrlCResult::ClearedInput
             }

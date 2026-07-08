@@ -436,6 +436,8 @@ pub struct Compositor {
 
     host_mouse_mode: MouseMode,
 
+    exit_requested: bool,
+
     // Clock function for getting current time (mockable for tests)
     clock: ClockFn,
 }
@@ -489,6 +491,7 @@ impl Compositor {
             synchronized_output: false,
             status_bar_visible: true,
             host_mouse_mode: MouseMode::default(),
+            exit_requested: false,
             clock: Box::new(|| chrono::Local::now()),
         })
     }
@@ -532,6 +535,7 @@ impl Compositor {
             synchronized_output: false,
             status_bar_visible: true,
             host_mouse_mode: MouseMode::default(),
+            exit_requested: false,
             clock: Box::new(|| chrono::Local::now()),
         })
     }
@@ -724,7 +728,8 @@ impl Compositor {
         }
         let result = self.active_tab_mut().root.handle_input(input);
         self.handle_pane_input_result(result);
-        false
+        self.close_requested_panes();
+        self.exit_requested
     }
 
     fn handle_mouse_event(&mut self, event: SgrMouseEvent) {
@@ -1224,39 +1229,72 @@ impl Compositor {
                 false
             }
             CtrlCResult::ClosePane => {
-                // Try to close the focused pane
-                let pane_count = self.active_tab().root.pane_count();
+                // Try to close the focused pane.
+                self.close_focused_pane_or_exit()
+            }
+        }
+    }
 
-                if pane_count <= 1 {
-                    // This is the last pane in this tab
-                    if self.tabs.len() <= 1 {
-                        // This is the last tab - exit the entire compositor
-                        return true;
-                    } else {
-                        // Close this tab and switch to another
-                        self.tabs.remove(self.active_tab);
-                        if self.active_tab >= self.tabs.len() {
-                            self.active_tab = self.tabs.len() - 1;
-                        }
-                        self.render();
-                        false
-                    }
-                } else {
-                    // Close just the focused pane and exit zoom mode
-                    let was_zoomed = self.active_tab().zoomed;
-                    let width = self.width;
-                    let pane_height = self.height.saturating_sub(self.status_bar_height());
-                    self.active_tab_mut().exit_zoom();
-                    self.active_tab_mut().root.close_focused_pane();
-                    // If we were zoomed, restore the pane layout
-                    if was_zoomed {
-                        self.active_tab_mut().resize(width, pane_height);
-                    }
-                    self.render();
-                    false
+    fn close_focused_pane_or_exit(&mut self) -> bool {
+        let pane_count = self.active_tab().root.pane_count();
+
+        if pane_count <= 1 {
+            // This is the last pane in this tab
+            if self.tabs.len() <= 1 {
+                // This is the last tab - exit the entire compositor
+                self.exit_requested = true;
+                true
+            } else {
+                // Close this tab and switch to another
+                self.tabs.remove(self.active_tab);
+                if self.active_tab >= self.tabs.len() {
+                    self.active_tab = self.tabs.len() - 1;
+                }
+                self.render();
+                false
+            }
+        } else {
+            // Close just the focused pane and exit zoom mode
+            let was_zoomed = self.active_tab().zoomed;
+            let width = self.width;
+            let pane_height = self.height.saturating_sub(self.status_bar_height());
+            self.active_tab_mut().exit_zoom();
+            self.active_tab_mut().root.close_focused_pane();
+            // If we were zoomed, restore the pane layout
+            if was_zoomed {
+                self.active_tab_mut().resize(width, pane_height);
+            }
+            self.render();
+            false
+        }
+    }
+
+    fn close_requested_panes(&mut self) -> bool {
+        let mut closed_any = false;
+        let mut idx = 0;
+        while idx < self.tabs.len() {
+            if self.tabs[idx].root.close_requested_panes() {
+                idx += 1;
+            } else {
+                self.tabs.remove(idx);
+                closed_any = true;
+                if idx < self.active_tab {
+                    self.active_tab -= 1;
                 }
             }
         }
+
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.exit_requested = true;
+            return closed_any;
+        }
+
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+
+        closed_any
     }
 
     /// Run the event loop. This blocks and handles all events.
@@ -1338,8 +1376,16 @@ impl Compositor {
                 }
             }
 
+            self.close_requested_panes();
+            if self.exit_requested {
+                return Ok(());
+            }
+
             // Process queued keyboard input
             self.process_keyboard_queue();
+            if self.exit_requested {
+                return Ok(());
+            }
 
             // Render the compositor
             self.render();
@@ -1417,6 +1463,11 @@ impl Compositor {
             }
         }
 
+        self.close_requested_panes();
+        if self.exit_requested {
+            return Ok(had_events);
+        }
+
         // A remote session may have pushed a window rename; apply it to the tab
         // owning the focused (remote) pane.
         let remote_title = self
@@ -1428,6 +1479,9 @@ impl Compositor {
 
         // Process queued keyboard input
         self.process_keyboard_queue();
+        if self.exit_requested {
+            return Ok(had_events);
+        }
 
         // Render the compositor
         self.render();
@@ -1846,6 +1900,11 @@ impl Compositor {
     /// Set the focused pane's authoritative cwd.
     pub fn set_focused_cwd(&mut self, cwd: PathBuf) -> bool {
         self.tabs[self.active_tab].root.set_focused_cwd(cwd)
+    }
+
+    /// Whether the compositor should terminate because its final pane closed.
+    pub fn should_exit(&self) -> bool {
+        self.exit_requested
     }
 
     /// Get the wake file descriptor for external polling.

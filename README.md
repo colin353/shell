@@ -10,4 +10,4 @@ Things to do:
  - [x] When doing a reconnect, we should set the pane title to the name of the reconnect pane
  - [ ] Can we do predictive typeahead for remote connections? Maybe when we detect that the terminal is in an echo mode?
  - [ ] When creating a new pane, initially prompt to name it? Escape --> give it a default name?
- - [ ] When exiting a remote connection, kill the pane. Right now, when exiting, we exit back to the non-remote shell, so to kill a remote pane, we have to do CTRL+D multiple times.
+ - [x] When exiting a remote connection, kill the pane. Right now, when exiting, we exit back to the non-remote shell, so to kill a remote pane, we have to do CTRL+D multiple times.
