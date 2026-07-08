@@ -696,6 +696,28 @@ mod tests {
     }
 
     #[test]
+    fn test_visual_yank_exits_scrollback_mode() {
+        let mut compositor = isolated_compositor();
+        compositor
+            .get_focused_pane_mut()
+            .unwrap()
+            .terminal_emulator
+            .process(b"\x1b[2J\x1b[Hascii text");
+
+        compositor.handle_input(&[0x02]); // Ctrl+b
+        compositor.handle_input(&[b'[']);
+        compositor.handle_input(&[b'v']);
+
+        assert!(compositor.root().is_in_scrollback_mode());
+        assert_ne!(compositor.root().get_vim_mode(), libvim::Mode::Normal);
+
+        compositor.handle_input(&[b'y']);
+
+        assert!(!compositor.root().is_in_scrollback_mode());
+        assert_eq!(compositor.root().get_vim_mode(), libvim::Mode::Normal);
+    }
+
+    #[test]
     fn test_prefix_mode_force_redraw() {
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut compositor = Compositor::with_core(80, 24, output.clone(), isolated_core()).unwrap();

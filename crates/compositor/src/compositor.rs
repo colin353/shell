@@ -831,8 +831,8 @@ impl Compositor {
                         if let Some(text) = self.active_tab().root.get_selected_text() {
                             let _ = copy_to_clipboard(&text);
                         }
-                        // Exit visual mode after yanking
-                        self.active_tab_mut().root.handle_vim_input(&[0x1b]);
+                        // Copying from visual selection completes selection mode.
+                        self.active_tab_mut().root.exit_scrollback_mode();
                         self.render();
                         return;
                     }

@@ -1811,11 +1811,12 @@ impl Shell {
                     Some((selected_text, None, false, false))
                 }
                 PickerMode::TabCompletion => {
-                    // Tab completion replaces from original start to saved end
+                    // Tab completion replaces through the live cursor. The user
+                    // may refine the picker query after opening it.
                     let ctx = state.tab_completion_ctx.as_ref()?;
                     Some((
                         selected_text,
-                        Some((ctx.replace_start, ctx.replace_end)),
+                        Some((ctx.replace_start, self.cursor_pos)),
                         is_directory,
                         false,
                     ))
@@ -2517,6 +2518,69 @@ pub fn hello() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::Completion;
+    use protocol::{HistoryRecord, HistoryScope, HostId};
+
+    struct FakeBackend {
+        completions: Vec<Completion>,
+        replace_start: usize,
+        replace_end: usize,
+    }
+
+    impl ShellBackend for FakeBackend {
+        fn highlight(&mut self, input: &str, _cwd: &PathBuf) -> String {
+            input.to_string()
+        }
+
+        fn completions_full(
+            &mut self,
+            _input: &str,
+            _cursor_pos: usize,
+            _cwd: &PathBuf,
+        ) -> Option<(Vec<Completion>, usize, usize)> {
+            Some((
+                self.completions.clone(),
+                self.replace_start,
+                self.replace_end,
+            ))
+        }
+
+        fn word_at_cursor(
+            &mut self,
+            _input: &str,
+            cursor_pos: usize,
+        ) -> Option<(String, usize, usize)> {
+            Some((String::new(), cursor_pos, cursor_pos))
+        }
+
+        fn recent_commands(&self, _n: usize) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn history_search(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _scope: &HistoryScope,
+        ) -> Vec<HistorySearchResult> {
+            Vec::new()
+        }
+
+        fn record_command(
+            &self,
+            _command: String,
+            _source: CommandSource,
+            _cwd: Option<String>,
+        ) -> Option<EntryId> {
+            None
+        }
+
+        fn record_exit(&self, _id: &EntryId, _exit_code: i32, _duration_ms: u64) {}
+
+        fn mark_killed(&self, _id: &EntryId) {}
+
+        fn mirror_remote_record(&self, _record: &HistoryRecord, _host: &HostId) {}
+    }
 
     #[test]
     fn test_expand_path_tilde() {
@@ -2627,5 +2691,35 @@ mod tests {
 
         let recent = core.history().recent(10);
         assert_eq!(recent[0].command, "pwd");
+    }
+
+    #[test]
+    fn tab_completion_picker_replaces_live_query_after_backspace() {
+        let completions = vec![
+            (
+                "cargo".to_string(),
+                "cargo".to_string(),
+                syntax::CompletionKind::Command,
+            ),
+            (
+                "cat".to_string(),
+                "cat".to_string(),
+                syntax::CompletionKind::Command,
+            ),
+        ];
+        let backend = FakeBackend {
+            completions,
+            replace_start: 0,
+            replace_end: 2,
+        };
+        let (mut shell, _prompt) =
+            Shell::with_backend_cwd(Box::new(backend), 80, 24, PathBuf::from("/tmp"));
+
+        for &byte in b"ca\t\x7fat\r" {
+            shell.handle_input(&[byte]);
+        }
+
+        assert_eq!(shell.input_buffer, "cat ");
+        assert!(shell.picker_state.is_none());
     }
 }
