@@ -112,7 +112,7 @@ fn remote_pane_runs_a_shell_over_stdio_transport() {
     let sock = dir.path().join("outer.sock");
     let sock_for_daemon = sock.clone();
     std::thread::spawn(move || {
-        let _ = shell::server::run(&sock_for_daemon, false);
+        let _ = shell::server::run(&sock_for_daemon, false, None);
     });
     wait_for_socket(&sock);
 

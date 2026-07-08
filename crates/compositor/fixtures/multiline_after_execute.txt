@@ -1,12 +1,12 @@
 compositor ➜ ls                                                                 
 > -lah                                                                          
-total 8                                                                         
-drwxr-xr-x@  6 colinmerkel  staff   192B Jun  1 12:03 .                         
-drwxr-xr-x@ 10 colinmerkel  staff   320B Jun  1 12:03 ..                        
--rw-r--r--@  1 colinmerkel  staff   272B Jun  1 12:03 Cargo.toml                
-drwxr-xr-x@ 45 colinmerkel  staff   1.4K Jun  1 12:54 fixtures                  
-drwxr-xr-x@ 10 colinmerkel  staff   320B Jun  8 12:35 src                       
-drwxr-xr-x@  5 colinmerkel  staff   160B Jun  1 12:54 tests                     
+total 24K                                                                       
+drwxrwxr-x  5 colin colin 4.0K Jun  9 11:37 .                                   
+drwxrwxr-x 10 colin colin 4.0K Jun  9 11:51 ..                                  
+-rw-rw-r--  1 colin colin  362 Jun  9 11:37 Cargo.toml                          
+drwxrwxr-x  2 colin colin 4.0K Jun 10 13:19 fixtures                            
+drwxrwxr-x  2 colin colin 4.0K Jun 23 21:53 src                                 
+drwxrwxr-x  2 colin colin 4.0K Jun  9 13:23 tests                               
 compositor ➜                                                                    
                                                                                 
                                                                                 

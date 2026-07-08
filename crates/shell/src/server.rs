@@ -213,7 +213,7 @@ fn spawn_reader<R: Read + Send + 'static>(mut reader: R) -> Receiver<ClientMsg> 
     rx
 }
 
-pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
+pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io::Result<()> {
     // Replace any stale socket from a previous (dead) daemon.
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
@@ -225,6 +225,15 @@ pub fn run(socket_path: &Path, bare: bool) -> io::Result<()> {
     // Socket daemon renders to a real client terminal, so synchronized output
     // (BSU/ESU) is wanted here.
     let (mut compositor, history_mirror) = build_compositor(80, 24, sink.clone(), true, bare)?;
+
+    // `shell run`: launch the requested command in the first pane immediately,
+    // exactly as if it had been typed and submitted. No client is attached yet,
+    // so the render is dropped; a later `attach`/`reconnect` repaints via
+    // GridResync. When the command exits the pane falls back to its prompt and
+    // the session stays alive (idle-exit handles teardown).
+    if let Some(cmd) = initial_command {
+        compositor.handle_input(format!("{cmd}\n").as_bytes());
+    }
     compositor.render();
 
     // Accept connections on a background thread so the main loop never blocks on
@@ -569,7 +578,7 @@ fn connect_or_spawn(socket_path: &Path) -> io::Result<UnixStream> {
     if let Ok(s) = UnixStream::connect(socket_path) {
         return Ok(s);
     }
-    spawn_detached_daemon(socket_path)?;
+    spawn_detached_daemon(socket_path, None)?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(s) = UnixStream::connect(socket_path) {
@@ -585,9 +594,10 @@ fn connect_or_spawn(socket_path: &Path) -> io::Result<UnixStream> {
     }
 }
 
-/// Spawn `shell daemon --socket <S> --bare` detached from this process (and the
-/// ssh session), so it persists across disconnects.
-fn spawn_detached_daemon(socket_path: &Path) -> io::Result<()> {
+/// Spawn `shell daemon --socket <S> --bare [--exec <cmd>]` detached from this
+/// process (and the ssh session), so it persists across disconnects. With
+/// `command`, the daemon launches it in its first pane on startup (`shell run`).
+fn spawn_detached_daemon(socket_path: &Path, command: Option<&str>) -> io::Result<()> {
     if let Some(parent) = socket_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -596,8 +606,11 @@ fn spawn_detached_daemon(socket_path: &Path) -> io::Result<()> {
     cmd.arg("daemon")
         .arg("--socket")
         .arg(socket_path)
-        .arg("--bare")
-        .stdin(Stdio::null())
+        .arg("--bare");
+    if let Some(command) = command {
+        cmd.arg("--exec").arg(command);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     unsafe {
@@ -609,6 +622,26 @@ fn spawn_detached_daemon(socket_path: &Path) -> io::Result<()> {
         });
     }
     cmd.spawn()?; // detached child; we don't reap it
+    Ok(())
+}
+
+/// `shell run --name <name> -- <cmd...>`: start a detached, persistent session
+/// named `name` whose first pane runs `command`. The session is `--bare` (no
+/// chrome) since it's reattached from inside another shell via the `reconnect`
+/// picker (or `shell attach --session <name>`). Refuses to clobber a live
+/// session of the same name.
+pub fn run_command_session(name: &str, command: &str) -> io::Result<()> {
+    let socket_path = crate::common::session_socket_path(name);
+    if UnixStream::connect(&socket_path).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("session `{name}` already exists"),
+        ));
+    }
+    // Stale socket from a dead daemon, if any: clear it so the bind succeeds.
+    let _ = std::fs::remove_file(&socket_path);
+    spawn_detached_daemon(&socket_path, Some(command))?;
+    println!("started session `{name}` running: {command}");
     Ok(())
 }
 
