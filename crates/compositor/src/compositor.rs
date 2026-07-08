@@ -9,6 +9,7 @@ use nix::unistd::{read, write};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Clock function type for getting current time (allows mocking in tests)
@@ -326,8 +327,16 @@ mod tests {
         for x in 0..cols {
             let r = real.grid().get_cell(x, 0);
             let m = grid.get_cell(x, 0);
-            let rc = if r.character.is_control() { ' ' } else { r.character };
-            let mc = if m.character.is_control() { ' ' } else { m.character };
+            let rc = if r.character.is_control() {
+                ' '
+            } else {
+                r.character
+            };
+            let mc = if m.character.is_control() {
+                ' '
+            } else {
+                m.character
+            };
             assert_eq!(rc, mc, "char mismatch at column {x}");
             assert_eq!(r.attrs, m.attrs, "attr mismatch at column {x}");
         }
@@ -1137,13 +1146,20 @@ impl Compositor {
     /// Creates a new pane by splitting the focused pane either horizontally or vertically.
     pub fn split_focused_pane(&mut self, direction: SplitDirection) -> Result<(), CompositorError> {
         self.exit_zoom_if_needed();
+        let remote_cwd = self
+            .active_tab()
+            .remote_host
+            .as_ref()
+            .and_then(|_| self.get_focused_pane())
+            .and_then(|pane| pane.remote())
+            .and_then(|remote| remote.cwd().map(PathBuf::from));
         self.active_tab_mut().root.split_focused(direction)?;
 
         // In a remote-owned tab, the new (now focused) pane joins the same host.
         if let Some(host) = self.active_tab().remote_host.clone() {
             let env = libshell::shell_env_snapshot();
             if let Some(pane) = self.get_focused_pane_mut() {
-                if let Err(e) = pane.connect_remote(&host, &env) {
+                if let Err(e) = pane.connect_remote_with_cwd(&host, &env, remote_cwd.as_deref()) {
                     let msg = format!("connect error: {}\r\n", e);
                     pane.terminal_emulator.process(msg.as_bytes());
                 }
@@ -1400,7 +1416,9 @@ impl Compositor {
 
         // A remote session may have pushed a window rename; apply it to the tab
         // owning the focused (remote) pane.
-        let remote_title = self.get_focused_pane_mut().and_then(|p| p.take_remote_title());
+        let remote_title = self
+            .get_focused_pane_mut()
+            .and_then(|p| p.take_remote_title());
         if let Some(name) = remote_title {
             self.tabs[self.active_tab].name = name;
         }
@@ -1749,8 +1767,7 @@ impl Compositor {
 
         let diagnostics = libshell::global_diagnostic_flags();
         let diagnostics_width = diagnostics.len() * 2;
-        let time_start_x =
-            cols.saturating_sub(diagnostics_width + str_display_width(&right_text));
+        let time_start_x = cols.saturating_sub(diagnostics_width + str_display_width(&right_text));
         let mut right_x = time_start_x;
 
         for flag in diagnostics {
@@ -1807,6 +1824,22 @@ impl Compositor {
     /// Get a mutable reference to the focused pane of the active tab.
     pub fn get_focused_pane_mut(&mut self) -> Option<&mut crate::pane::Pane> {
         self.tabs[self.active_tab].root.get_focused_pane_mut()
+    }
+
+    /// Get a reference to the focused pane of the active tab.
+    pub fn get_focused_pane(&self) -> Option<&crate::pane::Pane> {
+        self.tabs[self.active_tab].root.get_focused_pane()
+    }
+
+    /// Get the focused pane's authoritative cwd.
+    pub fn focused_cwd(&self) -> Option<PathBuf> {
+        self.get_focused_pane()
+            .map(|pane| pane.shell.cwd().to_path_buf())
+    }
+
+    /// Set the focused pane's authoritative cwd.
+    pub fn set_focused_cwd(&mut self, cwd: PathBuf) -> bool {
+        self.tabs[self.active_tab].root.set_focused_cwd(cwd)
     }
 
     /// Get the wake file descriptor for external polling.

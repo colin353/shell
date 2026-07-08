@@ -820,6 +820,11 @@ impl Shell {
         &self.cwd
     }
 
+    /// Set the shell's current working directory without echoing a command.
+    pub fn set_cwd(&mut self, cwd: std::path::PathBuf) {
+        self.cwd = cwd;
+    }
+
     /// Check if the input buffer is empty (no pending input).
     ///
     /// This is used to determine whether CTRL+C should clear input or

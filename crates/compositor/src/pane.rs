@@ -1,5 +1,6 @@
 use pty;
 use regex::Regex;
+use std::path::Path;
 use std::sync::LazyLock;
 
 /// Result of handling CTRL+C on a pane.
@@ -757,7 +758,18 @@ impl Pane {
     /// Reusable by the `connect` builtin and by auto-connected splits in a
     /// remote-owned tab. Returns `Err` if spawning the transport fails.
     pub fn connect_remote(&mut self, target: &str, env: &[(String, String)]) -> std::io::Result<()> {
-        self.connect_remote_session(target, None, env)
+        self.connect_remote_session_with_cwd(target, None, env, None)
+    }
+
+    /// Connect this pane to a remote host, starting the remote session in `cwd`
+    /// when the transport creates a fresh daemon.
+    pub fn connect_remote_with_cwd(
+        &mut self,
+        target: &str,
+        env: &[(String, String)],
+        cwd: Option<&Path>,
+    ) -> std::io::Result<()> {
+        self.connect_remote_session_with_cwd(target, None, env, cwd)
     }
 
     /// Like [`connect_remote`](Self::connect_remote), but to a named session
@@ -768,10 +780,21 @@ impl Pane {
         session: Option<&str>,
         env: &[(String, String)],
     ) -> std::io::Result<()> {
+        self.connect_remote_session_with_cwd(target, session, env, None)
+    }
+
+    fn connect_remote_session_with_cwd(
+        &mut self,
+        target: &str,
+        session: Option<&str>,
+        env: &[(String, String)],
+        cwd: Option<&Path>,
+    ) -> std::io::Result<()> {
         let width = self.terminal_emulator.grid().cols as u16;
         let height = self.terminal_emulator.grid().rows as u16;
         self.subprocess_typeahead.clear();
-        let remote = crate::remote::RemoteProcess::connect(target, session, width, height, env)?;
+        let remote =
+            crate::remote::RemoteProcess::connect(target, session, width, height, env, cwd)?;
         self.process = PaneProcess::Remote(remote);
         Ok(())
     }
@@ -860,6 +883,11 @@ impl Pane {
             PaneProcess::Remote(remote) => Some(remote),
             _ => None,
         }
+    }
+
+    /// Set the pane shell's current working directory without echoing a command.
+    pub fn set_cwd(&mut self, cwd: std::path::PathBuf) {
+        self.shell.set_cwd(cwd);
     }
 
     fn remote_mut(&mut self) -> Option<&mut crate::remote::RemoteProcess> {

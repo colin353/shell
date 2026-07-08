@@ -113,6 +113,39 @@ impl PaneCell {
         }
     }
 
+    /// Get a reference to the focused pane.
+    pub fn get_focused_pane(&self) -> Option<&Pane> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => Some(pane),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_focused_pane();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Set the focused pane shell's current working directory.
+    pub fn set_focused_cwd(&mut self, cwd: std::path::PathBuf) -> bool {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => {
+                pane.set_cwd(cwd);
+                true
+            }
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.set_focused_cwd(cwd);
+                    }
+                }
+                false
+            }
+        }
+    }
+
     pub fn focused_mouse_mode(&self) -> emulator::MouseMode {
         if !self.focus {
             return emulator::MouseMode::default();

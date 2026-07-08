@@ -29,7 +29,7 @@ pub mod codec;
 /// Bumped whenever [`ClientMsg`]/[`ServerMsg`] change incompatibly. The
 /// handshake compares versions and reports [`RemoteStatus::VersionMismatch`]
 /// when a remote daemon binary is stale.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -110,6 +110,11 @@ pub enum ClientMsg {
     Resize {
         cols: u16,
         rows: u16,
+    },
+    /// Set the authoritative cwd for a pane without echoing a `cd` command.
+    SetCwd {
+        pane: PaneId,
+        cwd: PathBuf,
     },
     /// Ask the daemon to repaint the authoritative screen from scratch (used by
     /// `Ctrl-b r` when a pane is remote, to recover from any local drift).

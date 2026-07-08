@@ -21,7 +21,7 @@ use std::net::Shutdown;
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -29,7 +29,8 @@ use std::sync::{Arc, Mutex};
 
 use protocol::codec::{self};
 use protocol::{
-    ClientMsg, Hello, HostId, PaneId, ServerMsg, SessionId, Welcome, PROTOCOL_VERSION,
+    ClientMsg, ContextSnapshot, Hello, HostId, Origin, PaneId, ServerMsg, SessionId, Welcome,
+    PROTOCOL_VERSION,
 };
 
 /// A `Write` sink that frames everything written into `ServerMsg::Render` frames
@@ -156,6 +157,11 @@ fn apply_client_msg(compositor: &mut compositor::Compositor, msg: ClientMsg) -> 
             compositor.resize((cols.max(1)) as usize, (rows.max(1)) as usize);
             compositor.force_full_redraw();
         }
+        ClientMsg::SetCwd { cwd, .. } => {
+            if compositor.set_focused_cwd(cwd) {
+                compositor.force_full_redraw();
+            }
+        }
         ClientMsg::RequestResync => compositor.force_full_redraw(),
         ClientMsg::UpdateLocalEnv { vars } => apply_env_defaults(&vars),
         ClientMsg::Detach => return MsgOutcome::Detach,
@@ -177,6 +183,7 @@ fn forward_pending(
     compositor: &compositor::Compositor,
     history_mirror: &libshell::HistoryMirror,
     last_name: &mut String,
+    last_cwd: &mut Option<PathBuf>,
 ) {
     let name = compositor.active_tab().name.clone();
     let rename = if name != *last_name {
@@ -186,12 +193,35 @@ fn forward_pending(
         None
     };
 
+    let cwd = compositor.focused_cwd();
+    let context = if cwd != *last_cwd {
+        *last_cwd = cwd.clone();
+        cwd.map(context_msg)
+    } else {
+        None
+    };
+
     let Some(out) = out else { return };
     for entry in history_mirror.drain() {
         let _ = codec::write_frame(&mut *out, &ServerMsg::HistoryRecorded { entry });
     }
     if let Some(name) = rename {
-        let _ = codec::write_frame(out, &ServerMsg::RenameWindow { name });
+        let _ = codec::write_frame(&mut *out, &ServerMsg::RenameWindow { name });
+    }
+    if let Some(context) = context {
+        let _ = codec::write_frame(out, &context);
+    }
+}
+
+fn context_msg(cwd: PathBuf) -> ServerMsg {
+    ServerMsg::Context {
+        pane: PaneId(0),
+        ctx: ContextSnapshot {
+            cwd,
+            env: libshell::shell_env_snapshot(),
+            path_executables: Vec::new(),
+            origin: Origin::Local,
+        },
     }
 }
 
@@ -249,6 +279,7 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
     // (RenameWindow, SessionEnded) that don't go through the render sink.
     let mut control: Option<UnixStream> = None;
     let mut last_name = compositor.active_tab().name.clone();
+    let mut last_cwd = compositor.focused_cwd();
 
     // Persist indefinitely while detached by default (the point of a remote
     // session). `SHELL_SESSION_IDLE_EXIT_SECS` bounds that — tests set it so the
@@ -292,6 +323,10 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
                     grid: snapshot,
                 };
                 if codec::write_frame(&mut stream, &resync).is_ok() {
+                    if let Some(cwd) = compositor.focused_cwd() {
+                        let _ = codec::write_frame(&mut stream, &context_msg(cwd.clone()));
+                        last_cwd = Some(cwd);
+                    }
                     if let Ok(clone) = stream.try_clone() {
                         control = stream.try_clone().ok();
                         sink.lock().unwrap().attach(Box::new(clone));
@@ -344,6 +379,7 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
             &compositor,
             &history_mirror,
             &mut last_name,
+            &mut last_cwd,
         );
 
         if should_exit {
@@ -431,12 +467,16 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
             grid: snapshot,
         },
     )?;
+    if let Some(cwd) = compositor.focused_cwd() {
+        codec::write_frame(&mut handshake_out, &context_msg(cwd))?;
+    }
     sink.lock().unwrap().attach(Box::new(dup_file(1)?));
 
     // Reader thread: stdin -> ClientMsg.
     let rx = spawn_reader(dup_file(0)?);
 
     let mut last_name = compositor.active_tab().name.clone();
+    let mut last_cwd = compositor.focused_cwd();
 
     loop {
         let mut exit = false;
@@ -466,6 +506,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
             &compositor,
             &history_mirror,
             &mut last_name,
+            &mut last_cwd,
         );
 
         if exit {
@@ -727,12 +768,7 @@ fn handshake(stream: UnixStream, host: &HostId) -> io::Result<Incoming> {
             }
             size
         }
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "expected Hello",
-            ))
-        }
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected Hello")),
     };
 
     let rx = spawn_reader(stream.try_clone()?);

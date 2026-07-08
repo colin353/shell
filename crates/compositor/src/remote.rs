@@ -12,6 +12,7 @@
 
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -34,6 +35,8 @@ pub struct RemoteProcess {
     pending_title: Option<String>,
     /// Commands the remote executed, awaiting dual-write into local history.
     pending_history: Vec<HistoryRecord>,
+    /// Latest authoritative cwd reported by the remote daemon.
+    cwd: Option<PathBuf>,
 
     // --- Reconnect parameters (the session is identified by `session_id`). ---
     target: String,
@@ -41,6 +44,7 @@ pub struct RemoteProcess {
     cols: u16,
     rows: u16,
     env: Vec<(String, String)>,
+    initial_cwd: Option<PathBuf>,
 
     // --- State ---
     /// The session ended deliberately (SessionEnded) — stop and return to local.
@@ -60,13 +64,15 @@ impl RemoteProcess {
         cols: u16,
         rows: u16,
         env: &[(String, String)],
+        initial_cwd: Option<&Path>,
     ) -> io::Result<Self> {
         let session_id = session
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .unwrap_or_else(new_session_id);
+        let initial_cwd = initial_cwd.map(PathBuf::from);
         let (child, stdin, stdout, stdout_fd) =
-            spawn_transport(target, &session_id, cols, rows, env)?;
+            spawn_transport(target, &session_id, cols, rows, env, initial_cwd.as_deref())?;
         Ok(RemoteProcess {
             child,
             stdin,
@@ -76,11 +82,13 @@ impl RemoteProcess {
             pending: Vec::new(),
             pending_title: None,
             pending_history: Vec::new(),
+            cwd: None,
             target: target.to_string(),
             session_id,
             cols,
             rows,
             env: env.to_vec(),
+            initial_cwd,
             ended: false,
             backoff: INITIAL_BACKOFF,
             next_attempt: None,
@@ -127,6 +135,7 @@ impl RemoteProcess {
                         ServerMsg::GridResync { grid, .. } => self
                             .pending
                             .extend_from_slice(&emulator::render_snapshot_to_ansi(&grid)),
+                        ServerMsg::Context { ctx, .. } => self.cwd = Some(ctx.cwd),
                         ServerMsg::RenameWindow { name } => self.pending_title = Some(name),
                         ServerMsg::HistoryRecorded { entry } => self.pending_history.push(entry),
                         ServerMsg::SessionEnded => self.ended = true,
@@ -166,9 +175,14 @@ impl RemoteProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
 
-        if let Ok((child, stdin, stdout, fd)) =
-            spawn_transport(&self.target, &self.session_id, self.cols, self.rows, &self.env)
-        {
+        if let Ok((child, stdin, stdout, fd)) = spawn_transport(
+            &self.target,
+            &self.session_id,
+            self.cols,
+            self.rows,
+            &self.env,
+            self.initial_cwd.as_deref(),
+        ) {
             self.child = child;
             self.stdin = stdin;
             self.stdout = stdout;
@@ -230,6 +244,11 @@ impl RemoteProcess {
         &self.target
     }
 
+    /// Latest authoritative cwd reported by the remote daemon.
+    pub fn cwd(&self) -> Option<&Path> {
+        self.cwd.as_deref()
+    }
+
     /// Exit code if the session ended deliberately. Returns `None` while a
     /// dropped link is being retried, so the pane stays remote and reconnects.
     pub fn try_wait(&mut self) -> Option<i32> {
@@ -256,8 +275,10 @@ fn spawn_transport(
     cols: u16,
     rows: u16,
     env: &[(String, String)],
+    initial_cwd: Option<&Path>,
 ) -> io::Result<(Child, ChildStdin, ChildStdout, RawFd)> {
-    let mut command = build_remote_command(target, &["bridge", "--session", session_id])?;
+    let mut command =
+        build_remote_command(target, &["bridge", "--session", session_id], initial_cwd)?;
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -278,6 +299,15 @@ fn spawn_transport(
         let _ = codec::write_frame(
             &mut stdin,
             &ClientMsg::UpdateLocalEnv { vars: env.to_vec() },
+        );
+    }
+    if let Some(cwd) = initial_cwd {
+        let _ = codec::write_frame(
+            &mut stdin,
+            &ClientMsg::SetCwd {
+                pane: protocol::PaneId(0),
+                cwd: cwd.to_path_buf(),
+            },
         );
     }
 
@@ -303,7 +333,11 @@ fn spawn_transport(
 /// joins multiple command args with spaces and re-parses the result through the
 /// remote login shell, so a multi-arg `sh -c '<script>' …` form would lose its
 /// quoting on the far side. We build one string and shell-quote each `arg`.
-fn build_remote_command(target: &str, args: &[&str]) -> io::Result<Command> {
+fn build_remote_command(
+    target: &str,
+    args: &[&str],
+    initial_cwd: Option<&Path>,
+) -> io::Result<Command> {
     if target == "local" || target == "self" {
         let exe = match std::env::var_os("SHELL_DAEMON_STDIO_CMD") {
             Some(path) => std::path::PathBuf::from(path),
@@ -311,14 +345,22 @@ fn build_remote_command(target: &str, args: &[&str]) -> io::Result<Command> {
         };
         let mut c = Command::new(exe);
         c.args(args);
+        if let Some(cwd) = initial_cwd {
+            c.current_dir(cwd);
+        }
         Ok(c)
     } else {
         let remote_bin = std::env::var("SHELL_REMOTE_BIN").unwrap_or_else(|_| "shell".to_string());
         // One string for the remote login shell: source ~/.shell_env (for PATH),
         // then exec the binary with the (quoted) args. `remote_bin` is left
         // unquoted so a `~`/`$VAR` in SHELL_REMOTE_BIN still expands remotely.
-        let mut remote_cmd =
-            String::from(r#"[ -f "$HOME/.shell_env" ] && . "$HOME/.shell_env"; exec "#);
+        let mut remote_cmd = String::new();
+        if let Some(cwd) = initial_cwd {
+            remote_cmd.push_str("cd ");
+            remote_cmd.push_str(&shell_single_quote(&cwd.to_string_lossy()));
+            remote_cmd.push_str(" && ");
+        }
+        remote_cmd.push_str(r#"[ -f "$HOME/.shell_env" ] && . "$HOME/.shell_env"; exec "#);
         remote_cmd.push_str(&remote_bin);
         for a in args {
             remote_cmd.push(' ');
@@ -350,7 +392,7 @@ fn shell_single_quote(s: &str) -> String {
 /// List persistent sessions on `target` as `(name, age)`. Blocks on the ssh
 /// round-trip.
 pub fn list_sessions(target: &str) -> io::Result<Vec<(String, String)>> {
-    let mut c = build_remote_command(target, &["sessions", "list"])?;
+    let mut c = build_remote_command(target, &["sessions", "list"], None)?;
     c.stdin(Stdio::null()).stderr(Stdio::null());
     let out = c.output()?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -368,7 +410,7 @@ pub fn list_sessions(target: &str) -> io::Result<Vec<(String, String)>> {
 
 /// Kill the named session on `target`. Blocks on the ssh round-trip.
 pub fn kill_session(target: &str, name: &str) -> io::Result<()> {
-    let mut c = build_remote_command(target, &["sessions", "kill", name])?;
+    let mut c = build_remote_command(target, &["sessions", "kill", name], None)?;
     c.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
