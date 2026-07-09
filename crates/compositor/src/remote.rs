@@ -221,6 +221,9 @@ impl RemoteProcess {
 
     /// Tell the remote its size changed (remembered for reconnects).
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
+        if self.cols == cols && self.rows == rows {
+            return Ok(());
+        }
         self.cols = cols;
         self.rows = rows;
         let _ = codec::write_frame(&mut self.stdin, &ClientMsg::Resize { cols, rows });

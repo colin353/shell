@@ -1,13 +1,58 @@
-//! Predictive typeahead for remote panes is temporarily disabled. Printable input
-//! should be forwarded to the remote without drawing a speculative local overlay.
+//! Predictive typeahead for remote panes: printable input can be drawn locally
+//! while waiting for the remote echo, without mutating the authoritative pane
+//! emulator.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use compositor::Compositor;
 
+fn screen(comp: &mut Compositor) -> String {
+    let pane = comp.get_focused_pane_mut().unwrap();
+    let grid = pane.terminal_emulator.grid();
+    (0..grid.rows)
+        .map(|row| grid.get_line_text(row))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn poll_until_remote_echo_mode(comp: &mut Compositor, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let _ = comp.poll_once(20);
+        let echo = comp
+            .get_focused_pane_mut()
+            .and_then(|pane| pane.remote())
+            .is_some_and(|remote| remote.input_echo_mode());
+        if echo {
+            return true;
+        }
+    }
+    false
+}
+
+fn poll_until_prediction_confirmed(
+    comp: &mut Compositor,
+    x: usize,
+    y: usize,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let _ = comp.poll_once(20);
+        let pane = comp.get_focused_pane_mut().unwrap();
+        let confirmed = pane.terminal_emulator.grid().get_cell(x, y).character == 'q'
+            && pane.predicted_remote_input().is_empty();
+        if confirmed {
+            return true;
+        }
+    }
+    false
+}
+
 #[test]
-fn remote_printable_input_is_not_rendered_speculatively_while_disabled() {
+fn remote_printable_input_is_rendered_speculatively() {
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", dir.path());
     std::env::set_var("XDG_RUNTIME_DIR", dir.path());
@@ -22,8 +67,9 @@ fn remote_printable_input_is_not_rendered_speculatively_while_disabled() {
         .unwrap();
 
     assert!(
-        comp.get_focused_pane_mut().unwrap().remote().is_some(),
-        "pane should be connected to a remote process"
+        poll_until_remote_echo_mode(&mut comp, Duration::from_secs(8)),
+        "remote should report echo mode at the shell prompt; got:\n{}",
+        screen(&mut comp)
     );
 
     let (cursor_x, cursor_y) = comp
@@ -47,16 +93,13 @@ fn remote_printable_input_is_not_rendered_speculatively_while_disabled() {
     );
 
     comp.render_to_vec();
-    let rendered = comp.global_emulator().grid().get_cell(cursor_x, cursor_y);
-    assert_ne!(
-        rendered.character, 'q',
-        "predictive overlay should not render while remote typeahead is disabled"
-    );
+    let predicted = comp.global_emulator().grid().get_cell(cursor_x, cursor_y);
+    assert_eq!(predicted.character, 'q');
+    assert!(predicted.attrs.dim);
+    assert!(predicted.attrs.underline);
+
     assert!(
-        comp.get_focused_pane_mut()
-            .unwrap()
-            .predicted_remote_input()
-            .is_empty(),
-        "disabled predictive typeahead should not retain speculative input"
+        poll_until_prediction_confirmed(&mut comp, cursor_x, cursor_y, Duration::from_secs(8)),
+        "remote echo should replace the speculative overlay"
     );
 }

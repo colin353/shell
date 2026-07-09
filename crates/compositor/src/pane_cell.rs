@@ -429,6 +429,7 @@ impl PaneCell {
         match &mut self.inner {
             PaneCellInner::Pane(pane) => !pane.close_requested(),
             PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                let original_len = cells.len();
                 let mut idx = 0;
                 while idx < cells.len() {
                     if cells[idx].close_requested_panes() {
@@ -453,7 +454,9 @@ impl PaneCell {
                         cells[0].focus = true;
                         cells[0].set_focus_first();
                     }
-                    self.recalculate_layout();
+                    if cells.len() != original_len {
+                        self.recalculate_layout();
+                    }
                 }
 
                 true
