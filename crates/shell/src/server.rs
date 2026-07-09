@@ -23,9 +23,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use protocol::codec::{self};
 use protocol::{
@@ -79,7 +79,11 @@ impl Write for ClientSink {
             let frame = codec::to_frame(&ServerMsg::Render { bytes });
             // A write error means the client vanished mid-render; drop it and
             // wait for the reader thread to report the disconnect.
-            if writer.write_all(&frame).and_then(|_| writer.flush()).is_err() {
+            if writer
+                .write_all(&frame)
+                .and_then(|_| writer.flush())
+                .is_err()
+            {
                 self.writer = None;
             }
         }
@@ -130,6 +134,10 @@ fn build_compositor(
         compositor.set_status_bar_visible(false);
     }
     Ok((compositor, history_mirror))
+}
+
+fn socket_synchronized_output(bare: bool) -> bool {
+    !bare
 }
 
 /// What a client message asks the daemon loop to do after it's applied.
@@ -275,9 +283,11 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
     let host = HostId(hostname());
 
     let sink = Arc::new(Mutex::new(ClientSink::new()));
-    // Socket daemon renders to a real client terminal, so synchronized output
-    // (BSU/ESU) is wanted here.
-    let (mut compositor, history_mirror) = build_compositor(80, 24, sink.clone(), true, bare)?;
+    // Non-bare socket daemons render to a real client terminal, so synchronized output
+    // (BSU/ESU) is wanted there. Bare daemons are embedded inside a remote pane,
+    // so their render bytes must be plain VT for the local pane emulator.
+    let (mut compositor, history_mirror) =
+        build_compositor(80, 24, sink.clone(), socket_synchronized_output(bare), bare)?;
 
     // `shell run`: launch the requested command in the first pane immediately,
     // exactly as if it had been typed and submitted. No client is attached yet,
@@ -849,4 +859,75 @@ fn hostname() -> String {
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "localhost".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compositor::{BSU, ESU};
+    use protocol::{codec::FrameReader, ServerMsg};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CaptureWriter {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn render_bytes_for_socket_daemon(bare: bool, synchronized_output: bool) -> Vec<u8> {
+        let sink = Arc::new(Mutex::new(ClientSink::new()));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        sink.lock()
+            .unwrap()
+            .attach(Box::new(CaptureWriter(captured.clone())));
+
+        let (mut compositor, _history_mirror) =
+            build_compositor(80, 24, sink, synchronized_output, bare).unwrap();
+        compositor.render();
+
+        let framed = captured.lock().unwrap().clone();
+        let mut frames = FrameReader::new();
+        frames.push(&framed);
+        while let Some(msg) = frames.next_frame::<ServerMsg>().unwrap() {
+            if let ServerMsg::Render { bytes } = msg {
+                return bytes;
+            }
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn bare_socket_daemon_render_stream_is_plain_vt_for_embedded_pane() {
+        let old_config_bytes = render_bytes_for_socket_daemon(true, true);
+        assert!(
+            old_config_bytes.windows(BSU.len()).any(|w| w == BSU)
+                && old_config_bytes.windows(ESU.len()).any(|w| w == ESU),
+            "the old bare socket configuration reproduced host synchronized-output leakage"
+        );
+
+        let fixed_bytes = render_bytes_for_socket_daemon(true, socket_synchronized_output(true));
+        assert!(
+            !fixed_bytes.windows(BSU.len()).any(|w| w == BSU)
+                && !fixed_bytes.windows(ESU.len()).any(|w| w == ESU),
+            "bare daemon render stream must not contain host synchronized-output sequences"
+        );
+    }
+
+    #[test]
+    fn non_bare_socket_daemon_keeps_synchronized_output_for_real_clients() {
+        let bytes = render_bytes_for_socket_daemon(false, socket_synchronized_output(false));
+        assert!(
+            bytes.windows(BSU.len()).any(|w| w == BSU)
+                && bytes.windows(ESU.len()).any(|w| w == ESU),
+            "non-bare daemon render stream should keep synchronized-output wrapping"
+        );
+    }
 }
