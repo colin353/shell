@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::LazyLock;
 use unicode_width::UnicodeWidthChar;
 
+const REMOTE_PREDICTIVE_TYPEAHEAD_ENABLED: bool = false;
+
 /// Result of handling CTRL+C on a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtrlCResult {
@@ -359,7 +361,8 @@ impl Pane {
             return self.handle_session_picker_input(input);
         }
         if let PaneProcess::Remote(remote) = &mut self.process {
-            let predicted = remote.input_echo_mode()
+            let predicted = REMOTE_PREDICTIVE_TYPEAHEAD_ENABLED
+                && remote.input_echo_mode()
                 && self.predicted_remote_input.len() < 256
                 && predictable_remote_text(input).is_some();
             if predicted {

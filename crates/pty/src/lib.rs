@@ -104,7 +104,7 @@ impl PtyProcess {
             .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
             .collect();
 
-        // NULL-terminated pointer arrays for execvpe, built in the parent so the
+        // NULL-terminated pointer arrays for execve, built in the parent so the
         // child allocates nothing. The backing CStrings outlive the call: the
         // child execs (or _exits) immediately, before this frame returns.
         let mut argv: Vec<*const libc::c_char> = argv_owned.iter().map(|c| c.as_ptr()).collect();
@@ -133,7 +133,7 @@ impl PtyProcess {
                 // Child process - set up the slave as stdin/stdout/stderr.
                 //
                 // Everything from here to exec is async-signal-safe: login_tty,
-                // execvpe, and _exit. No allocation, no env mutation, no panic
+                // execve, and _exit. No allocation, no env mutation, no panic
                 // (a panic would unwind through allocator/stdio locks).
                 drop(master);
 
@@ -146,8 +146,8 @@ impl PtyProcess {
                     if libc::login_tty(slave_fd) < 0 {
                         libc::_exit(127);
                     }
-                    libc::execvpe(bash.as_ptr(), argv.as_ptr(), envp.as_ptr());
-                    // execvpe only returns on failure.
+                    libc::execve(bash.as_ptr(), argv.as_ptr(), envp.as_ptr());
+                    // execve only returns on failure.
                     libc::_exit(127);
                 }
             }
