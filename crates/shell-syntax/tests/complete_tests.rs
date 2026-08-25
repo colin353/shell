@@ -328,6 +328,33 @@ fn test_complete_tilde_path() {
 }
 
 #[test]
+fn test_complete_exact_directory_before_longer_prefix_match() {
+    let mut fs = FakeFileSystem::new();
+    fs.add_dir(
+        "/home/user/Documents/code",
+        vec![
+            DirEntry {
+                name: "universe2-a".into(),
+                is_dir: true,
+            },
+            DirEntry {
+                name: "universe2".into(),
+                is_dir: true,
+            },
+        ],
+    );
+
+    let mut syntax = ShellSyntax::with_filesystem(fs);
+    let input = "ls ~/Documents/code/universe2";
+    syntax.update(input);
+
+    let completions = syntax.completions(input.len(), &test_context());
+
+    assert_eq!(completions[0].text, "~/Documents/code/universe2/");
+    assert_eq!(completions[0].kind, CompletionKind::Directory);
+}
+
+#[test]
 fn test_complete_tilde_alone() {
     let mut fs = FakeFileSystem::new();
     fs.add_dir(

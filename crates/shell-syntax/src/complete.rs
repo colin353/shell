@@ -496,9 +496,13 @@ fn complete_files<F: FileSystem>(
         (context.cwd.clone(), word.to_string())
     };
 
-    let Ok(entries) = fs.read_dir(&search_dir) else {
+    let Ok(mut entries) = fs.read_dir(&search_dir) else {
         return Vec::new();
     };
+
+    // Directory iteration order is unspecified. Prefer an exact filename match
+    // over longer entries that merely share the typed prefix.
+    entries.sort_by_key(|entry| entry.name != file_prefix);
 
     entries
         .into_iter()
