@@ -1675,8 +1675,22 @@ impl Pane {
             return None;
         }
 
-        let start = self.vim_engine.selection_start;
-        let end = self.vim_engine.selection_end;
+        let mut start = self.vim_engine.selection_start;
+        let mut end = self.vim_engine.selection_end;
+
+        if mode == libvim::Mode::Visual {
+            // libvim's selection bounds describe the highlighted cells around
+            // the block cursor. The cursor cell itself is drawn separately,
+            // but it is still part of a Vim character-wise selection and must
+            // therefore be included when extracting the yanked text.
+            let cursor = self.vim_engine.cursor;
+            if (cursor.row, cursor.col) < (start.row, start.col) {
+                start = cursor;
+            }
+            if (cursor.row, cursor.col) > (end.row, end.col) {
+                end = cursor;
+            }
+        }
 
         // Get all lines for extracting text
         let lines = self.get_all_lines_for_selection();
@@ -1689,10 +1703,15 @@ impl Pane {
                 if start.row == end.row {
                     // Single line selection
                     if let Some(line) = lines.get(start.row) {
-                        let start_col = start.col.min(line.len());
-                        let end_col = (end.col + 1).min(line.len());
+                        let line_len = line.chars().count();
+                        let start_col = start.col.min(line_len);
+                        let end_col = end.col.saturating_add(1).min(line_len);
                         if start_col <= end_col {
-                            result.push_str(&line[start_col..end_col]);
+                            result.extend(
+                                line.chars()
+                                    .skip(start_col)
+                                    .take(end_col.saturating_sub(start_col)),
+                            );
                         }
                     }
                 } else {
@@ -1701,12 +1720,10 @@ impl Pane {
                         if let Some(line) = lines.get(row) {
                             if row == start.row {
                                 // First line: from start_col to end
-                                let col = start.col.min(line.len());
-                                result.push_str(&line[col..]);
+                                result.extend(line.chars().skip(start.col));
                             } else if row == end.row {
                                 // Last line: from start to end_col (inclusive)
-                                let end_col = (end.col + 1).min(line.len());
-                                result.push_str(&line[..end_col]);
+                                result.extend(line.chars().take(end.col.saturating_add(1)));
                             } else {
                                 // Middle lines: entire line
                                 result.push_str(line);
@@ -2326,6 +2343,34 @@ mod tests {
     // ------------------------------------------------------------------
     // Regression tests for known bugs (currently FAILING by design).
     // ------------------------------------------------------------------
+
+    fn pane_with_scrollback_selection_line(line: &str) -> Pane {
+        let mut pane = isolated_pane(80, 8);
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator.process(line.as_bytes());
+        pane.terminal_emulator.process(b"\r\none\r\ntwo\r\nprompt");
+        pane.enter_scrollback_mode();
+        pane
+    }
+
+    #[test]
+    fn test_backward_visual_yank_includes_start_of_line() {
+        let line = "the entire selected line";
+        let mut pane = pane_with_scrollback_selection_line(line);
+
+        pane.handle_vim_input(b"kkk$v0");
+
+        assert_eq!(pane.get_selected_text().as_deref(), Some(line));
+    }
+
+    #[test]
+    fn test_backward_visual_yank_includes_start_of_word() {
+        let mut pane = pane_with_scrollback_selection_line("prefix finalword");
+
+        pane.handle_vim_input(b"kkk$vb");
+
+        assert_eq!(pane.get_selected_text().as_deref(), Some("finalword"));
+    }
 
     /// BUG A (reported): When a URL is long enough to wrap onto a second
     /// terminal row, `Ctrl+B u` only captures the portion on the first row.
