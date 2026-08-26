@@ -45,7 +45,6 @@ pub struct RemoteProcess {
     cols: u16,
     rows: u16,
     env: Vec<(String, String)>,
-    initial_cwd: Option<PathBuf>,
 
     // --- State ---
     /// The session ended deliberately (SessionEnded) — stop reconnecting.
@@ -90,7 +89,6 @@ impl RemoteProcess {
             cols,
             rows,
             env: env.to_vec(),
-            initial_cwd,
             ended: false,
             backoff: INITIAL_BACKOFF,
             next_attempt: None,
@@ -186,7 +184,7 @@ impl RemoteProcess {
             self.cols,
             self.rows,
             &self.env,
-            self.initial_cwd.as_deref(),
+            None,
         ) {
             self.child = child;
             self.stdin = stdin;

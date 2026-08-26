@@ -171,7 +171,7 @@ fn apply_client_msg(compositor: &mut compositor::Compositor, msg: ClientMsg) -> 
             }
         }
         ClientMsg::SetTitle { name } => {
-            compositor.active_tab_mut().name = name;
+            compositor.active_tab_mut().rename(name);
             compositor.force_full_redraw();
         }
         ClientMsg::RequestResync => compositor.force_full_redraw(),
@@ -186,10 +186,10 @@ fn apply_client_msg(compositor: &mut compositor::Compositor, msg: ClientMsg) -> 
 /// Forward per-iteration control-channel traffic to the attached client:
 /// mirrored history entries (for local dual-write) and a window rename.
 ///
-/// `last_name` advances even with no client attached, so a rename that happens
-/// while detached is consumed rather than replayed on reattach (the screen is
-/// repainted via `GridResync` regardless). With no client (`out` is `None`) the
-/// mirror is left to accumulate (capped) until one reattaches.
+/// Explicit titles are also sent as part of every attach handshake, so a
+/// rename that happens while detached is restored together with the screen.
+/// With no client (`out` is `None`) history mirror entries accumulate (capped)
+/// until one reattaches.
 fn forward_pending(
     out: Option<&mut dyn Write>,
     compositor: &compositor::Compositor,
@@ -199,7 +199,7 @@ fn forward_pending(
     last_input_echo: &mut Option<bool>,
 ) {
     let name = compositor.active_tab().name.clone();
-    let rename = if name != *last_name {
+    let rename = if compositor.active_tab().name_is_explicit && name != *last_name {
         *last_name = name.clone();
         Some(name)
     } else {
@@ -357,6 +357,14 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
                     grid: snapshot,
                 };
                 if codec::write_frame(&mut stream, &resync).is_ok() {
+                    if compositor.active_tab().name_is_explicit {
+                        let _ = codec::write_frame(
+                            &mut stream,
+                            &ServerMsg::RenameWindow {
+                                name: compositor.active_tab().name.clone(),
+                            },
+                        );
+                    }
                     if let Some(cwd) = compositor.focused_cwd() {
                         let _ = codec::write_frame(&mut stream, &context_msg(cwd.clone()));
                         last_cwd = Some(cwd);
@@ -512,6 +520,14 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
             grid: snapshot,
         },
     )?;
+    if compositor.active_tab().name_is_explicit {
+        codec::write_frame(
+            &mut handshake_out,
+            &ServerMsg::RenameWindow {
+                name: compositor.active_tab().name.clone(),
+            },
+        )?;
+    }
     if let Some(cwd) = compositor.focused_cwd() {
         codec::write_frame(&mut handshake_out, &context_msg(cwd))?;
     }

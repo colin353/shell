@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod codec;
+pub mod terminal_control;
 
 /// Bumped whenever [`ClientMsg`]/[`ServerMsg`] change incompatibly. The
 /// handshake compares versions and reports [`RemoteStatus::VersionMismatch`]

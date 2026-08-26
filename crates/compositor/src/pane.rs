@@ -1,5 +1,6 @@
 use pty;
 use regex::Regex;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::LazyLock;
 use unicode_width::UnicodeWidthChar;
@@ -30,6 +31,13 @@ pub enum PaneInputResult {
         target: String,
         title: Option<String>,
     },
+}
+
+/// An asynchronous action produced while draining a pane's foreground output.
+/// The compositor applies it to the tab that contains the originating pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneEvent {
+    RenameWindow(String),
 }
 
 /// State for the `reconnect` session picker: choose a persistent session on a
@@ -228,6 +236,10 @@ pub struct Pane {
     pub edit_temp_file: Option<std::path::PathBuf>,
     /// Line-oriented input typed while a subprocess is running.
     subprocess_typeahead: Vec<u8>,
+    /// Authenticated terminal-control parser for the current local subprocess.
+    control_parser: protocol::terminal_control::TerminalControlParser,
+    /// Compositor-level events produced asynchronously by local or remote output.
+    pending_events: Vec<PaneEvent>,
     /// Set when the remote session ends deliberately; the compositor should
     /// remove this pane instead of returning it to the dormant local shell.
     close_requested: bool,
@@ -294,6 +306,8 @@ impl Pane {
             sent_sigint: false,
             edit_temp_file: None,
             subprocess_typeahead: Vec::new(),
+            control_parser: protocol::terminal_control::TerminalControlParser::default(),
+            pending_events: Vec::new(),
             close_requested: false,
             predicted_remote_input: String::new(),
             read_buffer: [0u8; 4096],
@@ -318,34 +332,7 @@ impl Pane {
         core: std::sync::Arc<libshell::ShellCore>,
     ) -> Self {
         let (shell, initial_output) = libshell::Shell::with_core(core, width as u16, height as u16);
-        let mut terminal_emulator = emulator::TerminalEmulator::new(width, height);
-
-        // Process the initial prompt output
-        terminal_emulator.process(&initial_output);
-
-        Pane {
-            terminal_emulator,
-            shell,
-            process: PaneProcess::None,
-            session_picker: None,
-            sent_sigint: false,
-            edit_temp_file: None,
-            subprocess_typeahead: Vec::new(),
-            close_requested: false,
-            predicted_remote_input: String::new(),
-            read_buffer: [0u8; 4096],
-            scrollback_mode: false,
-            scroll_offset: 0,
-            search_mode: false,
-            search_input_focused: false,
-            search_query: String::new(),
-            search_matches: Vec::new(),
-            current_match_index: None,
-            url_mode: false,
-            url_matches: Vec::new(),
-            current_url_index: None,
-            vim_engine: libvim::VimCursorEngine::new_owned(Vec::new(), height, width),
-        }
+        Self::assemble(shell, initial_output, width, height)
     }
 
     /// Handle keyboard input.
@@ -422,7 +409,7 @@ impl Pane {
                 output,
                 command,
                 args,
-                env,
+                mut env,
                 cwd,
                 history_id: _,
             } => {
@@ -442,15 +429,20 @@ impl Pane {
                 let width = self.terminal_emulator.grid().cols as u16;
                 let height = self.terminal_emulator.grid().rows as u16;
 
-                // Change to the shell's cwd before spawning
-                let _ = std::env::set_current_dir(&cwd);
-
                 self.subprocess_typeahead.clear();
-                match pty::PtyProcess::spawn_with_env(&full_command, width, height, &env) {
+                self.start_control_session(&mut env);
+                match pty::PtyProcess::spawn_with_env_in(
+                    &full_command,
+                    width,
+                    height,
+                    &env,
+                    &cwd,
+                ) {
                     Ok(proc) => {
                         self.process = PaneProcess::Subprocess(proc);
                     }
                     Err(e) => {
+                        self.stop_control_session();
                         // Failed to spawn - show error and prompt
                         let error_msg = format!("spawn error: {}\r\n", e);
                         self.terminal_emulator.process(error_msg.as_bytes());
@@ -486,14 +478,22 @@ impl Pane {
                 let full_command = format!("{} {}", editor, temp_file.display());
 
                 self.subprocess_typeahead.clear();
-                let env = libshell::shell_env_snapshot();
-                match pty::PtyProcess::spawn_with_env(&full_command, width, height, &env) {
+                let mut env = libshell::shell_env_snapshot();
+                self.start_control_session(&mut env);
+                match pty::PtyProcess::spawn_with_env_in(
+                    &full_command,
+                    width,
+                    height,
+                    &env,
+                    self.shell.cwd(),
+                ) {
                     Ok(proc) => {
                         self.process = PaneProcess::Subprocess(proc);
                         // Store the temp file path so we can read it when editor exits
                         self.edit_temp_file = Some(temp_file);
                     }
                     Err(e) => {
+                        self.stop_control_session();
                         // Failed to spawn editor - show error and prompt
                         let error_msg = format!("editor error: {}\r\n", e);
                         self.terminal_emulator.process(error_msg.as_bytes());
@@ -717,10 +717,14 @@ impl Pane {
             self.read_and_process_remote();
             return;
         }
-        if let PaneProcess::Subprocess(proc) = &self.process {
+        if matches!(self.process, PaneProcess::Subprocess(_)) {
             // Read all available data from subprocess
             loop {
-                match proc.read(&mut self.read_buffer) {
+                let result = match &self.process {
+                    PaneProcess::Subprocess(proc) => proc.read(&mut self.read_buffer),
+                    _ => break,
+                };
+                match result {
                     Ok(Some(0)) => break, // EOF
                     Ok(Some(n)) => {
                         if debug {
@@ -731,8 +735,14 @@ impl Pane {
                             );
                             eprintln!("  Raw bytes: {:02x?}", &self.read_buffer[..n]);
                         }
-                        // Process through terminal emulator
+                        let controls = self
+                            .control_parser
+                            .advance(&self.read_buffer[..n]);
+
+                        // Process through terminal emulator. Unknown private
+                        // OSCs are consumed without appearing on screen.
                         self.terminal_emulator.process(&self.read_buffer[..n]);
+                        self.apply_terminal_controls(controls);
 
                         // Handle any responses from the terminal (e.g., cursor position queries)
                         let responses = self.terminal_emulator.drain_responses();
@@ -776,6 +786,7 @@ impl Pane {
 
                 // Subprocess exited - clean up
                 self.process = PaneProcess::None;
+                self.stop_control_session();
 
                 // Reset cursor visibility - subprocess may have hidden it
                 self.terminal_emulator.grid_mut().cursor_visible = true;
@@ -843,6 +854,7 @@ impl Pane {
         let width = self.terminal_emulator.grid().cols as u16;
         let height = self.terminal_emulator.grid().rows as u16;
         self.subprocess_typeahead.clear();
+        self.stop_control_session();
         let remote =
             crate::remote::RemoteProcess::connect(target, session, width, height, env, cwd)?;
         self.process = PaneProcess::Remote(remote);
@@ -855,11 +867,6 @@ impl Pane {
         if let Some(remote) = self.remote_mut() {
             let _ = remote.request_resync();
         }
-    }
-
-    /// Take a window-rename pushed up by the remote session, if any.
-    pub fn take_remote_title(&mut self) -> Option<String> {
-        self.remote_mut().and_then(|r| r.take_title())
     }
 
     /// Drain output from the active remote session into the emulator. A clean
@@ -888,6 +895,10 @@ impl Pane {
                 Ok(None) => break, // nothing available right now
                 Err(_) => break,
             }
+        }
+
+        if let Some(name) = self.remote_mut().and_then(|remote| remote.take_title()) {
+            self.pending_events.push(PaneEvent::RenameWindow(name));
         }
 
         // Dual-write: mirror any commands the remote executed into local history,
@@ -978,6 +989,58 @@ impl Pane {
     /// Set the pane shell's current working directory without echoing a command.
     pub fn set_cwd(&mut self, cwd: std::path::PathBuf) {
         self.shell.set_cwd(cwd);
+    }
+
+    /// Cwd that belongs to the process currently owning this pane. A remote
+    /// pane's dormant local shell must not hide the remote daemon's cwd.
+    pub fn authoritative_cwd(&self) -> &Path {
+        self.remote()
+            .and_then(|remote| remote.cwd())
+            .unwrap_or_else(|| self.shell.cwd())
+    }
+
+    pub fn drain_events(&mut self, events: &mut Vec<PaneEvent>) {
+        events.append(&mut self.pending_events);
+    }
+
+    fn start_control_session(&mut self, env: &mut Vec<(String, String)>) {
+        let mut random = [0u8; 16];
+        if getrandom::fill(&mut random).is_err() {
+            self.control_parser.set_token(None);
+            return;
+        }
+        let mut token = String::with_capacity(random.len() * 2);
+        for byte in random {
+            let _ = write!(&mut token, "{byte:02x}");
+        }
+        env.push((
+            protocol::terminal_control::CONTROL_TOKEN_ENV.to_string(),
+            token.clone(),
+        ));
+        self.control_parser.set_token(Some(token));
+    }
+
+    fn stop_control_session(&mut self) {
+        self.control_parser.set_token(None);
+    }
+
+    fn apply_terminal_controls(
+        &mut self,
+        controls: Vec<protocol::terminal_control::TerminalControl>,
+    ) {
+        for control in controls {
+            match control {
+                protocol::terminal_control::TerminalControl::SetCwd(path)
+                    if path.is_absolute() && path.is_dir() =>
+                {
+                    self.shell.set_cwd(path.canonicalize().unwrap_or(path));
+                }
+                protocol::terminal_control::TerminalControl::RenameWindow(name) => {
+                    self.pending_events.push(PaneEvent::RenameWindow(name));
+                }
+                protocol::terminal_control::TerminalControl::SetCwd(_) => {}
+            }
+        }
     }
 
     fn remote_mut(&mut self) -> Option<&mut crate::remote::RemoteProcess> {

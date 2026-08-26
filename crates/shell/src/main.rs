@@ -1,14 +1,15 @@
-//! Entry point. Dispatches to one of three modes:
+//! Entry point. Dispatches to one of several modes:
 //!
 //! - `shell`            — standalone single-process shell (default, unchanged)
 //! - `shell daemon`     — headless daemon serving a Unix socket
 //! - `shell attach`     — dumb client attaching to a daemon
 //! - `shell run`        — start a named background session running a command
+//! - `shell control`    — emit a script-to-shell control request
 //!
 //! Both daemon and attach accept `--socket <path>` (default: a per-user socket
 //! under `$XDG_RUNTIME_DIR`).
 
-use shell::{client, common, server, standalone};
+use shell::{client, common, control, server, standalone};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -50,6 +51,15 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("shell attach: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        // Emit an authenticated control request from a foreground script. The
+        // standalone `shellctl` binary is a shorter spelling of this mode.
+        Some("control") => match control::run(args[1..].iter().cloned().map(Into::into)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("shell control: {e}");
                 ExitCode::FAILURE
             }
         },
@@ -147,6 +157,7 @@ fn print_usage() {
          shell                          run the standalone shell\n  \
          shell daemon [--socket P]      run a headless daemon\n  \
          shell attach [--socket P]      attach to a daemon\n  \
+         shell control <operation>      emit a script-to-shell control request\n  \
          shell run --name <n> -- <cmd>  start a named background session running <cmd>\n  \
          shell bridge --session <id>    bridge stdio to a persistent session\n  \
          shell sessions [list|kill <n>] manage persistent sessions\n\

@@ -135,6 +135,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "emulator",
+ "getrandom",
  "libc",
  "libshell",
  "libvim",
@@ -602,6 +603,7 @@ dependencies = [
 name = "protocol"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
 ]
@@ -612,6 +614,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "nix",
+ "tempfile",
 ]
 
 [[package]]

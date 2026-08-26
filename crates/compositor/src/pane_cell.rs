@@ -1,6 +1,6 @@
 use crate::border::{get_border_char, BorderDirections};
 use crate::error::CompositorError;
-use crate::pane::{CtrlCResult, Pane, PaneInputResult};
+use crate::pane::{CtrlCResult, Pane, PaneEvent, PaneInputResult};
 use crate::types::{Direction, SplitDirection};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +190,19 @@ impl PaneCell {
                     }
                 }
                 None
+            }
+        }
+    }
+
+    /// Drain asynchronous events from every pane in this subtree. The caller
+    /// knows which tab owns this root, so focus changes cannot misroute them.
+    pub fn drain_pane_events(&mut self, events: &mut Vec<PaneEvent>) {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => pane.drain_events(events),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    cell.drain_pane_events(events);
+                }
             }
         }
     }
@@ -1204,7 +1217,7 @@ impl PaneCell {
 
                 // Create a new pane with a new shell, starting in the same
                 // working directory as the pane being split.
-                let split_cwd = pane.shell.cwd().to_path_buf();
+                let split_cwd = pane.authoritative_cwd().to_path_buf();
                 let new_pane = Pane::new_in(new_width, new_height, split_cwd);
 
                 // Take ownership of the old pane - use a temporary placeholder
@@ -1300,7 +1313,11 @@ impl PaneCell {
             unreachable!("split_into_sibling called on a non-leaf cell");
         };
         // New shell starts in the same working directory as the pane it joins.
-        let new_pane = Pane::new_in(self.width, self.height, pane.shell.cwd().to_path_buf());
+        let new_pane = Pane::new_in(
+            self.width,
+            self.height,
+            pane.authoritative_cwd().to_path_buf(),
+        );
         self.focus = false;
         PaneCell {
             inner: PaneCellInner::Pane(new_pane),

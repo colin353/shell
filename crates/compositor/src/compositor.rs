@@ -1,5 +1,5 @@
 use crate::error::CompositorError;
-use crate::pane::{CtrlCResult, Pane, PaneInputResult};
+use crate::pane::{CtrlCResult, Pane, PaneEvent, PaneInputResult};
 use crate::pane_cell::PaneCell;
 use crate::tab::Tab;
 use crate::types::{Direction, SplitDirection};
@@ -787,14 +787,14 @@ impl Compositor {
             PaneInputResult::None => {}
             PaneInputResult::Rerender => self.render(),
             PaneInputResult::RenameWindow(name) => {
-                self.tabs[self.active_tab].name = name;
+                self.tabs[self.active_tab].rename(name);
                 self.render();
             }
             PaneInputResult::ConnectedRemote { target, title } => {
                 // The tab is now remote-owned: future splits auto-connect there.
                 self.tabs[self.active_tab].remote_host = Some(target);
                 if let Some(title) = title {
-                    self.tabs[self.active_tab].name = title;
+                    self.tabs[self.active_tab].rename(title);
                 }
                 self.render();
             }
@@ -1376,6 +1376,7 @@ impl Compositor {
                 }
             }
 
+            self.apply_pending_pane_events();
             self.close_requested_panes();
             if self.exit_requested {
                 return Ok(());
@@ -1463,18 +1464,10 @@ impl Compositor {
             }
         }
 
+        self.apply_pending_pane_events();
         self.close_requested_panes();
         if self.exit_requested {
             return Ok(had_events);
-        }
-
-        // A remote session may have pushed a window rename; apply it to the tab
-        // owning the focused (remote) pane.
-        let remote_title = self
-            .get_focused_pane_mut()
-            .and_then(|p| p.take_remote_title());
-        if let Some(name) = remote_title {
-            self.tabs[self.active_tab].name = name;
         }
 
         // Process queued keyboard input
@@ -1504,19 +1497,31 @@ impl Compositor {
                 PaneInputResult::None => {}
                 PaneInputResult::Rerender => needs_render = true,
                 PaneInputResult::RenameWindow(name) => {
-                    self.tabs[self.active_tab].name = name;
+                    self.tabs[self.active_tab].rename(name);
                     needs_render = true;
                 }
                 PaneInputResult::ConnectedRemote { target, title } => {
                     self.tabs[self.active_tab].remote_host = Some(target);
                     if let Some(title) = title {
-                        self.tabs[self.active_tab].name = title;
+                        self.tabs[self.active_tab].rename(title);
                     }
                     needs_render = true;
                 }
             }
         }
         needs_render
+    }
+
+    fn apply_pending_pane_events(&mut self) {
+        for tab in &mut self.tabs {
+            let mut events = Vec::new();
+            tab.root.drain_pane_events(&mut events);
+            for event in events {
+                match event {
+                    PaneEvent::RenameWindow(name) => tab.rename(name),
+                }
+            }
+        }
     }
 
     /// Render the compositor to the terminal.
@@ -1894,7 +1899,7 @@ impl Compositor {
     /// Get the focused pane's authoritative cwd.
     pub fn focused_cwd(&self) -> Option<PathBuf> {
         self.get_focused_pane()
-            .map(|pane| pane.shell.cwd().to_path_buf())
+            .map(|pane| pane.authoritative_cwd().to_path_buf())
     }
 
     pub fn focused_input_echo_mode(&self) -> Option<bool> {

@@ -2,6 +2,21 @@ http://google.com
 
 # Shell + multiplexer
 
+## Script control
+
+Foreground scripts can request changes to their containing shell through the
+authenticated `shellctl` helper:
+
+```bash
+cd "$(git rev-parse --show-toplevel)" || exit
+shellctl set-cwd "$PWD"
+shellctl rename-window "$(basename "$PWD")"
+```
+
+The equivalent long form is `shell control ...`. Requests are written directly
+to the controlling terminal, are scoped to the current foreground process, and
+work in connected panes; unknown or copied control sequences are ignored.
+
 Things to do:
 
  - [x] When copying text from selection mode, we should automatically exit selection mode when the copy completes

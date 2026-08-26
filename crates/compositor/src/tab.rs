@@ -6,6 +6,9 @@ use crate::pane_cell::{PaneCell, PaneCellInner};
 pub struct Tab {
     /// The display name for this tab
     pub name: String,
+    /// Whether the name was explicitly chosen rather than being a constructor
+    /// default. Explicit names are session state and are replayed on reattach.
+    pub name_is_explicit: bool,
     /// The root pane cell for this tab's content
     pub root: PaneCell,
     /// Whether the focused pane is currently zoomed (temporary fullscreen)
@@ -20,6 +23,7 @@ impl Tab {
     pub fn new(name: String, width: usize, height: usize) -> Result<Self, CompositorError> {
         Ok(Self {
             name,
+            name_is_explicit: false,
             root: PaneCell {
                 inner: PaneCellInner::Pane(Pane::new(width, height)),
                 width,
@@ -42,6 +46,7 @@ impl Tab {
     ) -> Result<Self, CompositorError> {
         Ok(Self {
             name,
+            name_is_explicit: false,
             root: PaneCell {
                 inner: PaneCellInner::Pane(Pane::with_core(width, height, core)),
                 width,
@@ -53,6 +58,11 @@ impl Tab {
             zoomed: false,
             remote_host: None,
         })
+    }
+
+    pub fn rename(&mut self, name: String) {
+        self.name = name;
+        self.name_is_explicit = true;
     }
 
     /// Resize the tab's root pane to new dimensions

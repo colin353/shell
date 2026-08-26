@@ -5,6 +5,8 @@ use nix::pty::{openpty, OpenptyResult, Winsize};
 use nix::unistd::{fork, read, write, ForkResult, Pid};
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 /// Represents a running process attached to a PTY
 pub struct PtyProcess {
@@ -58,6 +60,29 @@ impl PtyProcess {
         rows: u16,
         env: &[(String, String)],
     ) -> Result<Self, PtyError> {
+        Self::spawn_with_env_and_cwd(command, cols, rows, env, None)
+    }
+
+    /// Spawn a new process with environment overrides and a child-local cwd.
+    /// Unlike changing the parent's process-wide cwd before spawning, this is
+    /// safe when several panes launch commands independently.
+    pub fn spawn_with_env_in(
+        command: &str,
+        cols: u16,
+        rows: u16,
+        env: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<Self, PtyError> {
+        Self::spawn_with_env_and_cwd(command, cols, rows, env, Some(cwd))
+    }
+
+    fn spawn_with_env_and_cwd(
+        command: &str,
+        cols: u16,
+        rows: u16,
+        env: &[(String, String)],
+        cwd: Option<&Path>,
+    ) -> Result<Self, PtyError> {
         let winsize = Winsize {
             ws_row: rows,
             ws_col: cols,
@@ -89,6 +114,10 @@ impl PtyProcess {
         let c_flag = CString::new("-c").map_err(|_| PtyError::InvalidCommand)?;
         let c_command = CString::new(command).map_err(|_| PtyError::InvalidCommand)?;
         let argv_owned = [&bash, &c_flag, &c_command];
+        let cwd = cwd
+            .map(|path| CString::new(path.as_os_str().as_bytes()))
+            .transpose()
+            .map_err(|_| PtyError::InvalidCommand)?;
 
         // Merge the parent environment with the per-pane overrides, then TERM /
         // COLORTERM so programs know the terminal supports color. Reading env in
@@ -145,6 +174,11 @@ impl PtyProcess {
                 unsafe {
                     if libc::login_tty(slave_fd) < 0 {
                         libc::_exit(127);
+                    }
+                    if let Some(cwd) = &cwd {
+                        if libc::chdir(cwd.as_ptr()) < 0 {
+                            libc::_exit(127);
+                        }
                     }
                     libc::execve(bash.as_ptr(), argv.as_ptr(), envp.as_ptr());
                     // execve only returns on failure.
@@ -409,6 +443,37 @@ mod tests {
             output_str.contains("from-shell-env"),
             "Expected overridden env var in output: {}",
             output_str
+        );
+    }
+
+    #[test]
+    fn spawn_with_env_in_changes_only_the_child_cwd() {
+        let original = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pty = PtyProcess::spawn_with_env_in("pwd", 80, 24, &[], dir.path()).unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        let mut buf = [0u8; 1024];
+        let mut output = Vec::new();
+        for _ in 0..10 {
+            if let Ok(Some(n)) = pty.read(&mut buf) {
+                output.extend_from_slice(&buf[..n]);
+                if !output.is_empty() {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            String::from_utf8_lossy(&output).contains(&dir.path().display().to_string()),
+            "child should start in requested cwd: {}",
+            String::from_utf8_lossy(&output)
+        );
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            original,
+            "spawning a pane process must not mutate the compositor cwd"
         );
     }
 
