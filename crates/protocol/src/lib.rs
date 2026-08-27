@@ -30,7 +30,7 @@ pub mod terminal_control;
 /// Bumped whenever [`ClientMsg`]/[`ServerMsg`] change incompatibly. The
 /// handshake compares versions and reports [`RemoteStatus::VersionMismatch`]
 /// when a remote daemon binary is stale.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -116,6 +116,12 @@ pub enum ClientMsg {
     SetCwd {
         pane: PaneId,
         cwd: PathBuf,
+    },
+    /// Validate path-like scrollback tokens on the authoritative host before
+    /// presenting them as directory-picker candidates.
+    ValidateDirectories {
+        request: u64,
+        candidates: Vec<String>,
     },
     /// Set the authoritative window/tab title without echoing a command.
     SetTitle {
@@ -222,6 +228,12 @@ pub enum ServerMsg {
         pane: PaneId,
         echo: bool,
     },
+    /// Whether the authoritative shell is waiting at its prompt rather than
+    /// running a foreground child process.
+    ShellState {
+        pane: PaneId,
+        waiting_for_input: bool,
+    },
     Completions {
         req: RequestId,
         items: Vec<CompletionItem>,
@@ -231,6 +243,12 @@ pub enum ServerMsg {
     HistoryResults {
         req: RequestId,
         results: Vec<HistoryHit>,
+    },
+    /// Directory candidates that exist on the authoritative host. Paths are
+    /// canonicalized so a later `SetCwd` does not need to reinterpret them.
+    ValidatedDirectories {
+        request: u64,
+        directories: Vec<ValidatedDirectory>,
     },
 
     // -- Lifecycle. --
@@ -282,6 +300,14 @@ pub struct ContextSnapshot {
     /// Executable names on `PATH`, for local command completion + highlighting.
     pub path_executables: Vec<String>,
     pub origin: Origin,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedDirectory {
+    /// The exact token displayed in scrollback.
+    pub candidate: String,
+    /// Its canonical absolute path on the authoritative host.
+    pub path: PathBuf,
 }
 
 /// One tab-completion candidate. Mirrors `shell_syntax::Completion`.
@@ -431,5 +457,34 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn directory_validation_messages_round_trip() {
+        let request = ClientMsg::ValidateDirectories {
+            request: 42,
+            candidates: vec!["src".into(), "/tmp".into()],
+        };
+        let request: ClientMsg = codec::from_frame(&codec::to_frame(&request)).unwrap();
+        assert!(matches!(
+            request,
+            ClientMsg::ValidateDirectories { request: 42, .. }
+        ));
+
+        let response = ServerMsg::ValidatedDirectories {
+            request: 42,
+            directories: vec![ValidatedDirectory {
+                candidate: "src".into(),
+                path: PathBuf::from("/work/src"),
+            }],
+        };
+        let response: ServerMsg = codec::from_frame(&codec::to_frame(&response)).unwrap();
+        assert!(matches!(
+            response,
+            ServerMsg::ValidatedDirectories {
+                request: 42,
+                directories
+            } if directories[0].path == PathBuf::from("/work/src")
+        ));
     }
 }

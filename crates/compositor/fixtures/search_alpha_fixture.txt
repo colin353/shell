@@ -21,4 +21,4 @@ um tincidunt malesuada tellus.
 Line 16: Ut ultrices ultrices enim. Curabitur sit amet mauris. Morbi in dui quis
  est pulvinar ullamcorper.                                                      
 Line 17: Nulla facilisi. Integer lacinia sollicitudin massa. Cras metus.        
- 0 shell  / SEARCHABLE_MARKER_ALPHA                                         1/1 
+ 0 shell ○  / SEARCHABLE_MARKER_ALPHA                                       1/1 

@@ -1,7 +1,7 @@
 use crate::border::{get_border_char, BorderDirections};
 use crate::error::CompositorError;
-use crate::pane::{CtrlCResult, Pane, PaneEvent, PaneInputResult};
-use crate::types::{Direction, SplitDirection};
+use crate::pane::{CtrlCResult, Pane, PaneEvent, PaneInputResult, UrlModeAction};
+use crate::types::{Badge, Direction, SplitDirection};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MouseTarget {
@@ -190,6 +190,31 @@ impl PaneCell {
                     }
                 }
                 None
+            }
+        }
+    }
+
+    /// Whether the focused pane's authoritative shell is waiting at its prompt.
+    pub fn focused_shell_waiting_for_input(&self) -> Option<bool> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => Some(pane.shell_waiting_for_input()),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.focused_shell_waiting_for_input();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Highest-priority badge in this pane subtree.
+    pub fn badge(&self) -> Badge {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.badge(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                cells.iter().map(PaneCell::badge).max().unwrap_or_default()
             }
         }
     }
@@ -1030,6 +1055,51 @@ impl PaneCell {
                     }
                 }
                 None
+            }
+        }
+    }
+
+    /// Get display text for the focused URL-mode match.
+    pub fn get_current_url_text(&self) -> Option<String> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.get_current_url_text().map(str::to_string),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_current_url_text();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Get the Enter action for the focused URL-mode match.
+    pub fn get_current_url_action(&self) -> Option<UrlModeAction> {
+        match &self.inner {
+            PaneCellInner::Pane(pane) => pane.get_current_url_action(),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.get_current_url_action();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Change the directory of the focused pane's authoritative shell.
+    pub fn change_focused_directory(&mut self, cwd: std::path::PathBuf) -> bool {
+        match &mut self.inner {
+            PaneCellInner::Pane(pane) => pane.change_directory(cwd),
+            PaneCellInner::VSplit(cells) | PaneCellInner::HSplit(cells) => {
+                for cell in cells {
+                    if cell.focus {
+                        return cell.change_focused_directory(cwd);
+                    }
+                }
+                false
             }
         }
     }

@@ -21,4 +21,4 @@ Line 9: Maecenas fermentum consequat mi. Donec fermentum. Pellentesque malesuada
 Line 10: Duis sapien sem, aliquet sed, vulputate eget, feugiat sit amet, eros. D
 uis sapien sem.                                                                 
 Line 11: SEARCHABLE_MARKER_ALPHA - This line contains a unique marker for search
- 0 shell                                                            SCROLL 0/94 
+ 0 shell ○                                                          SCROLL 0/94 

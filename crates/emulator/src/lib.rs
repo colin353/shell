@@ -13,7 +13,7 @@ mod snapshot;
 
 use serde::{Deserialize, Serialize};
 
-pub use alacritty_wrapper::AlacrittyEmulator;
+pub use alacritty_wrapper::{AlacrittyEmulator, TerminalTitleEvent};
 pub use cell::{Cell, CellAttributes, Color, Line};
 pub use delta::compute_delta;
 pub use snapshot::render_snapshot_to_ansi;
@@ -362,6 +362,11 @@ impl TerminalEmulator {
     /// Drain queued responses (for DSR and other terminal queries)
     pub fn drain_responses(&mut self) -> Vec<Vec<u8>> {
         self.inner.drain_responses()
+    }
+
+    /// Drain window-title changes parsed from OSC 0/2 sequences.
+    pub fn drain_title_events(&mut self) -> Vec<TerminalTitleEvent> {
+        self.inner.drain_title_events()
     }
 
     pub fn mouse_mode(&self) -> MouseMode {

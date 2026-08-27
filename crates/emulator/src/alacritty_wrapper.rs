@@ -4,6 +4,7 @@
 //! terminal emulator and our existing Cell/Line types.
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -16,15 +17,30 @@ use alacritty_terminal::Term;
 use crate::cell::{Cell, CellAttributes, Color, Line};
 use crate::{MouseEncoding, MouseMode, MouseReportMode};
 
-/// Dummy event listener that collects responses
-#[derive(Default)]
+/// Window-title events emitted by a program through OSC 0/2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalTitleEvent {
+    Set(String),
+    Reset,
+}
+
+/// Event listener shared with the terminal emulator.
+#[derive(Clone, Default)]
 pub struct EventProxy {
-    responses: Vec<Vec<u8>>,
+    title_events: Arc<Mutex<VecDeque<TerminalTitleEvent>>>,
 }
 
 impl EventListener for EventProxy {
-    fn send_event(&self, _event: Event) {
-        // Most events can be ignored for our use case
+    fn send_event(&self, event: Event) {
+        let title_event = match event {
+            Event::Title(title) => TerminalTitleEvent::Set(title),
+            Event::ResetTitle => TerminalTitleEvent::Reset,
+            _ => return,
+        };
+
+        if let Ok(mut events) = self.title_events.lock() {
+            events.push_back(title_event);
+        }
     }
 }
 
@@ -36,6 +52,8 @@ pub struct AlacrittyEmulator {
     rows: usize,
     /// Queued responses to be sent back to the PTY (e.g., for DSR queries)
     responses: VecDeque<Vec<u8>>,
+    /// Window-title events parsed while processing terminal output.
+    title_events: Arc<Mutex<VecDeque<TerminalTitleEvent>>>,
 }
 
 impl AlacrittyEmulator {
@@ -43,7 +61,14 @@ impl AlacrittyEmulator {
     pub fn new(cols: usize, rows: usize) -> Self {
         let config = Config::default();
         let size = TermSize::new(cols, rows);
-        let term = Term::new(config, &size, EventProxy::default());
+        let title_events = Arc::new(Mutex::new(VecDeque::new()));
+        let term = Term::new(
+            config,
+            &size,
+            EventProxy {
+                title_events: Arc::clone(&title_events),
+            },
+        );
 
         Self {
             term,
@@ -51,6 +76,7 @@ impl AlacrittyEmulator {
             cols,
             rows,
             responses: VecDeque::new(),
+            title_events,
         }
     }
 
@@ -186,6 +212,14 @@ impl AlacrittyEmulator {
     /// Drain queued responses (for DSR and other terminal queries)
     pub fn drain_responses(&mut self) -> Vec<Vec<u8>> {
         self.responses.drain(..).collect()
+    }
+
+    /// Drain window-title changes parsed since the previous call.
+    pub fn drain_title_events(&mut self) -> Vec<TerminalTitleEvent> {
+        match self.title_events.lock() {
+            Ok(mut events) => events.drain(..).collect(),
+            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+        }
     }
 
     /// Check if cursor is visible
@@ -373,6 +407,21 @@ fn convert_indexed_16(idx: u8) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_collects_terminal_title_events() {
+        let mut emu = AlacrittyEmulator::new(80, 24);
+        emu.process(b"\x1b]0;first\x07\x1b]2;second\x1b\\");
+
+        assert_eq!(
+            emu.drain_title_events(),
+            vec![
+                TerminalTitleEvent::Set("first".to_string()),
+                TerminalTitleEvent::Set("second".to_string()),
+            ]
+        );
+        assert!(emu.drain_title_events().is_empty());
+    }
 
     #[test]
     fn test_simple_text() {

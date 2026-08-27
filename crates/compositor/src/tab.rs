@@ -1,6 +1,7 @@
 use crate::error::CompositorError;
 use crate::pane::Pane;
 use crate::pane_cell::{PaneCell, PaneCellInner};
+use crate::types::Badge;
 
 /// A tab containing a name and its own root pane tree
 pub struct Tab {
@@ -63,6 +64,11 @@ impl Tab {
     pub fn rename(&mut self, name: String) {
         self.name = name;
         self.name_is_explicit = true;
+    }
+
+    /// Highest-priority transient badge reported by any pane in this tab.
+    pub fn badge(&self) -> Badge {
+        self.root.badge()
     }
 
     /// Resize the tab's root pane to new dimensions

@@ -21,4 +21,4 @@ Line 59: Et malesuada fames ac turpis egestas integer eget aliquet nibh praesent
  tristique magna sit amet.                                                      
 Line 60: BOTTOM_MARKER - This is the final line of the fixture and should be vis
 ible without scrolling.                                                         
- 0 shell  / BOTTOM_MARKER                                                   1/1 
+ 0 shell ○  / BOTTOM_MARKER                                                 1/1 

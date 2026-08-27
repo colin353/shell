@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use protocol::codec::{self, FrameReader};
-use protocol::{ClientMode, ClientMsg, Hello, HistoryRecord, ServerMsg, PROTOCOL_VERSION};
+use protocol::{
+    ClientMode, ClientMsg, Hello, HistoryRecord, ServerMsg, ValidatedDirectory, PROTOCOL_VERSION,
+};
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -36,8 +38,12 @@ pub struct RemoteProcess {
     pending_history: Vec<HistoryRecord>,
     /// Latest authoritative cwd reported by the remote daemon.
     cwd: Option<PathBuf>,
+    /// Completed directory-validation requests awaiting consumption by the pane.
+    pending_directory_validations: Vec<(u64, Vec<ValidatedDirectory>)>,
     /// Whether the remote focused pane expects printable input to echo.
     input_echo: bool,
+    /// Whether the remote shell is waiting at its prompt rather than running a child.
+    shell_waiting_for_input: bool,
 
     // --- Reconnect parameters (the session is identified by `session_id`). ---
     target: String,
@@ -83,7 +89,9 @@ impl RemoteProcess {
             pending_title: None,
             pending_history: Vec::new(),
             cwd: None,
+            pending_directory_validations: Vec::new(),
             input_echo: false,
+            shell_waiting_for_input: false,
             target: target.to_string(),
             session_id,
             cols,
@@ -136,7 +144,16 @@ impl RemoteProcess {
                             .pending
                             .extend_from_slice(&emulator::render_snapshot_to_ansi(&grid)),
                         ServerMsg::Context { ctx, .. } => self.cwd = Some(ctx.cwd),
+                        ServerMsg::ValidatedDirectories {
+                            request,
+                            directories,
+                        } => self
+                            .pending_directory_validations
+                            .push((request, directories)),
                         ServerMsg::InputMode { echo, .. } => self.input_echo = echo,
+                        ServerMsg::ShellState {
+                            waiting_for_input, ..
+                        } => self.shell_waiting_for_input = waiting_for_input,
                         ServerMsg::RenameWindow { name } => self.pending_title = Some(name),
                         ServerMsg::HistoryRecorded { entry } => self.pending_history.push(entry),
                         ServerMsg::SessionEnded => self.ended = true,
@@ -239,6 +256,32 @@ impl RemoteProcess {
         Ok(())
     }
 
+    /// Ask the authoritative host to validate path-like scrollback tokens.
+    pub fn validate_directories(
+        &mut self,
+        request: u64,
+        candidates: Vec<String>,
+    ) -> io::Result<()> {
+        codec::write_frame(
+            &mut self.stdin,
+            &ClientMsg::ValidateDirectories {
+                request,
+                candidates,
+            },
+        )
+    }
+
+    /// Change the authoritative remote shell directory without echoing input.
+    pub fn set_cwd(&mut self, cwd: PathBuf) -> io::Result<()> {
+        codec::write_frame(
+            &mut self.stdin,
+            &ClientMsg::SetCwd {
+                pane: protocol::PaneId(0),
+                cwd,
+            },
+        )
+    }
+
     /// Ask the remote to repaint its authoritative screen.
     pub fn request_resync(&mut self) -> io::Result<()> {
         let _ = codec::write_frame(&mut self.stdin, &ClientMsg::RequestResync);
@@ -256,6 +299,11 @@ impl RemoteProcess {
         std::mem::take(&mut self.pending_history)
     }
 
+    /// Take directory-validation replies received since the last drain.
+    pub fn take_directory_validations(&mut self) -> Vec<(u64, Vec<ValidatedDirectory>)> {
+        std::mem::take(&mut self.pending_directory_validations)
+    }
+
     /// The host this session is connected to (the history-origin label).
     pub fn target(&self) -> &str {
         &self.target
@@ -268,6 +316,10 @@ impl RemoteProcess {
 
     pub fn input_echo_mode(&self) -> bool {
         self.input_echo
+    }
+
+    pub fn shell_waiting_for_input(&self) -> bool {
+        self.shell_waiting_for_input
     }
 
     /// Exit code if the session ended deliberately. Returns `None` while a

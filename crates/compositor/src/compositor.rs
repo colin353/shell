@@ -1,5 +1,5 @@
 use crate::error::CompositorError;
-use crate::pane::{CtrlCResult, Pane, PaneEvent, PaneInputResult};
+use crate::pane::{CtrlCResult, Pane, PaneEvent, PaneInputResult, UrlModeAction};
 use crate::pane_cell::PaneCell;
 use crate::tab::Tab;
 use crate::types::{Direction, SplitDirection};
@@ -1039,8 +1039,8 @@ impl Compositor {
     /// Navigation keys:
     /// - j: Next URL (toward bottom/more recent)
     /// - k: Previous URL (toward top/older)
-    /// - Enter: Open the selected URL in default browser
-    /// - y: Yank (copy) the selected URL to clipboard
+    /// - Enter: Open the selected URL, or change to the selected directory
+    /// - y: Yank (copy) the selected URL or directory token to clipboard
     /// - Escape/q: Exit URL mode (back to scrollback mode)
     fn handle_url_input(&mut self, input: &[u8]) {
         if input.is_empty() {
@@ -1065,19 +1065,24 @@ impl Compositor {
                     self.render();
                 }
                 0x0d => {
-                    // Enter - open the selected URL in default browser
-                    if let Some(url) = self.active_tab().root.get_current_url() {
-                        let _ = open_url(&url);
+                    match self.active_tab().root.get_current_url_action() {
+                        Some(UrlModeAction::OpenUrl(url)) => {
+                            let _ = open_url(&url);
+                        }
+                        Some(UrlModeAction::ChangeDirectory(path)) => {
+                            self.active_tab_mut().root.change_focused_directory(path);
+                        }
+                        None => {}
                     }
-                    // Exit URL mode after opening
+                    // Exit URL mode after activating the match.
                     self.active_tab_mut().root.exit_url_mode();
                     self.active_tab_mut().root.exit_scrollback_mode();
                     self.render();
                 }
                 b'y' => {
-                    // y - yank (copy) the selected URL to clipboard
-                    if let Some(url) = self.active_tab().root.get_current_url() {
-                        let _ = copy_to_clipboard(&url);
+                    // y - yank (copy) the selected match to clipboard
+                    if let Some(text) = self.active_tab().root.get_current_url_text() {
+                        let _ = copy_to_clipboard(&text);
                     }
                     // Exit URL mode after yanking
                     self.active_tab_mut().root.exit_url_mode();
@@ -1664,7 +1669,15 @@ impl Compositor {
             let zoom_indicator = if tab.zoomed { "Z" } else { "" };
             // Remote-owned tabs are distinguished by color alone (see attrs
             // below); the host name is omitted to keep the tab label compact.
-            let tab_text = format!(" {} {}{} ", i, tab.name, zoom_indicator);
+            // Reserve a padded three-cell badge area (space, badge, space), so
+            // state changes never alter tab widths or move later tabs.
+            let tab_text = format!(
+                " {} {}{} {} ",
+                i,
+                tab.name,
+                zoom_indicator,
+                tab.badge().glyph()
+            );
             let attrs = match (tab.remote_host.is_some(), i == self.active_tab) {
                 (true, true) => active_remote_tab_attrs.clone(),
                 (true, false) => remote_tab_attrs.clone(),
@@ -1749,9 +1762,12 @@ impl Compositor {
                 );
 
                 // Show current URL if selected (truncated if too long)
-                if let Some(url) = self.tabs[self.active_tab].root.get_current_url() {
+                if let Some(url) = self.tabs[self.active_tab].root.get_current_url_text() {
                     // Calculate available space for URL (leave room for hint on right)
-                    let hint_text = " j/k:nav Enter:open ";
+                    let hint_text = match self.tabs[self.active_tab].root.get_current_url_action() {
+                        Some(UrlModeAction::ChangeDirectory(_)) => " j/k:nav Enter:cd ",
+                        _ => " j/k:nav Enter:open ",
+                    };
                     let hint_width = str_display_width(hint_text);
                     let url_max_x = cols.saturating_sub(hint_width);
                     let available = url_max_x.saturating_sub(x_pos);
@@ -1904,6 +1920,13 @@ impl Compositor {
 
     pub fn focused_input_echo_mode(&self) -> Option<bool> {
         self.tabs[self.active_tab].root.focused_input_echo_mode()
+    }
+
+    /// Whether the focused pane's authoritative shell is waiting at its prompt.
+    pub fn focused_shell_waiting_for_input(&self) -> Option<bool> {
+        self.tabs[self.active_tab]
+            .root
+            .focused_shell_waiting_for_input()
     }
 
     /// Set the focused pane's authoritative cwd.

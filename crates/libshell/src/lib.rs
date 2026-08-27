@@ -825,6 +825,14 @@ impl Shell {
         self.cwd = cwd;
     }
 
+    /// Redraw the current prompt and input buffer from the terminal's existing
+    /// caret position. Used when prompt context such as cwd changes without a
+    /// normal editing keystroke.
+    pub fn redraw_prompt_and_input(&mut self) -> Vec<u8> {
+        let old_caret = self.caret_phys(self.cursor_pos);
+        self.render_line_from(old_caret)
+    }
+
     /// Check if the input buffer is empty (no pending input).
     ///
     /// This is used to determine whether CTRL+C should clear input or

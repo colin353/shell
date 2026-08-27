@@ -21,4 +21,4 @@
 (reverse-i-search)`' [1/6]                                                      
 compositor ➜                                                                    
                                                                                 
- 0 shell                                                       2025-01-01 12:00 
+ 0 shell ○                                                     2025-01-01 12:00 

@@ -24,11 +24,11 @@ pub mod types;
 
 pub use compositor::Compositor;
 pub use error::CompositorError;
-pub use pane::{CtrlCResult, Pane, SearchMatch, UrlMatch};
-pub use remote::RemoteProcess;
+pub use pane::{CtrlCResult, Pane, SearchMatch, UrlMatch, UrlModeAction};
 pub use pane_cell::{PaneCell, PaneCellInner};
+pub use remote::RemoteProcess;
 pub use tab::Tab;
-pub use types::{CompositorEvent, Direction, SplitDirection};
+pub use types::{Badge, CompositorEvent, Direction, SplitDirection};
 
 /// Number of rows reserved for the status bar at the bottom of the terminal
 pub const STATUS_BAR_HEIGHT: usize = 1;
@@ -715,6 +715,39 @@ mod tests {
 
         assert!(!compositor.root().is_in_scrollback_mode());
         assert_eq!(compositor.root().get_vim_mode(), libvim::Mode::Normal);
+    }
+
+    #[test]
+    fn test_url_mode_enter_changes_to_selected_directory() {
+        let cwd = tempfile::tempdir().unwrap();
+        let target = cwd.path().join("selected-directory");
+        std::fs::create_dir(&target).unwrap();
+        let mut compositor = isolated_compositor();
+        let pane = compositor.get_focused_pane_mut().unwrap();
+        pane.set_cwd(cwd.path().to_path_buf());
+        pane.terminal_emulator
+            .process(b"\x1b[2J\x1b[Hselected-directory");
+
+        compositor.handle_input(&[0x02]); // Ctrl+b
+        compositor.handle_input(&[b'u']);
+        assert!(matches!(
+            compositor.root().get_current_url_action(),
+            Some(UrlModeAction::ChangeDirectory(_))
+        ));
+
+        compositor.handle_input(&[b'\r']);
+
+        assert_eq!(
+            compositor.focused_cwd().unwrap(),
+            target.canonicalize().unwrap()
+        );
+        assert!(!compositor.root().is_in_scrollback_mode());
+        let pane = compositor.get_focused_pane_mut().unwrap();
+        let grid = pane.terminal_emulator.grid();
+        assert!(
+            (0..grid.rows).any(|row| grid.get_line_text(row).starts_with("selected-directory ➜")),
+            "the prompt should display the new cwd immediately after Enter"
+        );
     }
 
     #[test]

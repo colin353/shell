@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 
 use protocol::codec::{self};
 use protocol::{
-    ClientMsg, ContextSnapshot, Hello, HostId, Origin, PaneId, ServerMsg, SessionId, Welcome,
-    PROTOCOL_VERSION,
+    ClientMsg, ContextSnapshot, Hello, HostId, Origin, PaneId, ServerMsg, SessionId,
+    ValidatedDirectory, Welcome, PROTOCOL_VERSION,
 };
 
 /// A `Write` sink that frames everything written into `ServerMsg::Render` frames
@@ -149,6 +149,48 @@ enum MsgOutcome {
     /// The client asked to detach (socket transport); stdio treats this as a
     /// no-op since its connection is the process's lifetime.
     Detach,
+    /// Send a control response to the attached client and keep serving.
+    Reply(ServerMsg),
+}
+
+fn validate_directories(
+    compositor: &compositor::Compositor,
+    candidates: Vec<String>,
+) -> Vec<ValidatedDirectory> {
+    const MAX_CANDIDATES: usize = 512;
+    const MAX_CANDIDATE_BYTES: usize = 4096;
+
+    if compositor.focused_shell_waiting_for_input() != Some(true) {
+        return Vec::new();
+    }
+    let Some(cwd) = compositor.focused_cwd() else {
+        return Vec::new();
+    };
+
+    candidates
+        .into_iter()
+        .take(MAX_CANDIDATES)
+        .filter(|candidate| {
+            !candidate.is_empty()
+                && candidate.len() <= MAX_CANDIDATE_BYTES
+                && !candidate.contains('\0')
+        })
+        .filter_map(|candidate| {
+            let candidate_path = Path::new(&candidate);
+            let path = if candidate_path.is_absolute() {
+                candidate_path.to_path_buf()
+            } else {
+                cwd.join(candidate_path)
+            };
+            if !path.is_dir() {
+                return None;
+            }
+            Some(ValidatedDirectory {
+                candidate,
+                path: path.canonicalize().unwrap_or(path),
+            })
+        })
+        .collect()
 }
 
 /// Apply a client message that both transports handle identically (input,
@@ -166,9 +208,22 @@ fn apply_client_msg(compositor: &mut compositor::Compositor, msg: ClientMsg) -> 
             compositor.force_full_redraw();
         }
         ClientMsg::SetCwd { cwd, .. } => {
-            if compositor.set_focused_cwd(cwd) {
+            if compositor.focused_shell_waiting_for_input() == Some(true)
+                && cwd.is_absolute()
+                && cwd.is_dir()
+                && compositor.set_focused_cwd(cwd)
+            {
                 compositor.force_full_redraw();
             }
+        }
+        ClientMsg::ValidateDirectories {
+            request,
+            candidates,
+        } => {
+            return MsgOutcome::Reply(ServerMsg::ValidatedDirectories {
+                request,
+                directories: validate_directories(compositor, candidates),
+            });
         }
         ClientMsg::SetTitle { name } => {
             compositor.active_tab_mut().rename(name);
@@ -197,6 +252,7 @@ fn forward_pending(
     last_name: &mut String,
     last_cwd: &mut Option<PathBuf>,
     last_input_echo: &mut Option<bool>,
+    last_shell_waiting: &mut Option<bool>,
 ) {
     let name = compositor.active_tab().name.clone();
     let rename = if compositor.active_tab().name_is_explicit && name != *last_name {
@@ -222,6 +278,14 @@ fn forward_pending(
         None
     };
 
+    let shell_waiting = compositor.focused_shell_waiting_for_input();
+    let shell_state = if shell_waiting != *last_shell_waiting {
+        *last_shell_waiting = shell_waiting;
+        shell_waiting.map(shell_state_msg)
+    } else {
+        None
+    };
+
     let Some(out) = out else { return };
     for entry in history_mirror.drain() {
         let _ = codec::write_frame(&mut *out, &ServerMsg::HistoryRecorded { entry });
@@ -233,7 +297,10 @@ fn forward_pending(
         let _ = codec::write_frame(&mut *out, &context);
     }
     if let Some(input_mode) = input_mode {
-        let _ = codec::write_frame(out, &input_mode);
+        let _ = codec::write_frame(&mut *out, &input_mode);
+    }
+    if let Some(shell_state) = shell_state {
+        let _ = codec::write_frame(out, &shell_state);
     }
 }
 
@@ -253,6 +320,13 @@ fn input_mode_msg(echo: bool) -> ServerMsg {
     ServerMsg::InputMode {
         pane: PaneId(0),
         echo,
+    }
+}
+
+fn shell_state_msg(waiting_for_input: bool) -> ServerMsg {
+    ServerMsg::ShellState {
+        pane: PaneId(0),
+        waiting_for_input,
     }
 }
 
@@ -314,6 +388,7 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
     let mut last_name = compositor.active_tab().name.clone();
     let mut last_cwd = compositor.focused_cwd();
     let mut last_input_echo = compositor.focused_input_echo_mode();
+    let mut last_shell_waiting = compositor.focused_shell_waiting_for_input();
 
     // Persist indefinitely while detached by default (the point of a remote
     // session). `SHELL_SESSION_IDLE_EXIT_SECS` bounds that — tests set it so the
@@ -373,6 +448,10 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
                         let _ = codec::write_frame(&mut stream, &input_mode_msg(echo));
                         last_input_echo = Some(echo);
                     }
+                    if let Some(waiting) = compositor.focused_shell_waiting_for_input() {
+                        let _ = codec::write_frame(&mut stream, &shell_state_msg(waiting));
+                        last_shell_waiting = Some(waiting);
+                    }
                     if let Ok(clone) = stream.try_clone() {
                         control = stream.try_clone().ok();
                         sink.lock().unwrap().attach(Box::new(clone));
@@ -405,6 +484,11 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
                             control = None;
                             break;
                         }
+                        MsgOutcome::Reply(msg) => {
+                            if let Some(c) = control.as_mut() {
+                                let _ = codec::write_frame(c, &msg);
+                            }
+                        }
                     },
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -427,6 +511,7 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
             &mut last_name,
             &mut last_cwd,
             &mut last_input_echo,
+            &mut last_shell_waiting,
         );
 
         if should_exit {
@@ -534,6 +619,9 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     if let Some(echo) = compositor.focused_input_echo_mode() {
         codec::write_frame(&mut handshake_out, &input_mode_msg(echo))?;
     }
+    if let Some(waiting) = compositor.focused_shell_waiting_for_input() {
+        codec::write_frame(&mut handshake_out, &shell_state_msg(waiting))?;
+    }
     sink.lock().unwrap().attach(Box::new(dup_file(1)?));
 
     // Reader thread: stdin -> ClientMsg.
@@ -542,6 +630,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     let mut last_name = compositor.active_tab().name.clone();
     let mut last_cwd = compositor.focused_cwd();
     let mut last_input_echo = compositor.focused_input_echo_mode();
+    let mut last_shell_waiting = compositor.focused_shell_waiting_for_input();
 
     loop {
         let mut exit = false;
@@ -552,6 +641,9 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
                 // process's lifetime), so it's treated like any ignored message.
                 Ok(msg) => match apply_client_msg(&mut compositor, msg) {
                     MsgOutcome::Continue | MsgOutcome::Detach => {}
+                    MsgOutcome::Reply(msg) => {
+                        let _ = codec::write_frame(&mut handshake_out, &msg);
+                    }
                     MsgOutcome::Exit => {
                         exit = true;
                         deliberate_exit = true;
@@ -575,6 +667,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
             &mut last_name,
             &mut last_cwd,
             &mut last_input_echo,
+            &mut last_shell_waiting,
         );
 
         if exit {

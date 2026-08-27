@@ -1,9 +1,12 @@
 use pty;
 use regex::Regex;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use unicode_width::UnicodeWidthChar;
+
+use crate::types::Badge;
 
 /// Result of handling CTRL+C on a pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +41,52 @@ pub enum PaneInputResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneEvent {
     RenameWindow(String),
+}
+
+/// Codex's terminal-title spinner frames. A title containing one of these is
+/// an explicit signal that the agent is actively making progress.
+const CODEX_TITLE_SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundProgram {
+    Other,
+    Codex,
+}
+
+impl ForegroundProgram {
+    fn from_command(command: &str) -> Self {
+        let is_codex = Path::new(command)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "codex");
+        if is_codex {
+            Self::Codex
+        } else {
+            Self::Other
+        }
+    }
+}
+
+fn codex_badge_for_title(title: &str) -> Badge {
+    if title.contains("Action Required") {
+        return Badge::AgentNeedsInput;
+    }
+
+    let has_spinner = title
+        .chars()
+        .any(|ch| CODEX_TITLE_SPINNER_FRAMES.contains(&ch));
+    let has_active_status = title
+        .split('|')
+        .map(str::trim)
+        .any(|part| matches!(part, "Starting" | "Thinking" | "Working" | "Waiting"));
+
+    if has_spinner || has_active_status {
+        Badge::AgentWorking
+    } else {
+        // Codex omits its activity item once a turn finishes. At that point it
+        // is ready for (and waiting on) the user's next input.
+        Badge::AgentNeedsInput
+    }
 }
 
 /// State for the `reconnect` session picker: choose a persistent session on a
@@ -80,6 +129,15 @@ static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         r#"[^\x00-\x1f\x7f-\x9f<>"\s{}\^`\\]+"#
     )).unwrap()
 });
+
+/// Broad token matcher for possible directory paths. Filesystem validation is
+/// the authoritative filter, which lets this cover absolute paths, relative
+/// paths (including bare names from `ls`), and dot paths without trying to
+/// encode every valid Unix filename in a regex.
+static DIRECTORY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"[^\x00-\x20\x7f<>\"'`{}|(),;:!?]+"#).unwrap());
+
+const MAX_DIRECTORY_CANDIDATES: usize = 512;
 
 /// Post-process a URL match to handle bracket balancing and trailing delimiter trimming.
 /// This follows Alacritty's approach for better URL extraction.
@@ -162,10 +220,10 @@ pub struct SearchMatch {
     pub end_col: usize,
 }
 
-/// A URL match found in the terminal.
+/// A selectable URL-mode match found in the terminal.
 ///
-/// A URL may span several physical rows when a long line soft-wraps. The match
-/// therefore records both a start and an end line: `(line_index, start_col)` is
+/// A URL or path may span several physical rows when a long line soft-wraps.
+/// The match therefore records both a start and an end line: `(line_index, start_col)` is
 /// the first cell of the URL and `(end_line_index, end_col)` is one past its
 /// last cell. For a URL contained on a single row, `end_line_index == line_index`.
 /// Columns are display columns (cell positions), not byte offsets.
@@ -180,8 +238,11 @@ pub struct UrlMatch {
     pub end_line_index: isize,
     /// Ending column of the match on `end_line_index` (exclusive).
     pub end_col: usize,
-    /// The actual URL text (reassembled across wrapped rows).
+    /// The displayed URL or directory token (reassembled across wrapped rows).
     pub url: String,
+    /// Canonical directory path when this match is a validated directory.
+    /// `None` means this match is a URL.
+    pub directory: Option<PathBuf>,
 }
 
 impl UrlMatch {
@@ -195,6 +256,13 @@ impl UrlMatch {
         let before_end = line_index < self.end_line_index || col < self.end_col;
         after_start && before_end
     }
+}
+
+/// Action associated with the currently selected URL-mode match.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UrlModeAction {
+    OpenUrl(String),
+    ChangeDirectory(PathBuf),
 }
 
 /// Direction for incremental URL search
@@ -228,6 +296,12 @@ pub struct Pane {
     /// Foreground process that has taken over the pane (a local subprocess or a
     /// remote session), or `None` when the local shell is in control.
     pub process: PaneProcess,
+    /// Logical command that owns the local foreground PTY. This is tracked at
+    /// spawn time because inspecting the child PID would usually identify the
+    /// intermediate `bash -c` process instead.
+    foreground_program: Option<ForegroundProgram>,
+    /// Transient state derived from the foreground program's title events.
+    badge: Badge,
     /// Active `reconnect` session picker (if any) - intercepts input while open.
     pub session_picker: Option<SessionPicker>,
     /// Whether we sent SIGINT to the subprocess (to display CTRL+C instead of exit code)
@@ -266,6 +340,11 @@ pub struct Pane {
     pub url_matches: Vec<UrlMatch>,
     /// Index of the currently selected URL (if any)
     pub current_url_index: Option<usize>,
+    /// Remote-validated directory tokens for the current URL-mode session.
+    validated_remote_directories: HashMap<String, PathBuf>,
+    /// Identifies the latest remote validation request so stale replies from a
+    /// previous picker session cannot affect the current one.
+    directory_validation_request: u64,
 
     /// Vim cursor engine for scrollback navigation (persisted across inputs)
     pub vim_engine: libvim::VimCursorEngine<'static>,
@@ -302,6 +381,8 @@ impl Pane {
             terminal_emulator,
             shell,
             process: PaneProcess::None,
+            foreground_program: None,
+            badge: Badge::None,
             session_picker: None,
             sent_sigint: false,
             edit_temp_file: None,
@@ -321,6 +402,8 @@ impl Pane {
             url_mode: false,
             url_matches: Vec::new(),
             current_url_index: None,
+            validated_remote_directories: HashMap::new(),
+            directory_validation_request: 0,
             vim_engine: libvim::VimCursorEngine::new_owned(Vec::new(), height, width),
         }
     }
@@ -418,6 +501,8 @@ impl Pane {
                     self.terminal_emulator.process(&output);
                 }
 
+                let foreground_program = ForegroundProgram::from_command(&command);
+
                 // Build the full command string
                 let full_command = if args.is_empty() {
                     command
@@ -431,15 +516,14 @@ impl Pane {
 
                 self.subprocess_typeahead.clear();
                 self.start_control_session(&mut env);
-                match pty::PtyProcess::spawn_with_env_in(
-                    &full_command,
-                    width,
-                    height,
-                    &env,
-                    &cwd,
-                ) {
+                match pty::PtyProcess::spawn_with_env_in(&full_command, width, height, &env, &cwd) {
                     Ok(proc) => {
                         self.process = PaneProcess::Subprocess(proc);
+                        self.foreground_program = Some(foreground_program);
+                        self.badge = Badge::None;
+                        // Do not let a title emitted by the embedded shell before
+                        // this spawn get attributed to the new foreground app.
+                        self.terminal_emulator.drain_title_events();
                     }
                     Err(e) => {
                         self.stop_control_session();
@@ -489,6 +573,9 @@ impl Pane {
                 ) {
                     Ok(proc) => {
                         self.process = PaneProcess::Subprocess(proc);
+                        self.foreground_program = Some(ForegroundProgram::Other);
+                        self.badge = Badge::None;
+                        self.terminal_emulator.drain_title_events();
                         // Store the temp file path so we can read it when editor exits
                         self.edit_temp_file = Some(temp_file);
                     }
@@ -742,6 +829,7 @@ impl Pane {
                         // Process through terminal emulator. Unknown private
                         // OSCs are consumed without appearing on screen.
                         self.terminal_emulator.process(&self.read_buffer[..n]);
+                        self.apply_terminal_title_events();
                         self.apply_terminal_controls(controls);
 
                         // Handle any responses from the terminal (e.g., cursor position queries)
@@ -786,6 +874,8 @@ impl Pane {
 
                 // Subprocess exited - clean up
                 self.process = PaneProcess::None;
+                self.foreground_program = None;
+                self.badge = Badge::None;
                 self.stop_control_session();
 
                 // Reset cursor visibility - subprocess may have hidden it
@@ -858,6 +948,9 @@ impl Pane {
         let remote =
             crate::remote::RemoteProcess::connect(target, session, width, height, env, cwd)?;
         self.process = PaneProcess::Remote(remote);
+        self.foreground_program = None;
+        self.badge = Badge::None;
+        self.terminal_emulator.drain_title_events();
         Ok(())
     }
 
@@ -883,6 +976,10 @@ impl Pane {
                 Ok(Some(n)) => {
                     self.predicted_remote_input.clear();
                     self.terminal_emulator.process(&self.read_buffer[..n]);
+                    // Remote panes do not currently carry foreground-program
+                    // identity, so discard their title events without letting
+                    // the queue grow indefinitely.
+                    self.terminal_emulator.drain_title_events();
                     let responses = self.terminal_emulator.drain_responses();
                     if !responses.is_empty() {
                         if let PaneProcess::Remote(remote) = &mut self.process {
@@ -899,6 +996,29 @@ impl Pane {
 
         if let Some(name) = self.remote_mut().and_then(|remote| remote.take_title()) {
             self.pending_events.push(PaneEvent::RenameWindow(name));
+        }
+
+        let directory_validations = self
+            .remote_mut()
+            .map(|remote| remote.take_directory_validations())
+            .unwrap_or_default();
+        for (request, directories) in directory_validations {
+            if request != self.directory_validation_request {
+                continue;
+            }
+            self.validated_remote_directories = directories
+                .into_iter()
+                .map(|directory| (directory.candidate, directory.path))
+                .collect();
+            if self.url_mode {
+                self.url_matches.clear();
+                self.current_url_index = None;
+                if let Some(url_match) = self.find_url_from_cursor(SearchDirection::Up) {
+                    self.url_matches.push(url_match);
+                    self.current_url_index = Some(0);
+                    self.jump_to_current_url();
+                }
+            }
         }
 
         // Dual-write: mirror any commands the remote executed into local history,
@@ -922,6 +1042,8 @@ impl Pane {
         // so the original `connect` command gets its exit status recorded.
         if let Some(exit_code) = self.remote_mut().and_then(|r| r.try_wait()) {
             self.process = PaneProcess::None;
+            self.foreground_program = None;
+            self.badge = Badge::None;
             self.terminal_emulator.grid_mut().cursor_visible = true;
             let _ = self.shell.subprocess_exited(exit_code);
             self.close_requested = true;
@@ -962,6 +1084,33 @@ impl Pane {
         !self.shell.should_exit()
     }
 
+    /// Transient status badge reported by this pane's foreground program.
+    pub fn badge(&self) -> Badge {
+        if self.badge != Badge::None {
+            return self.badge;
+        }
+
+        if self.shell_waiting_for_input() {
+            Badge::ShellPrompt
+        } else {
+            Badge::ProgramRunning
+        }
+    }
+
+    fn apply_terminal_title_events(&mut self) {
+        let events = self.terminal_emulator.drain_title_events();
+        if self.foreground_program != Some(ForegroundProgram::Codex) {
+            return;
+        }
+
+        for event in events {
+            self.badge = match event {
+                emulator::TerminalTitleEvent::Set(title) => codex_badge_for_title(&title),
+                emulator::TerminalTitleEvent::Reset => Badge::AgentNeedsInput,
+            };
+        }
+    }
+
     /// The active local subprocess, if one currently owns the pane.
     pub fn subprocess(&self) -> Option<&pty::PtyProcess> {
         match &self.process {
@@ -986,9 +1135,38 @@ impl Pane {
         }
     }
 
+    /// Whether the authoritative shell is sitting at its editable prompt rather
+    /// than running a foreground child process.
+    pub fn shell_waiting_for_input(&self) -> bool {
+        match &self.process {
+            PaneProcess::None => self.session_picker.is_none(),
+            PaneProcess::Subprocess(_) => false,
+            PaneProcess::Remote(remote) => remote.shell_waiting_for_input(),
+        }
+    }
+
     /// Set the pane shell's current working directory without echoing a command.
     pub fn set_cwd(&mut self, cwd: std::path::PathBuf) {
         self.shell.set_cwd(cwd);
+        if matches!(self.process, PaneProcess::None) {
+            let redraw = self.shell.redraw_prompt_and_input();
+            self.terminal_emulator.process(&redraw);
+        }
+    }
+
+    /// Change the directory of whichever shell currently owns this pane.
+    pub fn change_directory(&mut self, cwd: PathBuf) -> bool {
+        if !cwd.is_absolute() || !self.shell_waiting_for_input() {
+            return false;
+        }
+        if let Some(remote) = self.remote_mut() {
+            return remote.set_cwd(cwd).is_ok();
+        }
+        if !cwd.is_dir() {
+            return false;
+        }
+        self.set_cwd(cwd.canonicalize().unwrap_or(cwd));
+        true
     }
 
     /// Cwd that belongs to the process currently owning this pane. A remote
@@ -1210,6 +1388,7 @@ impl Pane {
         self.url_mode = false;
         self.url_matches.clear();
         self.current_url_index = None;
+        self.validated_remote_directories.clear();
         // Reset vim state
         self.vim_engine.mode = libvim::Mode::Normal;
         self.vim_engine.input_state = libvim::InputState::default();
@@ -1789,6 +1968,17 @@ impl Pane {
             self.url_mode = true;
             self.url_matches.clear();
             self.current_url_index = None;
+            self.validated_remote_directories.clear();
+
+            if self.remote().is_some() && self.shell_waiting_for_input() {
+                let candidates = self.directory_candidate_strings();
+                self.directory_validation_request =
+                    self.directory_validation_request.wrapping_add(1);
+                let request = self.directory_validation_request;
+                if let Some(remote) = self.remote_mut() {
+                    let _ = remote.validate_directories(request, candidates);
+                }
+            }
 
             // Find the first URL starting from the current cursor position, searching upward (older)
             // This is typically what users want - find a URL they just saw
@@ -1805,6 +1995,7 @@ impl Pane {
         self.url_mode = false;
         self.url_matches.clear();
         self.current_url_index = None;
+        self.validated_remote_directories.clear();
     }
 
     /// Check if in URL mode
@@ -1912,6 +2103,91 @@ impl Pane {
         (text, map)
     }
 
+    /// Path-like tokens in a logical line, with character offsets into its
+    /// reassembled text. The regex is intentionally permissive; only tokens
+    /// that resolve to real directories become picker matches.
+    fn raw_directory_candidates(&self, start: usize) -> Vec<(usize, String)> {
+        let (text, _) = self.build_logical_line(start);
+        DIRECTORY_REGEX
+            .find_iter(&text)
+            .filter_map(|mat| {
+                let candidate = mat.as_str();
+                if candidate.is_empty() {
+                    return None;
+                }
+                Some((text[..mat.start()].chars().count(), candidate.to_string()))
+            })
+            .collect()
+    }
+
+    fn resolve_directory_candidate(&self, candidate: &str) -> Option<PathBuf> {
+        if !self.shell_waiting_for_input() {
+            return None;
+        }
+        if self.remote().is_some() {
+            return self.validated_remote_directories.get(candidate).cloned();
+        }
+
+        let candidate_path = Path::new(candidate);
+        let path = if candidate_path.is_absolute() {
+            candidate_path.to_path_buf()
+        } else {
+            self.authoritative_cwd().join(candidate_path)
+        };
+        if !path.is_dir() {
+            return None;
+        }
+        Some(path.canonicalize().unwrap_or(path))
+    }
+
+    fn directories_in_logical_line(&self, start: usize) -> Vec<(usize, UrlMatch)> {
+        let (_, map) = self.build_logical_line(start);
+        self.raw_directory_candidates(start)
+            .into_iter()
+            .filter_map(|(char_start, candidate)| {
+                let path = self.resolve_directory_candidate(&candidate)?;
+                let char_len = candidate.chars().count();
+                let char_end = char_start + char_len;
+                if char_start >= map.len() || char_end == 0 || char_end > map.len() {
+                    return None;
+                }
+                let (start_abs, start_col) = map[char_start];
+                let (end_abs, end_col_cell) = map[char_end - 1];
+                Some((
+                    char_start,
+                    UrlMatch {
+                        line_index: self.abs_line_to_line_index(start_abs),
+                        start_col,
+                        end_line_index: self.abs_line_to_line_index(end_abs),
+                        end_col: end_col_cell + 1,
+                        url: candidate,
+                        directory: Some(path),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Unique directory tokens to validate on a connected pane's host.
+    fn directory_candidate_strings(&self) -> Vec<String> {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        let mut next_end = self.total_url_lines();
+        while next_end > 0 && candidates.len() < MAX_DIRECTORY_CANDIDATES {
+            let start = self.logical_line_start(next_end - 1);
+            for (_, candidate) in self.raw_directory_candidates(start) {
+                if seen.insert(candidate.clone()) {
+                    candidates.push(candidate);
+                    if candidates.len() == MAX_DIRECTORY_CANDIDATES {
+                        break;
+                    }
+                }
+            }
+            next_end = start;
+        }
+        candidates
+    }
+
     /// All URLs in the logical line beginning at `start`, in left-to-right
     /// order. Each entry is `(char_offset_in_logical_line, url_match)`.
     fn urls_in_logical_line(&self, start: usize) -> Vec<(usize, UrlMatch)> {
@@ -1938,10 +2214,32 @@ impl Pane {
                     end_line_index: self.abs_line_to_line_index(end_abs),
                     end_col: end_col_cell + 1,
                     url: processed.to_string(),
+                    directory: None,
                 },
             ));
         }
         out
+    }
+
+    /// URLs and validated directories in a logical line, ordered from left to
+    /// right. Directory-looking substrings inside URLs are discarded.
+    fn selectable_matches_in_logical_line(&self, start: usize) -> Vec<(usize, UrlMatch)> {
+        let mut matches = self.urls_in_logical_line(start);
+        let url_ranges: Vec<(usize, usize)> = matches
+            .iter()
+            .map(|(offset, url_match)| (*offset, *offset + url_match.url.chars().count()))
+            .collect();
+
+        matches.extend(self.directories_in_logical_line(start).into_iter().filter(
+            |(offset, directory_match)| {
+                let end = *offset + directory_match.url.chars().count();
+                !url_ranges
+                    .iter()
+                    .any(|(url_start, url_end)| *offset < *url_end && end > *url_start)
+            },
+        ));
+        matches.sort_by_key(|(offset, _)| *offset);
+        matches
     }
 
     /// Character offset of `(abs_line, col)` within the logical line that begins
@@ -1959,7 +2257,11 @@ impl Pane {
         let mut s = start;
         while s > 0 {
             let prev_start = self.logical_line_start(s - 1);
-            if let Some((_, um)) = self.urls_in_logical_line(prev_start).into_iter().last() {
+            if let Some((_, um)) = self
+                .selectable_matches_in_logical_line(prev_start)
+                .into_iter()
+                .last()
+            {
                 return Some(um);
             }
             if prev_start == 0 {
@@ -1980,7 +2282,11 @@ impl Pane {
             if next >= total {
                 return None;
             }
-            if let Some((_, um)) = self.urls_in_logical_line(next).into_iter().next() {
+            if let Some((_, um)) = self
+                .selectable_matches_in_logical_line(next)
+                .into_iter()
+                .next()
+            {
                 return Some(um);
             }
             s = next;
@@ -2003,7 +2309,7 @@ impl Pane {
             SearchDirection::Up => {
                 // Closest URL on the current logical line that starts before the cursor.
                 if let Some((_, um)) = self
-                    .urls_in_logical_line(cur_start)
+                    .selectable_matches_in_logical_line(cur_start)
                     .into_iter()
                     .rev()
                     .find(|(off, _)| *off < cursor_offset)
@@ -2015,7 +2321,7 @@ impl Pane {
             SearchDirection::Down => {
                 // Closest URL on the current logical line at or after the cursor.
                 if let Some((_, um)) = self
-                    .urls_in_logical_line(cur_start)
+                    .selectable_matches_in_logical_line(cur_start)
                     .into_iter()
                     .find(|(off, _)| *off >= cursor_offset)
                 {
@@ -2038,7 +2344,7 @@ impl Pane {
                 let cur_off =
                     self.cursor_offset_in_logical(cur_start, start_abs, current_url.start_col);
                 if let Some((_, um)) = self
-                    .urls_in_logical_line(cur_start)
+                    .selectable_matches_in_logical_line(cur_start)
                     .into_iter()
                     .rev()
                     .find(|(off, _)| *off < cur_off)
@@ -2052,7 +2358,7 @@ impl Pane {
                 let cur_end_off =
                     self.cursor_offset_in_logical(cur_start, end_abs, current_url.end_col);
                 if let Some((_, um)) = self
-                    .urls_in_logical_line(cur_start)
+                    .selectable_matches_in_logical_line(cur_start)
                     .into_iter()
                     .find(|(off, _)| *off >= cur_end_off)
                 {
@@ -2138,7 +2444,26 @@ impl Pane {
     pub fn get_current_url(&self) -> Option<&str> {
         self.current_url_index
             .and_then(|idx| self.url_matches.get(idx))
+            .filter(|m| m.directory.is_none())
             .map(|m| m.url.as_str())
+    }
+
+    /// Text displayed for the current URL-mode match (URL or directory token).
+    pub fn get_current_url_text(&self) -> Option<&str> {
+        self.current_url_index
+            .and_then(|idx| self.url_matches.get(idx))
+            .map(|m| m.url.as_str())
+    }
+
+    /// Action performed by Enter for the current URL-mode match.
+    pub fn get_current_url_action(&self) -> Option<UrlModeAction> {
+        let current = self
+            .current_url_index
+            .and_then(|idx| self.url_matches.get(idx))?;
+        Some(match &current.directory {
+            Some(path) => UrlModeAction::ChangeDirectory(path.clone()),
+            None => UrlModeAction::OpenUrl(current.url.clone()),
+        })
     }
 
     /// Get URL info for status bar (current index, total count)
@@ -2161,6 +2486,68 @@ impl Pane {
 mod tests {
     use super::*;
 
+    #[test]
+    fn foreground_program_recognizes_codex_executable_names() {
+        assert_eq!(
+            ForegroundProgram::from_command("codex"),
+            ForegroundProgram::Codex
+        );
+        assert_eq!(
+            ForegroundProgram::from_command("/home/user/.local/bin/codex"),
+            ForegroundProgram::Codex
+        );
+        assert_eq!(
+            ForegroundProgram::from_command("codex-cli"),
+            ForegroundProgram::Other
+        );
+        assert_eq!(
+            ForegroundProgram::from_command("env"),
+            ForegroundProgram::Other
+        );
+    }
+
+    #[test]
+    fn codex_terminal_titles_update_the_badge() {
+        let mut pane = isolated_pane(80, 24);
+        pane.foreground_program = Some(ForegroundProgram::Codex);
+
+        pane.terminal_emulator
+            .process("\x1b]0;⠋ | project\x07".as_bytes());
+        pane.apply_terminal_title_events();
+        assert_eq!(pane.badge(), Badge::AgentWorking);
+
+        pane.terminal_emulator
+            .process(b"\x1b]0;[ . ] Action Required | project\x07");
+        pane.apply_terminal_title_events();
+        assert_eq!(pane.badge(), Badge::AgentNeedsInput);
+
+        pane.terminal_emulator.process(b"\x1b]0;project\x07");
+        pane.apply_terminal_title_events();
+        assert_eq!(pane.badge(), Badge::AgentNeedsInput);
+    }
+
+    #[test]
+    fn non_codex_titles_do_not_set_a_badge() {
+        let mut pane = isolated_pane(80, 24);
+        pane.foreground_program = Some(ForegroundProgram::Other);
+        pane.terminal_emulator
+            .process("\x1b]0;⠋ | project\x07".as_bytes());
+
+        pane.apply_terminal_title_events();
+
+        assert_eq!(pane.badge, Badge::None);
+        assert_eq!(pane.badge(), Badge::ShellPrompt);
+    }
+
+    #[test]
+    fn pane_badge_distinguishes_shell_prompt_and_program() {
+        let mut pane = isolated_pane(80, 24);
+        assert_eq!(pane.badge(), Badge::ShellPrompt);
+
+        pane.process = PaneProcess::Subprocess(pty::PtyProcess::spawn("true", 80, 24).unwrap());
+        assert_eq!(pane.badge(), Badge::ProgramRunning);
+    }
+
     /// Build a pane over a throwaway history file so tests never read or write
     /// the developer's real `~/.myshell_history.log`. Sets `SHELL_HISTORY_PATH`
     /// so any pane built via the default constructor is isolated too.
@@ -2169,6 +2556,12 @@ mod tests {
             std::env::temp_dir().join(format!("shell_test_hist_{}.log", std::process::id()));
         std::env::set_var("SHELL_HISTORY_PATH", &path);
         Pane::new(width, height)
+    }
+
+    fn isolated_pane_in(width: usize, height: usize, cwd: PathBuf) -> Pane {
+        let path = std::env::temp_dir().join(format!("shell_test_hist_{}.log", std::process::id()));
+        std::env::set_var("SHELL_HISTORY_PATH", &path);
+        Pane::new_in(width, height, cwd)
     }
 
     // ------------------------------------------------------------------
@@ -2370,6 +2763,101 @@ mod tests {
         pane.handle_vim_input(b"kkk$vb");
 
         assert_eq!(pane.get_selected_text().as_deref(), Some("finalword"));
+    }
+
+    #[test]
+    fn test_url_mode_selects_only_existing_directories() {
+        let cwd = tempfile::tempdir().unwrap();
+        let relative = cwd.path().join("relative-dir");
+        let absolute = cwd.path().join("absolute-dir");
+        let file = cwd.path().join("regular.txt");
+        std::fs::create_dir(&relative).unwrap();
+        std::fs::create_dir(&absolute).unwrap();
+        std::fs::write(&file, b"not a directory").unwrap();
+
+        let mut pane = isolated_pane_in(256, 5, cwd.path().to_path_buf());
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator.process(
+            format!(
+                "relative-dir {} regular.txt {} missing-dir https://example.com",
+                absolute.display(),
+                file.display()
+            )
+            .as_bytes(),
+        );
+
+        let top_grid_abs = pane.terminal_emulator.grid().scrollback_len();
+        let matches = pane.selectable_matches_in_logical_line(top_grid_abs);
+
+        let directories: Vec<_> = matches
+            .iter()
+            .filter_map(|(_, candidate)| {
+                candidate
+                    .directory
+                    .as_ref()
+                    .map(|path| (candidate.url.as_str(), path.as_path()))
+            })
+            .collect();
+        assert!(directories.contains(&("relative-dir", relative.canonicalize().unwrap().as_path())));
+        assert!(directories.contains(&(
+            absolute.to_str().unwrap(),
+            absolute.canonicalize().unwrap().as_path()
+        )));
+        assert!(!matches.iter().any(|(_, candidate)| {
+            candidate.url == "regular.txt"
+                || candidate.url == file.to_string_lossy().as_ref()
+                || candidate.url == "missing-dir"
+        }));
+        assert!(matches.iter().any(|(_, candidate)| {
+            candidate.url == "https://example.com" && candidate.directory.is_none()
+        }));
+    }
+
+    #[test]
+    fn test_url_mode_directory_action_changes_relative_to_pane_cwd() {
+        let cwd = tempfile::tempdir().unwrap();
+        let target = cwd.path().join("target-dir");
+        std::fs::create_dir(&target).unwrap();
+        let mut pane = isolated_pane_in(80, 5, cwd.path().to_path_buf());
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator.process(b"target-dir");
+
+        pane.enter_scrollback_mode();
+        pane.enter_url_mode();
+
+        let action = pane.get_current_url_action();
+        assert_eq!(
+            action,
+            Some(UrlModeAction::ChangeDirectory(
+                target.canonicalize().unwrap()
+            ))
+        );
+        let UrlModeAction::ChangeDirectory(path) = action.unwrap() else {
+            unreachable!()
+        };
+        assert!(pane.change_directory(path));
+        assert_eq!(pane.authoritative_cwd(), target.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_url_mode_ignores_directories_while_child_is_running() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir(cwd.path().join("target-dir")).unwrap();
+        let mut pane = isolated_pane_in(80, 5, cwd.path().to_path_buf());
+        pane.terminal_emulator.process(b"\x1b[2J\x1b[H");
+        pane.terminal_emulator
+            .process(b"target-dir https://example.com");
+        pane.process = PaneProcess::Subprocess(pty::PtyProcess::spawn("sleep 5", 80, 5).unwrap());
+
+        let top_grid_abs = pane.terminal_emulator.grid().scrollback_len();
+        let matches = pane.selectable_matches_in_logical_line(top_grid_abs);
+
+        assert!(!matches
+            .iter()
+            .any(|(_, candidate)| candidate.directory.is_some()));
+        assert!(matches.iter().any(|(_, candidate)| {
+            candidate.url == "https://example.com" && candidate.directory.is_none()
+        }));
     }
 
     /// BUG A (reported): When a URL is long enough to wrap onto a second
