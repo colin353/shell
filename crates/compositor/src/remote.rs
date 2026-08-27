@@ -21,6 +21,8 @@ use protocol::{
     ClientMode, ClientMsg, Hello, HistoryRecord, ServerMsg, ValidatedDirectory, PROTOCOL_VERSION,
 };
 
+use crate::types::Badge;
+
 const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
@@ -44,6 +46,8 @@ pub struct RemoteProcess {
     input_echo: bool,
     /// Whether the remote shell is waiting at its prompt rather than running a child.
     shell_waiting_for_input: bool,
+    /// Latest authoritative badge published by the remote daemon.
+    badge: Badge,
 
     // --- Reconnect parameters (the session is identified by `session_id`). ---
     target: String,
@@ -92,6 +96,7 @@ impl RemoteProcess {
             pending_directory_validations: Vec::new(),
             input_echo: false,
             shell_waiting_for_input: false,
+            badge: Badge::None,
             target: target.to_string(),
             session_id,
             cols,
@@ -154,6 +159,7 @@ impl RemoteProcess {
                         ServerMsg::ShellState {
                             waiting_for_input, ..
                         } => self.shell_waiting_for_input = waiting_for_input,
+                        ServerMsg::PaneBadge { badge, .. } => self.badge = badge.into(),
                         ServerMsg::RenameWindow { name } => self.pending_title = Some(name),
                         ServerMsg::HistoryRecorded { entry } => self.pending_history.push(entry),
                         ServerMsg::SessionEnded => self.ended = true,
@@ -320,6 +326,10 @@ impl RemoteProcess {
 
     pub fn shell_waiting_for_input(&self) -> bool {
         self.shell_waiting_for_input
+    }
+
+    pub fn badge(&self) -> Badge {
+        self.badge
     }
 
     /// Exit code if the session ended deliberately. Returns `None` while a

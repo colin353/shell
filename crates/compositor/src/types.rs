@@ -59,6 +59,30 @@ impl Badge {
     }
 }
 
+impl From<Badge> for protocol::PaneBadge {
+    fn from(badge: Badge) -> Self {
+        match badge {
+            Badge::None => Self::None,
+            Badge::ShellPrompt => Self::ShellPrompt,
+            Badge::ProgramRunning => Self::ProgramRunning,
+            Badge::AgentWorking => Self::AgentWorking,
+            Badge::AgentNeedsInput => Self::AgentNeedsInput,
+        }
+    }
+}
+
+impl From<protocol::PaneBadge> for Badge {
+    fn from(badge: protocol::PaneBadge) -> Self {
+        match badge {
+            protocol::PaneBadge::None => Self::None,
+            protocol::PaneBadge::ShellPrompt => Self::ShellPrompt,
+            protocol::PaneBadge::ProgramRunning => Self::ProgramRunning,
+            protocol::PaneBadge::AgentWorking => Self::AgentWorking,
+            protocol::PaneBadge::AgentNeedsInput => Self::AgentNeedsInput,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Badge;
@@ -82,5 +106,18 @@ mod tests {
         assert!(Badge::ShellPrompt < Badge::ProgramRunning);
         assert!(Badge::ProgramRunning < Badge::AgentWorking);
         assert!(Badge::AgentWorking < Badge::AgentNeedsInput);
+    }
+
+    #[test]
+    fn protocol_badges_round_trip() {
+        for badge in [
+            Badge::None,
+            Badge::ShellPrompt,
+            Badge::ProgramRunning,
+            Badge::AgentWorking,
+            Badge::AgentNeedsInput,
+        ] {
+            assert_eq!(Badge::from(protocol::PaneBadge::from(badge)), badge);
+        }
     }
 }

@@ -1084,8 +1084,14 @@ impl Pane {
         !self.shell.should_exit()
     }
 
-    /// Transient status badge reported by this pane's foreground program.
+    /// Status badge reported by this pane's local foreground program or remote.
     pub fn badge(&self) -> Badge {
+        if let Some(badge) = self.remote().map(|remote| remote.badge()) {
+            if badge != Badge::None {
+                return badge;
+            }
+        }
+
         if self.badge != Badge::None {
             return self.badge;
         }

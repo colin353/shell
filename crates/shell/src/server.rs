@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use protocol::codec::{self};
 use protocol::{
-    ClientMsg, ContextSnapshot, Hello, HostId, Origin, PaneId, ServerMsg, SessionId,
+    ClientMsg, ContextSnapshot, Hello, HostId, Origin, PaneBadge, PaneId, ServerMsg, SessionId,
     ValidatedDirectory, Welcome, PROTOCOL_VERSION,
 };
 
@@ -239,10 +239,10 @@ fn apply_client_msg(compositor: &mut compositor::Compositor, msg: ClientMsg) -> 
 }
 
 /// Forward per-iteration control-channel traffic to the attached client:
-/// mirrored history entries (for local dual-write) and a window rename.
+/// mirrored history entries and authoritative remote-pane state.
 ///
-/// Explicit titles are also sent as part of every attach handshake, so a
-/// rename that happens while detached is restored together with the screen.
+/// Explicit titles and badge state are also sent as part of every attach
+/// handshake, so changes while detached are restored together with the screen.
 /// With no client (`out` is `None`) history mirror entries accumulate (capped)
 /// until one reattaches.
 fn forward_pending(
@@ -253,6 +253,7 @@ fn forward_pending(
     last_cwd: &mut Option<PathBuf>,
     last_input_echo: &mut Option<bool>,
     last_shell_waiting: &mut Option<bool>,
+    last_badge: &mut PaneBadge,
 ) {
     let name = compositor.active_tab().name.clone();
     let rename = if compositor.active_tab().name_is_explicit && name != *last_name {
@@ -286,6 +287,14 @@ fn forward_pending(
         None
     };
 
+    let badge = PaneBadge::from(compositor.active_tab().badge());
+    let badge_state = if badge != *last_badge {
+        *last_badge = badge;
+        Some(badge_msg(badge))
+    } else {
+        None
+    };
+
     let Some(out) = out else { return };
     for entry in history_mirror.drain() {
         let _ = codec::write_frame(&mut *out, &ServerMsg::HistoryRecorded { entry });
@@ -300,7 +309,10 @@ fn forward_pending(
         let _ = codec::write_frame(&mut *out, &input_mode);
     }
     if let Some(shell_state) = shell_state {
-        let _ = codec::write_frame(out, &shell_state);
+        let _ = codec::write_frame(&mut *out, &shell_state);
+    }
+    if let Some(badge_state) = badge_state {
+        let _ = codec::write_frame(out, &badge_state);
     }
 }
 
@@ -327,6 +339,13 @@ fn shell_state_msg(waiting_for_input: bool) -> ServerMsg {
     ServerMsg::ShellState {
         pane: PaneId(0),
         waiting_for_input,
+    }
+}
+
+fn badge_msg(badge: PaneBadge) -> ServerMsg {
+    ServerMsg::PaneBadge {
+        pane: PaneId(0),
+        badge,
     }
 }
 
@@ -389,6 +408,7 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
     let mut last_cwd = compositor.focused_cwd();
     let mut last_input_echo = compositor.focused_input_echo_mode();
     let mut last_shell_waiting = compositor.focused_shell_waiting_for_input();
+    let mut last_badge = PaneBadge::from(compositor.active_tab().badge());
 
     // Persist indefinitely while detached by default (the point of a remote
     // session). `SHELL_SESSION_IDLE_EXIT_SECS` bounds that — tests set it so the
@@ -452,6 +472,9 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
                         let _ = codec::write_frame(&mut stream, &shell_state_msg(waiting));
                         last_shell_waiting = Some(waiting);
                     }
+                    let badge = PaneBadge::from(compositor.active_tab().badge());
+                    let _ = codec::write_frame(&mut stream, &badge_msg(badge));
+                    last_badge = badge;
                     if let Ok(clone) = stream.try_clone() {
                         control = stream.try_clone().ok();
                         sink.lock().unwrap().attach(Box::new(clone));
@@ -512,6 +535,7 @@ pub fn run(socket_path: &Path, bare: bool, initial_command: Option<&str>) -> io:
             &mut last_cwd,
             &mut last_input_echo,
             &mut last_shell_waiting,
+            &mut last_badge,
         );
 
         if should_exit {
@@ -622,6 +646,8 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     if let Some(waiting) = compositor.focused_shell_waiting_for_input() {
         codec::write_frame(&mut handshake_out, &shell_state_msg(waiting))?;
     }
+    let badge = PaneBadge::from(compositor.active_tab().badge());
+    codec::write_frame(&mut handshake_out, &badge_msg(badge))?;
     sink.lock().unwrap().attach(Box::new(dup_file(1)?));
 
     // Reader thread: stdin -> ClientMsg.
@@ -631,6 +657,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
     let mut last_cwd = compositor.focused_cwd();
     let mut last_input_echo = compositor.focused_input_echo_mode();
     let mut last_shell_waiting = compositor.focused_shell_waiting_for_input();
+    let mut last_badge = badge;
 
     loop {
         let mut exit = false;
@@ -668,6 +695,7 @@ pub fn run_stdio(bare: bool) -> io::Result<()> {
             &mut last_cwd,
             &mut last_input_echo,
             &mut last_shell_waiting,
+            &mut last_badge,
         );
 
         if exit {

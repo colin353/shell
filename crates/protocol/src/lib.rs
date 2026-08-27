@@ -30,7 +30,7 @@ pub mod terminal_control;
 /// Bumped whenever [`ClientMsg`]/[`ServerMsg`] change incompatibly. The
 /// handshake compares versions and reports [`RemoteStatus::VersionMismatch`]
 /// when a remote daemon binary is stale.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // IDs
@@ -234,6 +234,12 @@ pub enum ServerMsg {
         pane: PaneId,
         waiting_for_input: bool,
     },
+    /// The authoritative status badge for the remote pane/tab. Unlike terminal
+    /// title escape sequences, this survives bare rendering and reconnects.
+    PaneBadge {
+        pane: PaneId,
+        badge: PaneBadge,
+    },
     Completions {
         req: RequestId,
         items: Vec<CompletionItem>,
@@ -284,6 +290,18 @@ pub enum RemoteStatus {
     Connected,
     Disconnected,
     VersionMismatch,
+}
+
+/// Status shown beside a tab title. This mirrors the compositor's small badge
+/// enum without making the leaf protocol crate depend on the compositor.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PaneBadge {
+    #[default]
+    None,
+    ShellPrompt,
+    ProgramRunning,
+    AgentWorking,
+    AgentNeedsInput,
 }
 
 // ---------------------------------------------------------------------------
